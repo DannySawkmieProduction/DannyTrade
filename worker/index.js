@@ -51,6 +51,100 @@ export default {
   }
 };
 
+/* ---------------------------------------------------------------
+   Model discovery — instead of trusting any single hardcoded model
+   string (which breaks the moment Google deprecates it), ask the
+   Generative Language API what currently exists and pick a
+   supported, vision-capable Gemini model from that live list.
+
+   ListModels doesn't expose an explicit "accepts image input" flag,
+   so "vision-capable general model" is approximated by: it's a
+   Gemini-family chat/reasoning model that lists generateContent as
+   a supported method, and it isn't one of the specialized families
+   that either don't take arbitrary file input (embeddings, TTS) or
+   are image-OUTPUT generators with a different response shape
+   ("-image" models, Imagen). All current Gemini "flash"/"pro" chat
+   models accept images, PDFs, etc. as input alongside text.
+
+   Cached per Worker isolate for a few hours so normal traffic
+   doesn't pay a ListModels round trip on every request; an explicit
+   env.GEMINI_MODEL still overrides discovery entirely if you ever
+   want to pin one.
+--------------------------------------------------------------- */
+let modelCache = { model: null, fetchedAt: 0 };
+const MODEL_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+const EXCLUDE_MODEL_PATTERN = /embedding|aqa|tts|imagen|-image|gemma|veo|learnlm|robotics/i;
+// Preference order among valid candidates: fast general models first,
+// then their lite variants, then pro-tier models, then anything else
+// left in the list. This is a ranking over whatever Google returns
+// today — not a hardcoded model name — so it keeps working as the
+// lineup changes.
+const MODEL_PREFERENCE = [
+  /^models\/gemini-[\d.]+-flash$/i,
+  /^models\/gemini-[\d.]+-flash-lite$/i,
+  /^models\/gemini-[\d.]+-pro$/i,
+  /^models\/gemini-.*flash/i,
+  /^models\/gemini-.*pro/i
+];
+
+async function resolveModel(env) {
+  if (env.GEMINI_MODEL) return env.GEMINI_MODEL; // manual pin always wins
+
+  const now = Date.now();
+  if (modelCache.model && (now - modelCache.fetchedAt) < MODEL_CACHE_TTL_MS) {
+    return modelCache.model;
+  }
+
+  const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${env.GEMINI_API_KEY}`;
+  let res;
+  try {
+    res = await fetch(listUrl);
+  } catch {
+    if (modelCache.model) return modelCache.model; // serve stale pick over a hard failure
+    throw new Error('Could not reach the Gemini API to list available models.');
+  }
+
+  if (!res.ok) {
+    if (modelCache.model) return modelCache.model;
+    const errText = await safeText(res);
+    throw new Error(`Gemini ListModels error (${res.status}): ${errText.slice(0, 300)}`);
+  }
+
+  let json;
+  try {
+    json = await res.json();
+  } catch {
+    if (modelCache.model) return modelCache.model;
+    throw new Error('Gemini ListModels returned an unreadable response.');
+  }
+
+  const models = Array.isArray(json.models) ? json.models : [];
+  const candidates = models.filter(m =>
+    m && typeof m.name === 'string' &&
+    /^models\/gemini-/i.test(m.name) &&
+    !EXCLUDE_MODEL_PATTERN.test(m.name) &&
+    Array.isArray(m.supportedGenerationMethods) &&
+    m.supportedGenerationMethods.includes('generateContent')
+  );
+
+  if (candidates.length === 0) {
+    if (modelCache.model) return modelCache.model;
+    throw new Error('No supported Gemini model was found via ListModels.');
+  }
+
+  let chosen = null;
+  for (const pattern of MODEL_PREFERENCE) {
+    chosen = candidates.find(m => pattern.test(m.name));
+    if (chosen) break;
+  }
+  if (!chosen) chosen = candidates[0];
+
+  const modelId = chosen.name.replace(/^models\//, '');
+  modelCache = { model: modelId, fetchedAt: now };
+  return modelId;
+}
+
 async function handleAnalyze(request, env) {
   if (!env.GEMINI_API_KEY) {
     return jsonResponse({
@@ -78,7 +172,12 @@ async function handleAnalyze(request, env) {
     return jsonResponse({ ok: false, error: err.message || 'Failed to build request.' }, 400);
   }
 
-  const model = env.GEMINI_MODEL || 'gemini-3.6-flash';
+  let model;
+  try {
+    model = await resolveModel(env);
+  } catch (err) {
+    return jsonResponse({ ok: false, error: err.message || 'Could not determine a supported Gemini model.' }, 502);
+  }
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
 
   let geminiRes;
