@@ -149,6 +149,88 @@
   };
 
   /* ---------------------------------------------------------------
+     Image normalization — studio.js's local previews are built with
+     URL.createObjectURL(), so entry.previewUrl (and therefore
+     payload.imageDataUrl / payload.previewDataUrl) is a blob: URL,
+     not a base64 data URL. The Worker can only forward a real
+     "data:<mime>;base64,<data>" string to Gemini's inlineData field,
+     so every image-bearing payload gets normalized here, at the
+     network boundary, before it's ever sent. Handles:
+       - an existing data: URL (passed through unchanged)
+       - a blob: URL (re-fetched in-browser and re-encoded)
+       - a File or Blob object
+       - a raw ArrayBuffer / typed array
+       - a bare base64 string with no "data:" prefix
+  --------------------------------------------------------------- */
+  const IMAGE_MIME_BY_EXT = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp'
+  };
+
+  function guessImageMimeType(fileName) {
+    const ext = String(fileName || '').split('.').pop().toLowerCase();
+    return IMAGE_MIME_BY_EXT[ext] || 'image/png';
+  }
+
+  function blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Could not read image data from the file.'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function arrayBufferToDataURL(buffer, mimeType) {
+    const bytes = ArrayBuffer.isView(buffer) ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) : new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000; // avoid call-stack overflow on large images
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return `data:${mimeType};base64,${btoa(binary)}`;
+  }
+
+  async function toDataURL(value, fileNameHint) {
+    if (value === null || value === undefined) return value;
+
+    if (typeof value === 'string') {
+      if (value.startsWith('data:')) return value; // already correct
+      if (value.startsWith('blob:')) {
+        const res = await fetch(value);
+        const blob = await res.blob();
+        return blobToDataURL(blob);
+      }
+      // No recognizable prefix: treat as a bare base64 string.
+      return `data:${guessImageMimeType(fileNameHint)};base64,${value.replace(/\s/g, '')}`;
+    }
+
+    if (typeof Blob !== 'undefined' && value instanceof Blob) {
+      return blobToDataURL(value); // covers File too, since File extends Blob
+    }
+
+    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+      return arrayBufferToDataURL(value, guessImageMimeType(fileNameHint));
+    }
+
+    throw new Error('Image payload is not a Data URL, blob URL, File, Blob, ArrayBuffer, or base64 string.');
+  }
+
+  async function normalizeImagePayload(type, payload) {
+    if (!payload || typeof payload !== 'object') return payload;
+    const out = { ...payload };
+    if (type === 'chartImage' && out.imageDataUrl !== undefined) {
+      out.imageDataUrl = await toDataURL(out.imageDataUrl, out.fileName);
+    }
+    if (type === 'pdf' && out.previewDataUrl !== undefined && out.previewDataUrl !== null) {
+      out.previewDataUrl = await toDataURL(out.previewDataUrl, out.fileName);
+    }
+    return out;
+  }
+
+  /* ---------------------------------------------------------------
      Live provider — talks to the Cloudflare Worker at /api/analyze,
      which holds GEMINI_API_KEY server-side and calls Gemini. This is
      the only provider DannyTrade ships; it implements every method
@@ -159,12 +241,19 @@
     endpoint = endpoint || '/api/analyze';
 
     async function call(type, payload) {
+      let normalizedPayload;
+      try {
+        normalizedPayload = await normalizeImagePayload(type, payload);
+      } catch (err) {
+        throw new Error((err && err.message) || 'Could not prepare the file for upload.');
+      }
+
       let res;
       try {
         res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type, payload })
+          body: JSON.stringify({ type, payload: normalizedPayload })
         });
       } catch (err) {
         throw new Error('Could not reach the AI provider Worker.');
