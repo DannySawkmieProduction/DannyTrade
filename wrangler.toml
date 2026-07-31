@@ -12,4 +12,4 @@ binding = "ASSETS"
 # GEMINI_API_KEY is already stored as a secret (wrangler secret put
 # GEMINI_API_KEY) — do not add it here.
 [vars]
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
