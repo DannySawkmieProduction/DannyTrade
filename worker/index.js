@@ -236,9 +236,33 @@ const ANALYSIS_RESPONSE_SCHEMA = {
 --------------------------------------------------------------- */
 
 function inlineImagePart(dataUrl) {
-  const match = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl || '');
-  if (!match) throw new Error('Image payload is not a valid base64 data URL.');
-  return { inlineData: { mimeType: match[1], data: match[2] } };
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error(
+      'Image payload is not a valid base64 data URL. Expected "data:image/<type>;base64,<data>" — ' +
+      'ai-service.js should convert blob URLs, File/Blob objects, ArrayBuffers, or raw base64 strings ' +
+      'into this format before sending.'
+    );
+  }
+
+  const commaIndex = dataUrl.indexOf(',');
+  if (commaIndex === -1) {
+    throw new Error('Image payload is missing the "," separator between its header and base64 data.');
+  }
+
+  // Header looks like "data:image/png" or "data:image/png;charset=utf-8;base64" —
+  // the mime type is always the first ";"-delimited segment after "data:".
+  const header = dataUrl.slice(5, commaIndex); // strip leading "data:"
+  if (!/;base64$/i.test(header)) {
+    throw new Error('Image payload must be base64-encoded (data URL header is missing ";base64").');
+  }
+
+  const mimeType = header.split(';')[0].trim() || 'application/octet-stream';
+  const data = dataUrl.slice(commaIndex + 1).replace(/\s/g, '');
+  if (!data) {
+    throw new Error('Image payload has no base64 data after the "," separator.');
+  }
+
+  return { inlineData: { mimeType, data } };
 }
 
 function extractAnalysis(geminiJson) {
