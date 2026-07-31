@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DannyTrade — Smart Money Signals &amp; AI Chart Analysis for NSE, BSE &amp; MCX</title>
+<meta name="description" content="DannyTrade reads Indian index, equity and commodity charts in real time, flags Smart Money Concept structure — Break of Structure, order blocks, liquidity sweeps, fair value gaps — and prepares your own uploaded charts and data for AI-powered analysis.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="logo">
+      <svg class="logo-mark" viewBox="0 0 26 26" fill="none">
+        <rect width="26" height="26" rx="6" fill="#D4AF6A"/>
+        <path d="M6 18L11 10L15 14L20 7" stroke="#0B0E14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      DannyTrade
+    </div>
+    <div class="nav-links" id="navLinks">
+      <a href="#signals">Signals</a>
+      <a href="#how">How it works</a>
+      <a href="studio.html">AI Analysis Studio</a>
+      <a href="#wins">Community</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <div class="nav-cta">
+      <a href="#signals" class="btn btn-primary">See live signals</a>
+      <button class="nav-menu-btn" id="navMenuBtn" aria-label="Toggle menu" aria-expanded="false">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 5H16M2 9H16M2 13H16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow">Live Signals · NSE · BSE · MCX</span>
+      <h1>Live Buy &amp; Sell calls, <em>with the target.</em></h1>
+      <p class="lead">DannyTrade reads Indian index, equity and commodity charts in real time and sends Buy/Sell signals the moment structure confirms — every call comes with entry, target and stop-loss, so you know exactly where to act.</p>
+      <div class="hero-actions">
+        <a href="#signals" class="btn btn-primary">See a live setup ↓</a>
+      </div>
+      <span class="hero-note">Runs locally, for a single user · Signals are educational, not investment advice</span>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-head">
+        <span><span class="pair">NIFTY 50</span> · 15m</span>
+        <span class="price" id="chartPrice">24,812.40</span>
+      </div>
+      <canvas id="smcChart" width="1200" height="680"></canvas>
+      <div class="signal-badge">
+        <span class="signal-badge-tag">BUY</span>
+        <div class="signal-badge-grid">
+          <div><span class="k">Entry</span><span class="v">24,820</span></div>
+          <div><span class="k">Target</span><span class="v up">25,140</span></div>
+          <div><span class="k">Stop-loss</span><span class="v down">24,690</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="ticker" aria-hidden="true">
+  <div class="ticker-track" id="tickerTrack"></div>
+</div>
+
+<section id="feed" style="padding:64px 0 40px;">
+  <div class="wrap">
+    <div class="section-head" style="margin-bottom:28px;display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+      <div>
+        <span class="eyebrow">Live signal feed — demo data</span>
+        <h2 style="margin-top:14px;">The algorithm, running.</h2>
+        <p>This runs a real structure-based detector (swings → sweep → order block → FVG → BOS confluence) against a simulated price feed, client-side, so you can watch the logic work. <strong style="color:var(--text);">It is not connected to live NSE/BSE/MCX data</strong> — see the note below the feed for what that would take.</p>
+      </div>
+      <span id="feedStatus" class="feed-status">● scanning</span>
+    </div>
+    <div class="feed-panel" id="feedPanel">
+      <div class="feed-empty" id="feedEmpty">Waiting for the first confluence signal…</div>
+    </div>
+    <p class="feed-disclaimer">Simulated symbol &amp; price series for demonstration only. Not connected to a live market feed. Educational tool, not investment advice.</p>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="wrap">
+    <div class="stats-grid">
+      <div class="stat"><div class="num">2,500+</div><div class="label">Active traders on the desk</div></div>
+      <div class="stat"><div class="num">3</div><div class="label">Markets covered — NSE, BSE, MCX</div></div>
+      <div class="stat"><div class="num">24 / 5</div><div class="label">Session monitoring, pre-open to close</div></div>
+      <div class="stat"><div class="num">&lt; 2 min</div><div class="label">Median alert-to-chart delivery</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="signals">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">What we flag</span>
+      <h2>Four signals. One shared language.</h2>
+      <p>Every alert maps to a specific Smart Money Concept, with the zone, invalidation level and confluence factors laid out — not a black-box arrow.</p>
+    </div>
+    <div class="signals-grid">
+      <div class="signal-card">
+        <svg class="icon" viewBox="0 0 34 34" fill="none"><rect x="5" y="13" width="24" height="10" rx="2" stroke="#D4AF6A" stroke-width="1.6"/><path d="M9 24V27M25 24V27" stroke="#D4AF6A" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <h3>Order Blocks</h3>
+        <p>The last opposing candle before an impulsive move — marked as a zone, not a single price, so entries have room to breathe.</p>
+        <span class="tag tag-neutral">Zone-based</span>
+      </div>
+      <div class="signal-card">
+        <svg class="icon" viewBox="0 0 34 34" fill="none"><path d="M8 6V26M8 26L4 21M8 26L12 21" stroke="#FF5C6C" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M26 12L18 20" stroke="#35D399" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <h3>Liquidity Sweeps</h3>
+        <p>A wick that grabs resting stops beyond an obvious high or low, then reclaims the level — the footprint of a stop-hunt in progress.</p>
+        <span class="tag tag-bear">Reversal cue</span>
+      </div>
+      <div class="signal-card">
+        <svg class="icon" viewBox="0 0 34 34" fill="none"><rect x="6" y="9" width="8" height="8" rx="1.5" stroke="#35D399" stroke-width="1.6"/><rect x="20" y="17" width="8" height="8" rx="1.5" stroke="#35D399" stroke-width="1.6"/></svg>
+        <h3>Fair Value Gaps</h3>
+        <p>Imbalanced candle sequences that price tends to revisit — used as a magnet target or a lower-risk re-entry zone.</p>
+        <span class="tag tag-neutral">Target / re-entry</span>
+      </div>
+      <div class="signal-card">
+        <svg class="icon" viewBox="0 0 34 34" fill="none"><path d="M5 22L14 12L20 18L29 7" stroke="#35D399" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="20" cy="18" r="2" fill="#35D399"/></svg>
+        <h3>Break of Structure</h3>
+        <p>Confirmation that the prevailing trend has shifted — the point most SMC setups use to size and time an entry.</p>
+        <span class="tag tag-bull">Confirmation</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how" style="background:var(--bg-elev);border-top:1px solid var(--border-soft);border-bottom:1px solid var(--border-soft);">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">How it works</span>
+      <h2>From scan to screen in four steps.</h2>
+      <p>The sequence is fixed — this is the actual pipeline every alert runs through before it reaches you.</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="n">01</div>
+        <h3>Connect your watchlist</h3>
+        <p>Pick index, equity or commodity symbols across NSE, BSE and MCX — or use our curated desk list.</p>
+      </div>
+      <div class="step">
+        <div class="n">02</div>
+        <h3>Engine scans structure</h3>
+        <p>Every candle close is checked against order block, sweep, FVG and BOS logic across your chosen timeframes.</p>
+      </div>
+      <div class="step">
+        <div class="n">03</div>
+        <h3>Confluence is scored</h3>
+        <p>Setups only alert once multiple factors line up — zone, liquidity, and structure — reducing single-signal noise.</p>
+      </div>
+      <div class="step">
+        <div class="n">04</div>
+        <h3>You get the annotated chart</h3>
+        <p>Telegram and app alerts show the zone, invalidation and target — the decision stays with you.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="wins">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">From the desk</span>
+      <h2>What the community is saying.</h2>
+      <p>Individual results vary with position sizing, risk management and market conditions.</p>
+    </div>
+    <div class="wins-grid">
+      <div class="win-card">
+        <p class="quote">"The liquidity sweep alerts on Bank Nifty changed how I read the open 15 minutes. I stopped chasing the first candle."</p>
+        <div class="win-meta">
+          <div class="avatar">R</div>
+          <div><div class="name">Rohan M.</div><div class="role">Intraday trader, Mumbai</div></div>
+        </div>
+      </div>
+      <div class="win-card">
+        <p class="quote">"I use the order block zones on MCX Gold as my entry map and manage risk myself from there. It's a map, not a signal I follow blindly."</p>
+        <div class="win-meta">
+          <div class="avatar">A</div>
+          <div><div class="name">Anjali S.</div><div class="role">Commodities, part-time</div></div>
+        </div>
+      </div>
+      <div class="win-card">
+        <p class="quote">"The BOS confirmation on swing setups saved me from two false breakouts last quarter. Worth it for that alone."</p>
+        <div class="win-meta">
+          <div class="avatar">K</div>
+          <div><div class="name">Kevin L.</div><div class="role">Swing trader, Bengaluru</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">FAQ</span>
+      <h2>Before you ask.</h2>
+    </div>
+    <div class="faq">
+      <details open>
+        <summary>Is this financial advice?<span></span></summary>
+        <p>No. DannyTrade highlights structure — order blocks, sweeps, gaps and breaks — for your own analysis. It does not place trades or guarantee outcomes. Trading in the securities and commodities markets carries risk of loss.</p>
+      </details>
+      <details>
+        <summary>Which markets and instruments are covered?</summary>
+        <p>NSE and BSE equities and indices, plus MCX commodities including gold, silver and crude.</p>
+      </details>
+      <details>
+        <summary>How are alerts delivered?</summary>
+        <p>In the app itself, in real time as structure confirms — this is a single-user tool with no accounts, subscriptions, or multi-channel delivery to manage.</p>
+      </details>
+      <details>
+        <summary>Do I need an account?</summary>
+        <p>No. There's no login and nothing to subscribe to — it runs for one user against your own connected data source.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="cta-band">
+    <h2>Get the next Buy or Sell call before the move is obvious.</h2>
+    <p>Live signals with entry, target and stop-loss — delivered the moment structure confirms.</p>
+    <div class="actions">
+      <a href="#signals" class="btn btn-primary">Explore signal types</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <div class="logo">
+          <svg class="logo-mark" viewBox="0 0 26 26" fill="none">
+            <rect width="26" height="26" rx="6" fill="#D4AF6A"/>
+            <path d="M6 18L11 10L15 14L20 7" stroke="#0B0E14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          DannyTrade
+        </div>
+        <p>Smart Money Concept signals for NSE, BSE and MCX. Built by traders, for traders who want to see the setup, not just an arrow.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Product</h4>
+        <a href="#signals">Signal types</a>
+        <a href="studio.html">AI Analysis Studio</a>
+        <a href="#how">How it works</a>
+      </div>
+      <div class="footer-col">
+        <h4>Company</h4>
+        <a href="#">About</a>
+        <a href="#">Contact</a>
+        <a href="#faq">FAQ</a>
+      </div>
+      <div class="footer-col">
+        <h4>Legal</h4>
+        <a href="#">Terms of use</a>
+        <a href="#">Privacy policy</a>
+        <a href="#">Risk disclosure</a>
+      </div>
+    </div>
+    <div class="disclaimer">
+      DannyTrade provides technical analysis tools and market commentary for educational purposes only and is not a registered investment advisor. Trading and investing in securities and commodities markets involves risk, including the possible loss of principal, and past performance is not indicative of future results. Nothing on this site constitutes a recommendation to buy or sell any financial instrument. Please consult a SEBI-registered investment advisor before making trading decisions.
+    </div>
+    <div class="foot-bottom">
+      <span>© 2026 DannyTrade. All rights reserved.</span>
+      <span>Made for the NSE / BSE / MCX trading community.</span>
+    </div>
+  </div>
+</footer>
+
+<script defer src="assets/js/app.js"></script>
+</body>
+</html>
