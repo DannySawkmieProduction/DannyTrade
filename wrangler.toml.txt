@@ -1,0 +1,15 @@
+name = "dannytrade"
+main = "worker/index.js"
+compatibility_date = "2026-07-01"
+
+# Serves the existing static site (index.html, studio.html, style.css,
+# assets/js/*, etc.) unchanged. The Worker only intercepts /api/analyze;
+# every other request falls through to these assets.
+[assets]
+directory = "./"
+binding = "ASSETS"
+
+# GEMINI_API_KEY is already stored as a secret (wrangler secret put
+# GEMINI_API_KEY) — do not add it here.
+[vars]
+GEMINI_MODEL = "gemini-2.5-flash"
