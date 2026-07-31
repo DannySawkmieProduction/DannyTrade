@@ -148,5 +148,48 @@
     analyzeMarketContext(payload) { return dispatch('analyzeMarketContext', payload); }
   };
 
+  /* ---------------------------------------------------------------
+     Live provider — talks to the Cloudflare Worker at /api/analyze,
+     which holds GEMINI_API_KEY server-side and calls Gemini. This is
+     the only provider DannyTrade ships; it implements every method
+     PROVIDER_INTERFACE lists above, each just posting { type, payload }
+     and unwrapping { ok, analysis } / { ok:false, error }.
+  --------------------------------------------------------------- */
+  function createGeminiWorkerProvider(endpoint) {
+    endpoint = endpoint || '/api/analyze';
+
+    async function call(type, payload) {
+      let res;
+      try {
+        res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type, payload })
+        });
+      } catch (err) {
+        throw new Error('Could not reach the AI provider Worker.');
+      }
+
+      let body = null;
+      try { body = await res.json(); } catch { /* handled below */ }
+
+      if (!res.ok || !body || body.ok === false) {
+        throw new Error((body && body.error) || `AI provider request failed (${res.status}).`);
+      }
+      return body.analysis || {};
+    }
+
+    return {
+      analyzeChartImage(payload)     { return call('chartImage', payload); },
+      analyzePDF(payload)            { return call('pdf', payload); },
+      analyzeCSV(payload)            { return call('csv', payload); },
+      analyzeExcel(payload)          { return call('excel', payload); },
+      generateTradingSignal(payload) { return call('tradingSignal', payload); },
+      analyzeMarketContext(payload)  { return call('marketContext', payload); }
+    };
+  }
+
+  configure(createGeminiWorkerProvider('/api/analyze'));
+
   global.AIService = AIService;
 })(window);
