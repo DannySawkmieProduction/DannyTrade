@@ -3,22 +3,80 @@
 
    Responsibilities:
    - Serve the static site via the ASSETS binding (unchanged behavior).
-   - Handle POST /api/analyze: the ONLY new network surface. It receives
-     { type, payload } from assets/js/ai-service.js, calls the Gemini
-     API server-side using the GEMINI_API_KEY secret (never exposed to
-     the client), and returns { ok: true, analysis: {...} } shaped to
-     match AIService.ANALYSIS_SCHEMA_KEYS, or { ok: false, error }.
+   - Handle POST /api/analyze: the ONLY new network surface.
+
+   AI response flow:
+     ai-service.js posts { type, payload } -> handleAnalyze() builds a
+     Gemini generateContent request (buildGeminiRequest, using the
+     ANALYSIS_FIELDS-derived responseSchema so Gemini can only return
+     the shape we expect) -> resolveModel() picks a live, supported
+     model via ListModels -> Gemini responds -> extractAnalysis() pulls
+     the JSON out, filling any field Gemini omitted with null -> we
+     return { ok: true, analysis } shaped to ANALYSIS_SCHEMA_KEYS, or
+     { ok: false, error } on any failure along the way.
+
+   Schema normalization:
+     ANALYSIS_FIELDS (below) is the single source of truth. Both
+     ANALYSIS_SCHEMA_KEYS (the flat key list ai-service.js's dispatch()
+     must mirror exactly, or it will silently strip unknown keys) and
+     ANALYSIS_RESPONSE_SCHEMA (the Gemini-facing JSON schema) are
+     derived from it — add a field once, both stay in sync.
+
+   Future extension points (verified schema-compatible, no redesign
+   needed): TradingView Lightweight Charts, a Replay Engine, and an
+   Annotation Engine are all independent of this analysis schema —
+   they consume chart/UI state, not analysis.data. Angel One SmartAPI /
+   NSE live data / a richer Market Context would extend the existing
+   'marketContext' branch in buildGeminiRequest() with real fetched
+   data; a future Decision Engine refinement is additive the same way
+   Phase 1's fields were — one ANALYSIS_FIELDS entry each, no other
+   file needs to change except ai-service.js's mirrored key list.
 
    Nothing here touches the UI, studio.js, studio.html or style.css.
 ===================================================================== */
 
-const ANALYSIS_SCHEMA_KEYS = [
-  'executiveSummary', 'marketStructure', 'smartMoneyConcepts', 'ictAnalysis',
-  'liquidityAnalysis', 'orderBlocks', 'fairValueGaps', 'trendAnalysis',
-  'volumeAnalysis', 'supportResistance', 'entry', 'stopLoss', 'target1',
-  'target2', 'target3', 'riskReward', 'confidence', 'verdict',
-  'explanation', 'riskWarnings'
+/* ---------------------------------------------------------------
+   Single source of truth for the analysis response shape. Every
+   other schema-shaped structure in this file — the flat key list
+   ai-service.js must mirror, and the Gemini structured-output schema
+   (ANALYSIS_RESPONSE_SCHEMA, below) — is DERIVED from this array.
+   Add or change a field here once; everything else follows. `enum`
+   is optional — omit it for a free-form string field.
+--------------------------------------------------------------- */
+const ANALYSIS_FIELDS = [
+  // --- Original v1 fields — unchanged, order preserved for backward compatibility.
+  { key: 'executiveSummary',   type: 'STRING' },
+  { key: 'marketStructure',    type: 'STRING' },
+  { key: 'smartMoneyConcepts', type: 'STRING' },
+  { key: 'ictAnalysis',        type: 'STRING' },
+  { key: 'liquidityAnalysis',  type: 'STRING' },
+  { key: 'orderBlocks',        type: 'STRING' },
+  { key: 'fairValueGaps',      type: 'STRING' },
+  { key: 'trendAnalysis',      type: 'STRING' },
+  { key: 'volumeAnalysis',     type: 'STRING' },
+  { key: 'supportResistance',  type: 'STRING' },
+  { key: 'entry',              type: 'STRING' },
+  { key: 'stopLoss',           type: 'STRING' },
+  { key: 'target1',            type: 'STRING' },
+  { key: 'target2',            type: 'STRING' },
+  { key: 'target3',            type: 'STRING' },
+  { key: 'riskReward',         type: 'STRING' },
+  { key: 'confidence',         type: 'NUMBER' },
+  { key: 'verdict',            type: 'STRING', enum: ['BUY', 'SELL', 'WAIT', 'NO TRADE'] },
+  { key: 'explanation',        type: 'STRING' },
+  { key: 'riskWarnings',       type: 'STRING' },
+  // --- Phase 1 — Institutional Intelligence Engine additions.
+  { key: 'premiumDiscountZone',   type: 'STRING' }, // Premium / Discount / Equilibrium Engine
+  { key: 'trapDetection',         type: 'STRING' }, // Trap Detection Engine (Very High/High/Moderate/Low risk only)
+  { key: 'marketPhase',           type: 'STRING' }, // Market Phase Engine
+  { key: 'invalidationLevel',     type: 'STRING' }, // Decision Engine — what invalidates the setup
+  { key: 'confirmationRequired',  type: 'STRING' }, // Decision Engine — outstanding confirmation
+  { key: 'tradeQualityGrade',     type: 'STRING', enum: ['A+', 'A', 'B', 'C', 'D'] },
+  { key: 'tradeQualityReasoning', type: 'STRING' },
+  { key: 'educationalNotes',      type: 'STRING' }
 ];
+
+const ANALYSIS_SCHEMA_KEYS = ANALYSIS_FIELDS.map(f => f.key);
 
 // Requests routed by ai-service.js's provider, one per AIService method.
 const VALID_TYPES = new Set([
@@ -292,41 +350,58 @@ function buildGeminiRequest(type, payload) {
 }
 
 const SYSTEM_INSTRUCTION =
-  `You are the analysis engine behind DannyTrade's AI Analysis Studio, serving NSE/BSE/MCX traders. ` +
-  `You apply ICT (Inner Circle Trader) concepts and Smart Money Concepts (SMC) — market structure, ` +
-  `liquidity sweeps, order blocks, fair value gaps, premium/discount zones — to produce structured, ` +
-  `concise technical analysis. Write every text field as 2-5 plain sentences, no markdown, no bullet points. ` +
-  `Price levels (entry, stopLoss, target1-3) must be plain strings (e.g. "23,450" or "N/A" if not determinable) ` +
-  `in the instrument's native units — do not invent precision you cannot support from the input. confidence is ` +
-  `an integer 0-100 reflecting how well-supported the read is by the input. verdict must be exactly "BUY", ` +
-  `"SELL" or "NO TRADE" — use "NO TRADE" whenever the input is ambiguous, low quality, or insufficient. ` +
-  `riskWarnings must always include a reminder that this is educational output, not investment advice, and that ` +
-  `SEBI-registered advice should be sought before trading. Never fabricate data you cannot see in the input.`;
+  `You are the institutional-grade analysis engine behind DannyTrade's AI Analysis Studio, serving NSE/BSE/MCX ` +
+  `traders. You behave like an experienced institutional trader — not a generic chatbot. You think before ` +
+  `concluding, analyse before recommending, and explain before deciding. You reject weak setups rather than ` +
+  `forcing a BUY or SELL.\n\n` +
 
+  `METHODOLOGY: Apply ICT (Inner Circle Trader) concepts and Smart Money Concepts (SMC) — market structure ` +
+  `(BOS, CHoCH, MSS, internal/external structure, swing highs/lows), liquidity theory (buy-side/sell-side ` +
+  `liquidity, sweeps, equal highs/lows), order blocks (bullish/bearish, breaker, mitigation — ranked by ` +
+  `quality), fair value gaps (bullish/bearish, filled/unfilled — ranked Strong/Moderate/Weak), and premium/` +
+  `discount/equilibrium positioning. Every analytical field must implicitly follow Observation → Evidence → ` +
+  `Reasoning → Conclusion: state what you see, what supports it, why it matters, and what follows — as 2-5 ` +
+  `plain sentences, no markdown, no bullet points.\n\n` +
+
+  `HONESTY RULES (strict): Never fabricate probabilities, exact timing windows, market data, prices, volume ` +
+  `profile, options data, open interest, PCR, India VIX, or FII/DII activity. If something cannot honestly be ` +
+  `determined from the uploaded input, say so plainly in that field instead of guessing. If evidence for a ` +
+  `trade is weak or mixed, the verdict must be "WAIT" or "NO TRADE" — never force a BUY or SELL to seem useful. ` +
+  `Risk and trap likelihood are classified ONLY as "Very High", "High", "Moderate", or "Low" — never as a ` +
+  `percentage or decimal; percentages read as false statistical precision this model cannot actually support.\n\n` +
+
+  `FIELD GUIDANCE:\n` +
+  `- premiumDiscountZone: state Premium, Discount, or Equilibrium relative to the visible range, and why.\n` +
+  `- trapDetection: name any trap pattern in play (Bull Trap, Bear Trap, False Breakout, False Breakdown, ` +
+  `Liquidity Trap, Stop Hunt) or state none is evident; give evidence, institutional reasoning, a risk ` +
+  `classification (Very High/High/Moderate/Low only), and a recommended action.\n` +
+  `- marketPhase: identify Accumulation, Manipulation, Expansion, Distribution, Re-Accumulation, or ` +
+  `Re-Distribution, with evidence, the likely institutional objective, and expected behaviour.\n` +
+  `- invalidationLevel: the specific price/structural condition that would invalidate this setup.\n` +
+  `- confirmationRequired: what confirmation (e.g. a specific BOS, displacement candle, retest) is still ` +
+  `outstanding before this becomes actionable — or "None — setup is confirmed" if genuinely none is.\n` +
+  `- tradeQualityGrade: exactly one of "A+", "A", "B", "C", "D".\n` +
+  `- tradeQualityReasoning: the strengths and weaknesses behind that grade.\n` +
+  `- educationalNotes: what smart money appears to be doing, which ICT/SMC concepts are present, a common ` +
+  `beginner mistake this setup could trigger, and how a professional would approach it.\n\n` +
+
+  `Price levels (entry, stopLoss, target1-3) are plain strings (e.g. "23,450" or "N/A" if not determinable) in ` +
+  `the instrument's native units — never invent precision unsupported by the input. confidence is an integer ` +
+  `0-100, but must reflect only a coarse self-assessed band (use round values like 20/40/60/80/95 for Low/` +
+  `Below-Average/Moderate/High/Very High confidence) — not false decimal-point precision. verdict must be ` +
+  `exactly "BUY", "SELL", "WAIT", or "NO TRADE". riskWarnings must always remind the reader this is educational ` +
+  `output, not investment advice, and that SEBI-registered advice should be sought before trading. Never ` +
+  `fabricate data you cannot see in the input.`;
+
+// Derived from ANALYSIS_FIELDS above — do not hand-edit this object;
+// add/change fields there and this schema (and ANALYSIS_SCHEMA_KEYS)
+// update automatically, so they can never drift out of sync.
 const ANALYSIS_RESPONSE_SCHEMA = {
   type: 'OBJECT',
-  properties: {
-    executiveSummary:   { type: 'STRING' },
-    marketStructure:    { type: 'STRING' },
-    smartMoneyConcepts: { type: 'STRING' },
-    ictAnalysis:        { type: 'STRING' },
-    liquidityAnalysis:  { type: 'STRING' },
-    orderBlocks:        { type: 'STRING' },
-    fairValueGaps:      { type: 'STRING' },
-    trendAnalysis:      { type: 'STRING' },
-    volumeAnalysis:     { type: 'STRING' },
-    supportResistance:  { type: 'STRING' },
-    entry:               { type: 'STRING' },
-    stopLoss:            { type: 'STRING' },
-    target1:              { type: 'STRING' },
-    target2:              { type: 'STRING' },
-    target3:              { type: 'STRING' },
-    riskReward:          { type: 'STRING' },
-    confidence:          { type: 'NUMBER' },
-    verdict:             { type: 'STRING', enum: ['BUY', 'SELL', 'NO TRADE'] },
-    explanation:         { type: 'STRING' },
-    riskWarnings:        { type: 'STRING' }
-  },
+  properties: ANALYSIS_FIELDS.reduce((props, f) => {
+    props[f.key] = f.enum ? { type: f.type, enum: f.enum } : { type: f.type };
+    return props;
+  }, {}),
   required: ANALYSIS_SCHEMA_KEYS
 };
 
@@ -370,6 +445,17 @@ function extractAnalysis(geminiJson) {
       .map(p => p.text || '')
       .join('');
     const parsed = JSON.parse(text);
+    // Gemini's responseSchema strongly encourages a matching object, but
+    // never trust that blindly — a non-object parse (or a stray array/
+    // null) is treated the same as "no usable analysis" rather than
+    // letting a property access throw further down.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+    // Any field genuinely absent from Gemini's output — despite it being
+    // `required` in the schema — degrades to null instead of throwing,
+    // so one missing field never fails the whole analysis. ai-service.js's
+    // dispatch() defaults missing keys to null the same way, so a partial
+    // analysis renders as partial, not broken.
     const analysis = {};
     ANALYSIS_SCHEMA_KEYS.forEach(k => { analysis[k] = parsed[k] !== undefined ? parsed[k] : null; });
     return analysis;
