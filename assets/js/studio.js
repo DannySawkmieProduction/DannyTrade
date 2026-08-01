@@ -249,7 +249,7 @@ function renderVerdict(analysis){
   if(analysis && analysis.status === 'ok' && analysis.data.verdict){
     const v = String(analysis.data.verdict).toUpperCase();
     verdictTag.textContent = v;
-    verdictTag.className = 'verdict-tag ' + (v === 'BUY' ? 'buy' : v === 'SELL' ? 'sell' : 'no-trade');
+    verdictTag.className = 'verdict-tag ' + (v === 'BUY' ? 'buy' : v === 'SELL' ? 'sell' : v === 'WAIT' ? 'wait' : 'no-trade');
     const conf = Number(analysis.data.confidence);
     confidenceFill.style.width = Number.isFinite(conf) ? `${Math.max(0, Math.min(100, conf))}%` : '0%';
   } else {

@@ -28,6 +28,7 @@
      reaches the UI, so the UI never has to guess about missing keys.
   --------------------------------------------------------------- */
   const ANALYSIS_SCHEMA_KEYS = [
+    // Original v1 fields — unchanged, order preserved for backward compatibility.
     'executiveSummary',
     'marketStructure',
     'smartMoneyConcepts',
@@ -45,9 +46,20 @@
     'target3',
     'riskReward',
     'confidence',
-    'verdict',        // "BUY" | "SELL" | "NO TRADE"
+    'verdict',        // "BUY" | "SELL" | "WAIT" | "NO TRADE"
     'explanation',
-    'riskWarnings'
+    'riskWarnings',
+    // Phase 1 — Institutional Intelligence Engine additions. Not yet
+    // rendered by studio.js (no UI changes in Phase 1) — the data just
+    // rides along on analysis.data for future UI work to pick up.
+    'premiumDiscountZone',
+    'trapDetection',
+    'marketPhase',
+    'invalidationLevel',
+    'confirmationRequired',
+    'tradeQualityGrade',    // "A+" | "A" | "B" | "C" | "D"
+    'tradeQualityReasoning',
+    'educationalNotes'
   ];
 
   function emptyAnalysisPayload() {
