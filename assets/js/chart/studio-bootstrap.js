@@ -22,7 +22,7 @@
     var orchestrator = DC.StudioChartInit.create({
       symbol: 'NIFTY',
       timeframe: 'D',
-      providerId: 'mock',
+      providerId: 'fyers', // Phase 2C, Step 4 — was 'mock'; see PHASE_2C_ENGINEERING_CONTEXT.md
 
       chartContainer: document.getElementById('lwChartContainer'),
       overlayCanvas: document.getElementById('annotationOverlay'),

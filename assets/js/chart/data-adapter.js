@@ -242,7 +242,47 @@
     };
   }
 
+  /* ---------------------------------------------------------------
+     FYERS provider (Phase 2C, Step 4) — historical data only.
+
+     Delegates all FYERS-specific logic (symbol mapping, timeframe
+     mapping, the actual Worker call) to window.DannyChart.FyersService
+     (assets/js/chart/fyers-service.js), per Decision C — this object's
+     only job is to satisfy the Provider interface, the same contract
+     mockProvider and the stub providers below satisfy.
+
+     connect() deliberately does NOT verify FYERS authentication — a
+     dedicated status check was deferred (see PHASE_2C_ENGINEERING_
+     CONTEXT.md). An unauthenticated user simply sees a clear error
+     the first time getCandles() actually runs (surfaced from the
+     Worker's 401 response), not a failure at connect() time.
+
+     subscribe() is not implemented — live streaming is a separate,
+     later milestone, exactly like the stub providers below.
+  --------------------------------------------------------------- */
+  const fyersProvider = {
+    id: 'fyers',
+    name: 'FYERS',
+    capabilities: { historical: true, live: false, timeframes: ['1m', '3m', '5m', '15m', '30m', '1H', '4H', 'D'] },
+    connect(){ return Promise.resolve(); },
+    disconnect(){ return Promise.resolve(); },
+    getSymbols(){
+      const svc = window.DannyChart.FyersService;
+      if(!svc) return Promise.reject(new Error('[DannyChart] FyersService is not loaded — check that fyers-service.js loaded before this call.'));
+      return Promise.resolve(svc.getSymbols());
+    },
+    getCandles({ symbol, timeframe, limit }){
+      const svc = window.DannyChart.FyersService;
+      if(!svc) return Promise.reject(new Error('[DannyChart] FyersService is not loaded — check that fyers-service.js loaded before this call.'));
+      return svc.getCandles({ symbol, timeframe, limit });
+    },
+    subscribe(){
+      throw new Error('[DannyChart] Provider "fyers" does not support subscribe() yet — live streaming is a separate, later milestone.');
+    }
+  };
+
   register(mockProvider);
+  register(fyersProvider);
   register(createStubProvider('uploaded-ohlc', 'Uploaded OHLC (CSV/XLSX)', TIMEFRAMES.slice()));
   register(createStubProvider('angel-one', 'Angel One SmartAPI', TIMEFRAMES.slice()));
   register(createStubProvider('tradingview-data', 'TradingView Market Data', TIMEFRAMES.slice()));
