@@ -13,3 +13,19 @@ binding = "ASSETS"
 # GEMINI_API_KEY) — do not add it here.
 [vars]
 GEMINI_MODEL = "gemini-3.6-flash"
+
+# Phase 2C, Step 2 — persists the FYERS OAuth access_token (and its
+# expiry) across requests and Worker isolate recycles. Nothing reads
+# or writes this namespace yet — that starts in Step 3 (OAuth login/
+# callback routes). No refresh_token/PIN logic is stored here or
+# anywhere else in this project (Phase 2C Decision B: manual daily
+# re-login only, no auto-refresh).
+#
+# SETUP REQUIRED (run once, outside this repo, before Step 3 is
+# deployed): `wrangler kv namespace create FYERS_TOKENS` prints a
+# namespace id — replace REPLACE_WITH_KV_NAMESPACE_ID below with that
+# id. `wrangler kv namespace create FYERS_TOKENS --preview` for a
+# separate preview_id if you use `wrangler dev` locally.
+[[kv_namespaces]]
+binding = "FYERS_TOKENS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
