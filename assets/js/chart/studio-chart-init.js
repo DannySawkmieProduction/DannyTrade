@@ -77,7 +77,7 @@
     const cleanups = []; // every DOM/event-bus unsubscribe, removed together in destroy()
 
     function warn(moduleName, err){
-      console.warn(`[StudioChartInit] Failed to initialize "${moduleName}":`, err && err.message ? err.message : err);
+      console.error(`[StudioChartInit] Failed at stage "${moduleName}":`, err);
     }
 
     /** Runs one init step; on failure, warns with the module name and
@@ -141,21 +141,43 @@
 
       // 4. Legend
       if(config.legendContainer){
-        state.legendHandle = await safeStep('legend', async () => config.Legend.mount(config.legendContainer, state.renderer));
+        state.legendHandle = await safeStep('Mounting legend', async () => config.Legend.mount(config.legendContainer, state.renderer));
       }
 
       // 5. Replay Engine — needs an initial candle batch, so this step
       //    coordinates one direct Data Adapter fetch (allowed: this is
       //    the orchestrator coordinating with the Data Adapter, not
-      //    business logic) before constructing the engine.
+      //    business logic) before constructing the engine. Each
+      //    sub-part is individually instrumented so a failure identifies
+      //    exactly which of the three actions failed.
       state.replayEngine = await safeStep('replayEngine', async () => {
         const provider = config.providerId ? config.DataAdapter.get(config.providerId) : config.DataAdapter.getActive();
-        const candles = await provider.getCandles({ symbol: config.symbol, timeframe: config.timeframe, limit: 180 });
-        const annotations = await resolveAnnotations(candles, config.timeframe, config.symbol);
-        return config.ReplayEngine.create({
-          renderer: state.renderer, candles, annotations,
-          startIndex: config.replayStartIndex, speed: config.replaySpeed
-        });
+
+        let candles;
+        try{
+          candles = await provider.getCandles({ symbol: config.symbol, timeframe: config.timeframe, limit: 180 });
+        } catch(err){
+          console.error('[StudioChartInit] Failed at stage "Loading mock candles":', err);
+          throw err;
+        }
+
+        let annotations;
+        try{
+          annotations = await resolveAnnotations(candles, config.timeframe, config.symbol);
+        } catch(err){
+          console.error('[StudioChartInit] Failed at stage "Creating annotations":', err);
+          throw err;
+        }
+
+        try{
+          return config.ReplayEngine.create({
+            renderer: state.renderer, candles, annotations,
+            startIndex: config.replayStartIndex, speed: config.replaySpeed
+          });
+        } catch(err){
+          console.error('[StudioChartInit] Failed at stage "Mounting replay engine":', err);
+          throw err;
+        }
       });
 
       // 6. Timeframe Manager
@@ -171,7 +193,7 @@
 
       // 7. Decision Panel
       if(config.decisionPanelContainer){
-        state.decisionPanel = await safeStep('decisionPanel', async () => {
+        state.decisionPanel = await safeStep('Mounting decision panel', async () => {
           const panel = config.DecisionPanel.mount(config.decisionPanelContainer, state.renderer);
           if(state.lastAnalysis) panel.update(state.lastAnalysis, { rendererState: state.renderer.getState() });
           return panel;

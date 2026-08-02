@@ -398,9 +398,18 @@
       };
     }
 
-    const ready = loadLibrary()
-      .then(LightweightCharts => {
+    const ready = (async () => {
+      let stage = 'Loading TradingView library';
+      try{
+        const LightweightCharts = await loadLibrary();
         if(destroyed) return;
+
+        stage = 'Verifying LightweightCharts global';
+        if(!LightweightCharts || typeof LightweightCharts.createChart !== 'function'){
+          throw new Error('window.LightweightCharts is missing, or does not expose createChart() — the script loaded but did not attach the expected library shape.');
+        }
+
+        stage = 'Creating the chart';
         chart = LightweightCharts.createChart(container, {
           width: container.clientWidth, height: container.clientHeight,
           layout: THEMES[currentTheme].layout, grid: THEMES[currentTheme].grid,
@@ -409,11 +418,14 @@
           timeScale: { borderColor: 'rgba(255,255,255,0.08)', timeVisible: true, secondsVisible: false },
           handleScroll: true, handleScale: true
         });
+
+        stage = 'Creating candlestick series';
         series = chart.addCandlestickSeries({
           upColor: THEMES[currentTheme].candleUp, downColor: THEMES[currentTheme].candleDown,
           borderVisible: false,
           wickUpColor: THEMES[currentTheme].candleUp, wickDownColor: THEMES[currentTheme].candleDown
         });
+
         chart.timeScale().subscribeVisibleLogicalRangeChange(() => scheduleDraw());
         chart.subscribeCrosshairMove(handleCrosshairMove);
         chart.subscribeClick(handleClick);
@@ -422,14 +434,16 @@
         if(loadingEl) loadingEl.classList.add('hidden');
         state.chartReady = true;
         emitter.emit('chartReady', { theme: currentTheme, state: getState() });
-      })
-      .catch(err => {
-        console.error('[ChartRenderer]', err.message);
+      } catch(err){
+        // Logs the real Error object (not just .message) so the browser
+        // console shows the full stack trace, not a flattened string.
+        console.error(`[ChartRenderer] Failed at stage "${stage}":`, err);
         if(loadingEl){
-          loadingEl.textContent = 'Chart engine failed to load — check your connection and reload.';
+          loadingEl.textContent = `Chart engine failed at: ${stage} — ${err && err.message ? err.message : err}`;
           loadingEl.classList.remove('hidden');
         }
-      });
+      }
+    })();
 
     /* ---- draw scheduling: batch multiple triggers into one rAF paint ---- */
     function scheduleDraw(){
