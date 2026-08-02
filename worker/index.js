@@ -35,6 +35,8 @@
    Nothing here touches the UI, studio.js, studio.html or style.css.
 ===================================================================== */
 
+import { handleFyersLogin, handleFyersCallback } from './fyers.js';
+
 /* ---------------------------------------------------------------
    Single source of truth for the analysis response shape. Every
    other schema-shaped structure in this file — the flat key list
@@ -105,6 +107,16 @@ export default {
         return jsonResponse({ ok: false, error: 'Method not allowed.' }, 405);
       }
       return handleAnalyze(request, env);
+    }
+
+    // Phase 2C, Step 3 — FYERS OAuth only (login redirect + token-
+    // exchange callback). No historical-data, live-streaming, or
+    // order-placement routes exist yet — see worker/fyers.js's header.
+    if (url.pathname === '/api/fyers/login') {
+      return handleFyersLogin(request, env);
+    }
+    if (url.pathname === '/api/fyers/callback') {
+      return handleFyersCallback(request, env);
     }
 
     // Everything else is the static site (index.html, studio.html,
@@ -525,7 +537,18 @@ const CHART_STRUCTURE_SYSTEM_INSTRUCTION =
   `stopLoss and target1 are required if this field is non-null, target2/target3/invalidation may be null ` +
   `individually.\n` +
   `- decision: finalDecision is exactly "BUY", "SELL", "WAIT", or "NO_TRADE"; tradeGrade is "A+"/"A"/"B"/"C"/"D"; ` +
-  `trapRisk is "Very High"/"High"/"Moderate"/"Low" only — never a percentage; reasoningSummary is 2-4 sentences.`;
+  `trapRisk is "Very High"/"High"/"Moderate"/"Low" only — never a percentage; reasoningSummary is 2-4 sentences. ` +
+  `riskReward mirrors tradeLevels.riskReward when tradeLevels is non-null (e.g. 2.2), or your best honest ` +
+  `estimate if tradeLevels is null but a rough reward skew is still assessable — never fabricate precision. ` +
+  `trend is exactly "Bullish", "Bearish", or "Sideways". structureSummary is 1-2 plain sentences on the current ` +
+  `market structure (e.g. higher highs/higher lows, or a recent CHoCH). lastStructureEvent names the most ` +
+  `recent structure break honestly, e.g. "Bullish BOS at index 42" — or "None observed" if structureEvents is ` +
+  `empty. invalidationLevel is a plain string price level (e.g. "23,450") or a short structural condition ` +
+  `(e.g. "Close below the last higher low") that would invalidate this read — never a fabricated number. ` +
+  `educationalNotes is an array of 2-4 short plain-sentence strings: what smart money appears to be doing, ` +
+  `which ICT/SMC concepts are present, a common beginner mistake this setup could trigger, and how a ` +
+  `professional would approach it — same spirit as the Phase 1 studio's educationalNotes field, adapted to ` +
+  `this chart's actual structure.`;
 
 // Small reusable shape for the four evidence-narrative fields shared by
 // every structural annotation type below.
@@ -693,9 +716,24 @@ const CHART_STRUCTURE_RESPONSE_SCHEMA = {
         liquidityTarget: { type: 'STRING' },
         tradeQuality: { type: 'STRING' },
         confidence: { type: 'NUMBER' },
-        reasoningSummary: { type: 'STRING' }
+        reasoningSummary: { type: 'STRING' },
+        // --- Phase 2B Step 4 additions: close the decision-panel.js
+        // contract gap. Additive only; the 8 fields above are untouched. ---
+        riskReward: { type: 'NUMBER' },
+        trend: { type: 'STRING', enum: ['Bullish', 'Bearish', 'Sideways'] },
+        structureSummary: { type: 'STRING' },
+        lastStructureEvent: { type: 'STRING' },
+        // Plain string (not NUMBER) to match the Phase 1 price-field
+        // convention elsewhere in this file — Gemini's structured-output
+        // schema has no clean number|string union, and decision-panel.js
+        // already renders this field as display text via formatPlain().
+        invalidationLevel: { type: 'STRING' },
+        educationalNotes: { type: 'ARRAY', items: { type: 'STRING' } }
       },
-      required: ['finalDecision', 'tradeGrade', 'marketPhase', 'trapRisk', 'liquidityTarget', 'tradeQuality', 'confidence', 'reasoningSummary']
+      required: [
+        'finalDecision', 'tradeGrade', 'marketPhase', 'trapRisk', 'liquidityTarget', 'tradeQuality', 'confidence', 'reasoningSummary',
+        'riskReward', 'trend', 'structureSummary', 'lastStructureEvent', 'invalidationLevel', 'educationalNotes'
+      ]
     }
   },
   required: ['version', 'timeframe', 'swings', 'structureEvents', 'orderBlocks', 'fvgs', 'liquidity', 'premiumDiscount', 'tradeLevels', 'decision']
