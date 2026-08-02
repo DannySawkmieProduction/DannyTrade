@@ -35,7 +35,7 @@
    Nothing here touches the UI, studio.js, studio.html or style.css.
 ===================================================================== */
 
-import { handleFyersLogin, handleFyersCallback } from './fyers.js';
+import { handleFyersLogin, handleFyersCallback, handleFyersCandles } from './fyers.js';
 
 /* ---------------------------------------------------------------
    Single source of truth for the analysis response shape. Every
@@ -110,13 +110,20 @@ export default {
     }
 
     // Phase 2C, Step 3 — FYERS OAuth only (login redirect + token-
-    // exchange callback). No historical-data, live-streaming, or
-    // order-placement routes exist yet — see worker/fyers.js's header.
+    // exchange callback). Step 4 adds historical candle retrieval
+    // only. No live-streaming or order-placement routes exist yet —
+    // see worker/fyers.js's header.
     if (url.pathname === '/api/fyers/login') {
       return handleFyersLogin(request, env);
     }
     if (url.pathname === '/api/fyers/callback') {
       return handleFyersCallback(request, env);
+    }
+    if (url.pathname === '/api/fyers/candles') {
+      if (request.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      return handleFyersCandles(request, env);
     }
 
     // Everything else is the static site (index.html, studio.html,
