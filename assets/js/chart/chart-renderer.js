@@ -74,7 +74,8 @@
 (function initChartRenderer(){
   window.DannyChart = window.DannyChart || {};
 
-  const CDN_URL = 'https://unpkg.com/[email protected]/dist/lightweight-charts.standalone.production.js';
+  const LIB_VERSION = '4.1.1';
+  const CDN_URL = 'https://unpkg.com/lightweight-charts' + '@' + LIB_VERSION + '/dist/lightweight-charts.standalone.production.js';
   let libraryLoadPromise = null;
 
   function loadLibrary(){
