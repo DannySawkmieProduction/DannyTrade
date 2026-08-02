@@ -42,10 +42,38 @@
         resetBtn: document.getElementById('replayResetBtn'),
         speedSelect: document.getElementById('replaySpeedSelect'),
         progressFill: document.getElementById('replayProgressFill')
+      },
+
+      // Phase 2B, Step 3 — real AI wiring. studio-chart-init.js's
+      // resolveAnnotations() already has the current candle window in
+      // scope and passes it here as the first argument, so no separate
+      // DataAdapters fetch is needed. AIService.analyzeChartStructure()
+      // is routed through dispatchStructured() (see ai-service.js), NOT
+      // dispatch(), so the nested Structured Analysis shape reaches us
+      // unmodified. On any non-"ok" status or thrown error, this falls
+      // back to the same empty-analysis shape studio-chart-init.js's own
+      // defaultAnalysisProvider() returns, so a failed AI call degrades
+      // gracefully (zero annotations, "Not available" panel) instead of
+      // crashing the chart. studio-chart-init.js's resolveAnnotations()
+      // also wraps this call in its own try/catch as a second safety net.
+      getStructuredAnalysis: async function(candles, timeframe, symbol){
+        try{
+          var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
+          if(resp && resp.status === 'ok' && resp.data){
+            return resp.data;
+          }
+          if(resp && resp.status === 'error'){
+            console.warn('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
+          }
+        } catch(err){
+          console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
+        }
+        return {
+          version: '1.0', timeframe: timeframe,
+          swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
+          premiumDiscount: null, tradeLevels: null, decision: null
+        };
       }
-      // getStructuredAnalysis intentionally omitted — falls back to
-      // studio-chart-init.js's own no-op default (empty analysis) until
-      // a real or mock analysis engine is wired in as its own module.
     });
 
     // Exposed for debugging/future use (e.g. a future "reload" button),
