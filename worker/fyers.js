@@ -1,41 +1,52 @@
 /* =====================================================================
-   worker/fyers.js — Phase 2C, Step 3
+   worker/fyers.js — Phase 2C, Steps 3–4
 
-   FYERS OAuth authentication ONLY. Historical data fetching, live
-   WebSocket streaming, and order placement are explicitly NOT part of
-   this file yet — see PHASE_2C_ENGINEERING_CONTEXT.md for the roadmap
-   steps that add those later, each its own approved step.
+   Step 3: FYERS OAuth authentication (login/callback/token storage).
+   Step 4: historical candle retrieval only. Live WebSocket streaming
+   and order placement are explicitly NOT part of this file yet — see
+   PHASE_2C_ENGINEERING_CONTEXT.md for the roadmap steps that add
+   those later, each its own approved step.
 
    Design decisions this file implements (see PHASE_2C_DESIGN_PROPOSAL.md
    and PHASE_2C_ENGINEERING_CONTEXT.md Section 2 for the full rationale):
      A. Dedicated /api/fyers/* route family (handled in worker/index.js,
-        which imports the two handlers below).
+        which imports the handlers below).
      B. Manual daily re-login ONLY. No refresh_token or PIN is ever
         persisted anywhere in this project — FYERS's token-exchange
         response may include a refresh_token, but this file deliberately
         discards it. When access_token expires (~1 trading day), the
         user revisits /api/fyers/login again. There is no auto-refresh
-        code path, by design, not by omission.
+        code path, by design, not by omission. handleFyersCandles()
+        surfaces an expired/invalid token as a clear 401 telling the
+        user to re-login — it never attempts to refresh it.
      C. This module holds ALL FYERS-specific server-side logic; nothing
-        FYERS-shaped leaks into worker/index.js beyond two route checks
-        and an import.
+        FYERS-shaped leaks into worker/index.js beyond route checks
+        and an import. Symbol/timeframe mapping (DannyTrade's internal
+        symbol codes and TIMEFRAMES → FYERS's own formats) lives
+        client-side in assets/js/chart/fyers-service.js, not here —
+        this file expects an already-FYERS-shaped symbol string and a
+        timeframe it can map to a FYERS resolution directly.
 
    Credentials/tokens never reach the browser: env.FYERS_APP_ID,
    env.FYERS_SECRET_KEY, and env.FYERS_REDIRECT_URI stay server-side
    (already configured directly in Cloudflare — see Step 1). The only
-   thing sent to the browser from this file is a plain confirmation
-   page with no token or secret embedded in it, or a plain-text error.
+   things sent to the browser from this file are: a plain confirmation
+   page with no token/secret embedded (login/callback), a JSON error
+   message with no token/secret embedded, or JSON candle data (Step 4)
+   — never the access_token itself.
 
-   ⚠ VERIFY BEFORE FIRST REAL LOGIN ATTEMPT: FYERS_LOGIN_URL and
-   FYERS_TOKEN_URL below (hostnames/paths, and the exact callback query
-   parameter name FYERS uses for the authorization code — this file
-   assumes "auth_code", matching several current community-documented
-   integrations, but also falls back to reading "code" defensively)
-   were not exercised against a live FYERS endpoint during this step —
-   Claude has no network access to test them. FYERS has changed API
-   hosts across versions before (api.fyers.in vs api-t1.fyers.in);
-   re-confirm against https://myapi.fyers.in/docsv3 if the first real
-   login attempt fails at the token-exchange step.
+   ⚠ VERIFY BEFORE FIRST REAL LOGIN/CANDLE ATTEMPT: FYERS_LOGIN_URL,
+   FYERS_TOKEN_URL, and (new in Step 4) FYERS_HISTORY_URL below
+   (hostnames/paths, the callback's code query parameter name, and the
+   exact Authorization header format for REST calls — this file
+   assumes "<app_id>:<access_token>", matching the format FYERS's own
+   WebSocket docs describe, but this was not independently confirmed
+   for the REST /data/history endpoint specifically) were not
+   exercised against a live FYERS endpoint during Steps 3–4 — Claude
+   has no network access to test them. FYERS has changed API hosts
+   across versions before (api.fyers.in vs api-t1.fyers.in);
+   re-confirm against https://myapi.fyers.in/docsv3 if a real call
+   fails at the token-exchange or candle-fetch step.
 ===================================================================== */
 
 const FYERS_LOGIN_URL = 'https://api-t1.fyers.in/api/v3/generate-authcode';
@@ -201,7 +212,9 @@ export async function handleFyersCallback(request, env) {
     // response does not give an authoritative exact expiry, so this is a
     // conservative estimate for status/UI purposes only — actual expiry
     // must still be handled via a 401 from FYERS itself, not trusted
-    // blindly. (No status route consumes this yet — that's Step 4.)
+    // blindly. Not yet consumed by anything (no status route exists in
+    // this project — handleFyersCandles() below checks 401s directly
+    // against the live FYERS response instead of this estimate).
     estimatedExpiresAt: obtainedAt + 20 * 60 * 60 * 1000
   };
 
@@ -211,4 +224,187 @@ export async function handleFyersCallback(request, env) {
     status: 200,
     headers: { 'Content-Type': 'text/html; charset=utf-8' }
   });
+}
+
+/* =====================================================================
+   Phase 2C, Step 4 — Historical candle retrieval only. No live
+   streaming, no order placement.
+===================================================================== */
+
+const FYERS_HISTORY_URL = 'https://api-t1.fyers.in/data/history';
+
+// FYERS resolution values accepted directly by /data/history: whole
+// minutes, or the literal string 'D' for daily. There is no native
+// weekly/monthly resolution — DannyTrade's 'W'/'M' timeframes are
+// intentionally NOT in this map and are rejected below with a clear
+// error, rather than silently resampled. Resampling daily candles
+// into calendar weeks/months correctly is deferred to a future step,
+// not implemented approximately here.
+const RESOLUTION_MAP = {
+  '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
+  '1H': '60', '4H': '240', 'D': 'D'
+};
+
+const INTRADAY_MINUTES = { '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1H': 60, '4H': 240 };
+
+// NSE cash-market session is ~9:15–15:30 IST, roughly 375 minutes.
+const NSE_TRADING_MINUTES_PER_DAY = 375;
+
+/* ---------------------------------------------------------------
+   Estimates the calendar-day range needed to cover `limit` candles
+   at a given timeframe, padded generously for weekends/holidays
+   (NSE trades roughly 21 days/month, not 30), and capped at FYERS's
+   documented per-request range limits (~366 days for daily, ~100
+   days for intraday resolutions).
+--------------------------------------------------------------- */
+function calendarDaysForLimit(timeframe, limit) {
+  if (timeframe === 'D') {
+    const calendarDays = Math.ceil(limit * 1.6) + 10; // padding for weekends/holidays
+    return Math.min(calendarDays, 366);
+  }
+  const minutesPerCandle = INTRADAY_MINUTES[timeframe] || 1;
+  const tradingDaysNeeded = Math.ceil((limit * minutesPerCandle) / NSE_TRADING_MINUTES_PER_DAY);
+  const calendarDays = Math.ceil(tradingDaysNeeded * 1.6) + 5;
+  return Math.min(calendarDays, 100);
+}
+
+function ymd(date) {
+  return date.toISOString().slice(0, 10); // yyyy-mm-dd, matches date_format=1
+}
+
+async function getStoredAccessToken(env) {
+  if (!env.FYERS_TOKENS) return null;
+  const raw = await env.FYERS_TOKENS.get(ACCESS_TOKEN_KV_KEY);
+  if (!raw) return null;
+  try {
+    const record = JSON.parse(raw);
+    return (record && record.access_token) ? record.access_token : null;
+  } catch {
+    return null;
+  }
+}
+
+function jsonEnvelope(body, status) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/* ---------------------------------------------------------------
+   POST /api/fyers/candles
+   Body: { symbol: '<already FYERS-formatted symbol, e.g.
+           "NSE:NIFTY50-INDEX">', timeframe: one of
+           '1m'|'3m'|'5m'|'15m'|'30m'|'1H'|'4H'|'D', limit: number }
+
+   Symbol/timeframe mapping from DannyTrade's own internal codes is
+   the caller's job (assets/js/chart/fyers-service.js, Decision C) —
+   this route expects an already-FYERS-shaped symbol string. Returns
+   { ok:true, candles:[{time,open,high,low,close,volume}, ...] }
+   (oldest first, matching DannyTrade's Candle contract) or
+   { ok:false, error } with an appropriate status code.
+--------------------------------------------------------------- */
+export async function handleFyersCandles(request, env) {
+  if (request.method !== 'POST') {
+    return jsonEnvelope({ ok: false, error: 'Method not allowed.' }, 405);
+  }
+  if (!env.FYERS_TOKENS) {
+    return jsonEnvelope({ ok: false, error: 'FYERS_TOKENS KV namespace is not bound on this Worker — check wrangler.toml.' }, 500);
+  }
+  if (!env.FYERS_APP_ID) {
+    return jsonEnvelope({ ok: false, error: 'FYERS is not configured on this Worker (missing FYERS_APP_ID).' }, 500);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonEnvelope({ ok: false, error: 'Request body must be valid JSON.' }, 400);
+  }
+
+  const symbol = body && body.symbol;
+  const timeframe = body && body.timeframe;
+  const rawLimit = body && body.limit;
+
+  if (!symbol || typeof symbol !== 'string') {
+    return jsonEnvelope({ ok: false, error: 'Missing or invalid "symbol".' }, 400);
+  }
+  const resolution = RESOLUTION_MAP[timeframe];
+  if (!resolution) {
+    return jsonEnvelope({
+      ok: false,
+      error: `Timeframe "${timeframe}" is not supported by FYERS historical data yet (only 1m/3m/5m/15m/30m/1H/4H/D — 'W'/'M' need resampling from daily candles, not yet implemented).`
+    }, 400);
+  }
+  const limit = (Number.isFinite(rawLimit) && rawLimit > 0) ? Math.floor(rawLimit) : 180;
+
+  const accessToken = await getStoredAccessToken(env);
+  if (!accessToken) {
+    return jsonEnvelope({ ok: false, error: 'Not authenticated with FYERS. Visit /api/fyers/login to connect your account.' }, 401);
+  }
+
+  const days = calendarDaysForLimit(timeframe, limit);
+  const rangeTo = new Date();
+  const rangeFrom = new Date(rangeTo.getTime() - days * 24 * 60 * 60 * 1000);
+
+  const historyUrl = new URL(FYERS_HISTORY_URL);
+  historyUrl.searchParams.set('symbol', symbol);
+  historyUrl.searchParams.set('resolution', resolution);
+  historyUrl.searchParams.set('date_format', '1');
+  historyUrl.searchParams.set('range_from', ymd(rangeFrom));
+  historyUrl.searchParams.set('range_to', ymd(rangeTo));
+  historyUrl.searchParams.set('cont_flag', '1');
+
+  let fyersRes;
+  try {
+    fyersRes = await fetch(historyUrl.toString(), {
+      headers: { Authorization: `${env.FYERS_APP_ID}:${accessToken}` }
+    });
+  } catch {
+    return jsonEnvelope({ ok: false, error: 'Could not reach FYERS to fetch historical data. Please try again shortly.' }, 502);
+  }
+
+  if (fyersRes.status === 401 || fyersRes.status === 403) {
+    // Decision B: no auto-refresh. Surface this plainly rather than
+    // attempting anything automatic.
+    return jsonEnvelope({
+      ok: false,
+      error: 'FYERS rejected the stored access token (expired or invalid). Visit /api/fyers/login to reconnect — this project does not auto-refresh tokens (Decision B).'
+    }, 401);
+  }
+  if (fyersRes.status === 429) {
+    return jsonEnvelope({ ok: false, error: 'FYERS rate limit reached. Please try again shortly.' }, 429);
+  }
+
+  let fyersJson = null;
+  try {
+    fyersJson = await fyersRes.json();
+  } catch {
+    fyersJson = null;
+  }
+
+  if (!fyersRes.ok || !fyersJson || fyersJson.s !== 'ok' || !Array.isArray(fyersJson.candles)) {
+    const detail = (fyersJson && fyersJson.message) ? fyersJson.message : `HTTP ${fyersRes.status}`;
+    return jsonEnvelope({ ok: false, error: `FYERS historical data request failed: ${detail}` }, 502);
+  }
+
+  // Convert FYERS's [timestamp, open, high, low, close, volume] arrays
+  // into DannyTrade's Candle contract. Not re-sorted here: FYERS's
+  // documented response is ascending-time (oldest first), matching
+  // what DannyTrade expects — re-sorting defensively would silently
+  // mask it if that were ever untrue, rather than surfacing it.
+  const candles = fyersJson.candles.map(row => ({
+    time: row[0],
+    open: row[1],
+    high: row[2],
+    low: row[3],
+    close: row[4],
+    volume: row.length > 5 ? row[5] : null
+  }));
+
+  // FYERS's own range granularity may return more than requested;
+  // keep only the most recent `limit`, preserving order.
+  const trimmed = candles.length > limit ? candles.slice(candles.length - limit) : candles;
+
+  return jsonEnvelope({ ok: true, candles: trimmed }, 200);
 }
