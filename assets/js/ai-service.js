@@ -80,6 +80,12 @@
      Each should resolve to a plain object using any subset of the
      ANALYSIS_SCHEMA_KEYS above. Missing keys are left null. Providers
      that throw or reject are caught and surfaced as status: "error".
+
+     Phase 2B additionally supports:
+       provider.analyzeChartStructure(payload) -> Promise<Structured Analysis>
+     This one is NOT normalized against ANALYSIS_SCHEMA_KEYS (it is routed
+     through dispatchStructured(), not dispatch()) — it resolves to the
+     nested Structured Analysis shape annotation-model.js expects, verbatim.
   --------------------------------------------------------------- */
 
   let activeProvider = null;
@@ -134,6 +140,45 @@
     }
   }
 
+  /* ---------------------------------------------------------------
+     Structured (Phase 2B) dispatcher — deliberately separate from
+     dispatch() above. dispatch() normalizes every result against the
+     flat ANALYSIS_SCHEMA_KEYS list built for Phase 1 prose analysis;
+     running Phase 2B's nested chart-structure response through that
+     normalization would silently strip every field it doesn't
+     recognize (swings, structureEvents, orderBlocks, fvgs, liquidity,
+     premiumDiscount, tradeLevels, decision). This dispatcher returns
+     the provider's result unmodified instead, so the nested shape
+     annotation-model.js expects reaches the caller intact.
+  --------------------------------------------------------------- */
+  async function dispatchStructured(methodName, payload) {
+    if (!activeProvider || typeof activeProvider[methodName] !== 'function') {
+      return {
+        status: 'not_connected',
+        message: 'AI Provider Not Connected',
+        data: null,
+        raw: null
+      };
+    }
+
+    try {
+      const result = await activeProvider[methodName](payload);
+      return {
+        status: 'ok',
+        message: 'Analysis received.',
+        data: result,
+        raw: result
+      };
+    } catch (err) {
+      return {
+        status: 'error',
+        message: (err && err.message) ? err.message : 'AI provider request failed.',
+        data: null,
+        raw: null
+      };
+    }
+  }
+
   const AIService = {
     ANALYSIS_SCHEMA_KEYS,
     emptyAnalysisPayload,
@@ -157,7 +202,14 @@
     generateTradingSignal(payload) { return dispatch('generateTradingSignal', payload); },
 
     /** Broader market/context read (session, sector, news) alongside a single-file analysis. payload: { instrument, timeframe } */
-    analyzeMarketContext(payload) { return dispatch('analyzeMarketContext', payload); }
+    analyzeMarketContext(payload) { return dispatch('analyzeMarketContext', payload); },
+
+    /** Phase 2B — index-anchored chart structure analysis (swings, structure
+        events, order blocks, FVGs, liquidity, premium/discount, trade levels,
+        decision) for direct use by annotation-model.js. payload: { symbol,
+        timeframe, candles }. Routed through dispatchStructured(), NOT
+        dispatch() — see dispatchStructured() above for why. */
+    analyzeChartStructure(payload) { return dispatchStructured('analyzeChartStructure', payload); }
   };
 
   /* ---------------------------------------------------------------
@@ -286,7 +338,12 @@
       analyzeCSV(payload)            { return call('csv', payload); },
       analyzeExcel(payload)          { return call('excel', payload); },
       generateTradingSignal(payload) { return call('tradingSignal', payload); },
-      analyzeMarketContext(payload)  { return call('marketContext', payload); }
+      analyzeMarketContext(payload)  { return call('marketContext', payload); },
+
+      /** Phase 2B — posts { type: 'chartStructure', payload } to the Worker's
+          /api/analyze route (see worker/index.js Step 2) and returns
+          body.analysis unmodified via call()'s existing unwrap logic. */
+      analyzeChartStructure(payload) { return call('chartStructure', payload); }
     };
   }
 
