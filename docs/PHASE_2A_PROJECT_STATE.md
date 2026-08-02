@@ -2,9 +2,13 @@
 
 **Document purpose:** This is the permanent single source of truth for DannyTrade's architecture and development status. It is written so that a future Claude session — with zero prior context, possibly on a different account — can read this file alone and immediately continue development safely, without re-deriving the architecture from source.
 
-**Last updated:** After Phase 2B Step 3 (frontend wiring — `ai-service.js` and `studio-bootstrap.js`). Phase 2B Step 4 (decision schema gap) and Step 5 (real-data validation) have **not** started.
+**Last updated:** Phase 2B is complete through Step 4, with Step 5 intentionally postponed until shortly before final release (see Phase 2B section below). Phase 2C (FYERS live market data) is now in progress — Step 1 of 7.
 
-**Companion document:** `PHASE_2B_ENGINEERING_CONTEXT.md` (repo root) carries the detailed, Phase-2B-specific engineering handover — exact files modified, public interfaces, API/Worker/frontend change detail, and the next exact implementation step. This document (`PHASE_2A_PROJECT_STATE.md`) remains the full-project source of truth; the companion document is a focused supplement for resuming Phase 2B work specifically. Read both if continuing Phase 2B.
+**Companion documents:**
+- `PHASE_2B_ENGINEERING_CONTEXT.md` (repo root) — the detailed, Phase-2B-specific engineering handover (AI chart intelligence). Phase 2B's own work is done except the postponed Step 5; read this only if resuming that.
+- `PHASE_2C_ENGINEERING_CONTEXT.md` (repo root) — the detailed, Phase-2C-specific engineering handover (FYERS live market data) — exact files modified, approved design decisions A/B/C, and the next exact implementation step. Read this to continue Phase 2C work.
+
+This document (`PHASE_2A_PROJECT_STATE.md`) remains the full-project source of truth; each companion document is a focused supplement for its own phase.
 
 ---
 
@@ -59,7 +63,7 @@ A second, independent chart UI lives lower on `studio.html`: a live TradingView 
 **Explicitly, deliberately incomplete in Phase 2A:** `studio-bootstrap.js` does **not** pass a `getStructuredAnalysis` function into the config. `studio-chart-init.js` falls back to `defaultAnalysisProvider()`, which returns a well-formed but entirely empty Structured Analysis object (`swings: [], structureEvents: [], ...  premiumDiscount: null, tradeLevels: null, decision: null`). **Result: the chart renders real candles and full replay/timeframe/legend functionality, but zero annotations and an empty Decision Panel, always, by design** — this was the deliberate stopping point of Phase 2A, not a bug.
 
 ### Phase 2B — AI Chart Intelligence (in progress)
-**Status: In progress. Steps 1–3 of an unnumbered step sequence are complete; Step 4 (decision schema gap) and Step 5 (real-data validation) have not started.**
+**Status: In progress. Steps 1–4 of an unnumbered step sequence are complete; Step 5 (real-data validation) is intentionally postponed until shortly before final release — see Section 8.**
 
 Phase 2B step history so far:
 - **Step 1 (complete):** Architectural review only, no code. Traced the full flow, confirmed the chart pipeline's contract-driven design, identified `getStructuredAnalysis` in `studio-chart-init.js` as the exact seam where a real AI engine plugs in, and identified that the Worker's existing Phase-1 schema (flat prose strings) is structurally incompatible with what `annotation-model.js` needs (indexed, numeric, geometry-bearing data) — a new schema was required, not a reuse of the old one.
@@ -78,6 +82,15 @@ Phase 2B step history so far:
   - `studio-bootstrap.js` gained a `getStructuredAnalysis: async (candles, timeframe, symbol) => {...}` function in the config object passed to `StudioChartInit.create()`. It uses the `candles` array `studio-chart-init.js`'s own `resolveAnnotations()` already has in scope — no separate `DataAdapters` fetch needed. Calls `AIService.analyzeChartStructure({symbol, timeframe, candles})`; falls back to the same empty-analysis shape `defaultAnalysisProvider()` returns on any non-`"ok"` status or thrown error, so a failed AI call degrades gracefully rather than crashing the chart.
   - Verified via diff against the pre-Step-3 files: additive except two pre-existing lines touched in each file (chaining a new object member onto an existing literal, and removing a now-inaccurate comment). `node --check` passed on both files.
   - **The pipeline is now wired end-to-end but functionally unverified.** No request with `type: 'chartStructure'` has actually been sent through a real Gemini call yet — that's Step 5's job. Until then, whether real annotations render correctly on the chart is unconfirmed.
+
+- **Step 4 (complete):** Resolved the `decision` schema gap (Section 5.2) by extending `CHART_STRUCTURE_RESPONSE_SCHEMA.decision` in `worker/index.js` **only**, additively — Option 1 from the design decision surfaced after Step 3 (extend the Worker schema to `decision-panel.js`'s full documented shape, rather than scope the panel down).
+  - Added 6 fields decision-panel.js already renders but the schema didn't produce: `riskReward` (NUMBER), `trend` (STRING enum `Bullish`/`Bearish`/`Sideways`), `structureSummary` (STRING), `lastStructureEvent` (STRING), `invalidationLevel` (STRING — chosen over NUMBER since decision-panel.js's own documented contract allows `number|string` and Gemini's schema format has no clean union type; STRING matches the existing Phase 1 price-field convention), and `educationalNotes` (ARRAY of STRING).
+  - **Correction to this document's prior claim:** the pre-Step-4 version of this document (and its companion) said the gap was 5 fields. Direct source reading during Step 4 found a 6th: `educationalNotes` was also documented in `decision-panel.js`'s header contract and read by its `update()` method, but was absent from both this document's gap list and the Worker schema. All 6 are now covered.
+  - All 6 new fields added to `decision`'s `required` array, matching the existing convention that every documented `decision` field is required whenever `decision` itself is non-null (the object itself remains `nullable`, unchanged).
+  - `CHART_STRUCTURE_SYSTEM_INSTRUCTION`'s decision field guidance extended with instructions for the 6 new fields (honesty-rule-consistent: `riskReward` mirrors `tradeLevels.riskReward` or an honest estimate, `lastStructureEvent` says "None observed" rather than fabricating one, etc.).
+  - `extractChartStructure()` required **no code change** — it already forwards `parsed.decision` as a single object without enumerating individual fields, so the new fields pass through automatically. Verified by simulating extraction against a mock Gemini response containing all 6 new fields.
+  - `annotation-model.js` received a **documentation-comment-only** change: its `decision` contract comment now lists all 14 fields. No code changed — `decision` was already passed through unconverted, per Section 5.2's original note.
+  - Verified via diff against the pre-Step-4 files: `worker/index.js` — exactly 2 spots touched (the `decision` schema block, and the system instruction's decision guidance string), zero other lines changed. `annotation-model.js` — exactly the `decision` doc-comment block touched, zero code lines changed. `node --check` passed on both files. No other file in the repository changed.
 
 ---
 
@@ -231,7 +244,9 @@ Arrays are oldest-first. `index` used throughout the Structured Analysis contrac
   decision: {                    // NOT converted to annotations — read directly by decision-panel.js
     finalDecision: 'BUY'|'SELL'|'WAIT'|'NO_TRADE',
     tradeGrade, marketPhase, trapRisk, liquidityTarget, tradeQuality,
-    confidence, reasoningSummary
+    confidence, reasoningSummary,
+    riskReward, trend, structureSummary, lastStructureEvent,        // added Step 4
+    invalidationLevel, educationalNotes                             // added Step 4
   } | null
 }
 ```
@@ -239,8 +254,9 @@ Field notes:
 - Every `index`/`startIndex`/`endIndex` must be a valid position in the **same candles array** passed to `buildAnnotations()` (frontend) or sent to the Worker (`chartStructure` request). `annotation-model.js` resolves index → time via `timeAt(candles, index)`.
 - `strength`/`confidence` are 0–1 floats; `annotation-model.js` clamps them defensively (`clamp01`) if out of range.
 - Every section is optional/nullable and processed in isolation — a malformed or missing section degrades to `[]`/`null` for that section only, never a hard failure.
+- `decision.riskReward` is NUMBER; `decision.trend` is STRING enum `Bullish`/`Bearish`/`Sideways`; `decision.invalidationLevel` is STRING (not NUMBER — see Section 12 note below); `decision.educationalNotes` is an ARRAY of STRING.
 
-**⚠ Known contract gap (flag for Step 4 — Phase 2B Step 3 is complete and does not touch this):** `decision-panel.js`'s own header documents a **larger** `decision` shape than `annotation-model.js` does — it additionally renders `trend`, `structureSummary`, `lastStructureEvent`, and `invalidationLevel` (as `number|string`), and `riskReward`, none of which appear in `annotation-model.js`'s documented `decision` object. The Worker's `CHART_STRUCTURE_RESPONSE_SCHEMA.decision` (added in Step 2) matches `annotation-model.js`'s **documented** shape exactly (`finalDecision, tradeGrade, marketPhase, trapRisk, liquidityTarget, tradeQuality, confidence, reasoningSummary`) — it does **not** yet include `trend`, `structureSummary`, `lastStructureEvent`, `invalidationLevel`, or `riskReward`. Now that Step 3 has wired the frontend, those five Decision Panel fields will render "Not available" on any real AI response until this is reconciled — this is not a bug in Step 3's wiring, it's a pre-existing schema gap between two files that were never reconciled. Resolve by extending `CHART_STRUCTURE_RESPONSE_SCHEMA.decision` (additive) to match decision-panel.js's full documented set, or explicitly scope Phase 2B to the smaller set and update decision-panel.js's comment to match reality. This is Step 4 — see `PHASE_2B_ENGINEERING_CONTEXT.md` Section 13 for the design decision it must resolve first.
+**✅ Resolved in Step 4 (previously a known contract gap):** `decision-panel.js`'s own header documents a shape that `annotation-model.js` and the Worker schema previously lacked 6 fields for — `trend`, `structureSummary`, `lastStructureEvent`, `invalidationLevel`, `riskReward`, and `educationalNotes` (this document and its companion previously listed only 5 of these 6; `educationalNotes` was found missing and added during Step 4's implementation — see Section 2's Step 4 entry). `CHART_STRUCTURE_RESPONSE_SCHEMA.decision` in `worker/index.js` now covers all 14 fields `decision-panel.js` can render, all required whenever `decision` itself is non-null. `annotation-model.js`'s documented contract (shown above) was updated to match — Option 1 from the design decision surfaced after Step 3 (extend the Worker schema to the panel's full shape, rather than scope the panel down). `extractChartStructure()` needed no code change since it forwards `decision` as a whole object.
 
 ### 5.3 Annotation (annotation-model.js's output contract; chart-renderer.js's input contract)
 ```
@@ -297,8 +313,7 @@ Both request types (Phase 1 prose, Phase 2B `chartStructure`) share this exact e
 
 - **No live market data.** Only the mock provider is implemented. `uploaded-ohlc`, `angel-one`, `tradingview-data`, and `nse-feed` are registered as stub providers that reject clearly ("Phase 2A architectural placeholder, not a live data source") — the interface exists, the implementation doesn't.
 - **AI-generated chart annotations are now wired but functionally unverified.** As of Phase 2B Step 3, `studio-bootstrap.js` injects a real `getStructuredAnalysis` that calls the Worker's `chartStructure` endpoint. This has not yet been exercised against a live Gemini response (Step 5, not started) — until then, whether real annotations actually appear correctly on the chart, or whether the pipeline silently falls back to the empty shape in practice, is unconfirmed.
-- **Decision Panel will still show "Not available" for 5 fields even once real data flows**, direct consequence of the schema gap below — it's rendering-ready and now wired to real data, but those 5 specific fields have no producer yet.
-- **Two AI schemas exist and are not reconciled for the `decision` object** (Section 5.2's gap) — `decision-panel.js` can render 5 fields (`trend`, `structureSummary`, `lastStructureEvent`, `invalidationLevel`, `riskReward`-adjacent framing) that neither `annotation-model.js`'s documented contract nor the Worker's `CHART_STRUCTURE_RESPONSE_SCHEMA` currently produce. This is Phase 2B Step 4's exact job — see `PHASE_2B_ENGINEERING_CONTEXT.md` Section 13 for the design decision it must resolve first.
+- **Resolved in Step 4:** the Decision Panel's schema gap is closed — `CHART_STRUCTURE_RESPONSE_SCHEMA.decision` now produces all fields `decision-panel.js` can render. Whether Gemini actually populates them well in practice (as opposed to the schema merely accepting them) is still unverified until Step 5.
 - **Live tick simulation (`provider.subscribe()`) is implemented but unused** — nothing in the current bootstrap subscribes to it; the chart only ever loads historical batches via `getCandles()`.
 - **No authentication, no persistence, no database, no user accounts anywhere in the project.**
 - **No automated tests** exist in the repository (no test framework, no CI config observed).
@@ -313,12 +328,22 @@ Both request types (Phase 1 prose, Phase 2B `chartStructure`) share this exact e
 > For the exact next implementation step, current step-by-step status, and full engineering detail, see `PHASE_2B_ENGINEERING_CONTEXT.md`. Summary below.
 
 - **Step 3 (complete):** Added `AIService.analyzeChartStructure(payload)` to `ai-service.js`, routed through a new `dispatchStructured()` dispatcher that deliberately bypasses the Phase 1 `ANALYSIS_SCHEMA_KEYS` normalization. Added a matching `analyzeChartStructure` method to the Gemini Worker provider. Added `getStructuredAnalysis` to `studio-bootstrap.js`'s config object, calling the new method and falling back to the empty-analysis shape on failure. Additive change confined to exactly 2 files, as anticipated.
-- **Step 4 (next, not started, not yet approved):** Resolve the `decision` schema gap (Section 5.2) — extend `CHART_STRUCTURE_RESPONSE_SCHEMA.decision` additively to cover `trend`, `structureSummary`, `lastStructureEvent`, `invalidationLevel`, and confirm `riskReward` framing, so the Decision Panel's full documented field set can actually populate. Requires resolving a design decision first (extend the Worker schema to `decision-panel.js`'s full shape vs. scope down `decision-panel.js`'s documented shape to match the current schema) — see `PHASE_2B_ENGINEERING_CONTEXT.md` Section 13.
-- **Step 5 (anticipated):** Real-world validation — feed genuine NIFTY/BANKNIFTY OHLC history through `chartStructure` and manually verify annotation placement, index accuracy, and that Gemini respects the "never invent an index outside range" instruction under real data volume (180+ candles).
+- **Step 4 (complete):** Resolved the `decision` schema gap (Section 5.2) — extended `CHART_STRUCTURE_RESPONSE_SCHEMA.decision` in `worker/index.js` additively to cover `riskReward`, `trend`, `structureSummary`, `lastStructureEvent`, `invalidationLevel`, and `educationalNotes` (6 fields — one more than originally scoped; `educationalNotes` was found missing during implementation). Chose Option 1 (extend the Worker schema to `decision-panel.js`'s full shape). `annotation-model.js` received a documentation-comment-only update; no code logic changed anywhere. Confined to exactly 2 files, verified by diff.
+- **Step 5 (intentionally postponed — not the next step to pick up):** Real-world validation — feed genuine NIFTY/BANKNIFTY OHLC history through `chartStructure`, running against the actually-deployed Cloudflare Worker (not just local static/structural review) with a real Gemini response, and manually verify annotation placement, index accuracy, that Gemini respects the "never invent an index outside range" instruction under real data volume (180+ candles), and that the 6 new Step 4 decision fields populate sensibly rather than just satisfying the schema structurally. **Deliberately deferred until shortly before final release, per explicit user instruction** — not a stalled or forgotten step. Do not begin Step 5 without explicit approval, even if it is the only remaining Phase 2B step on this roadmap.
 - **Resolved in Step 3:** should the AI be called once per timeframe switch (live), cached, or both? Decided: call live, no additional caching beyond `timeframe-manager.js`'s existing `annotationsProvider` FIFO cache and stale-response protection — no new plumbing was needed, just correct wiring, as anticipated.
 
-### Phase 2C (not started, not designed)
-Likely candidates based on the stub providers already scaffolded in `data-adapter.js`: implementing a real data source (`uploaded-ohlc` parsing CSV/XLSX into the Candle contract is the lowest-effort real provider; `angel-one`/`nse-feed`/`tradingview-data` require external API integration and credentials). Any of these are additive — implement the existing Provider interface, register it, no changes needed to renderer/replay/timeframe-manager.
+### Phase 2C (in progress — Step 1 of 7 complete) — FYERS Live Market Data
+> Full engineering detail, decisions A/B/C, and exact next step: see `PHASE_2C_ENGINEERING_CONTEXT.md`. Summary below.
+
+Design approved. FYERS API v3 will be the first live provider (user has an active account); Flattrade added later as a second provider once that account is active — same pattern, its own future roadmap item. Registers a new `fyers` provider in `data-adapter.js` (alongside the existing `angel-one` stub, which is untouched) satisfying the existing Provider interface — no changes needed to `chart-renderer.js`, `replay-engine.js`, `timeframe-manager.js`, `legend.js`, `annotation-model.js`, or `decision-panel.js`.
+
+- **Decision A (approved):** dedicated `/api/fyers/*` Worker route family, parallel to `/api/analyze`.
+- **Decision B (approved):** manual daily re-login. No FYERS PIN is stored as a Cloudflare secret, ever — no auto-refresh. User prioritized security/simplicity over full automation.
+- **Decision C (approved):** a separate `assets/js/chart/fyers-service.js` client module; `data-adapter.js` stays focused on the Provider interface, not FYERS-specific glue.
+- **Step 1 (complete):** FYERS app registration + secrets/config agreement. `FYERS_APP_ID`, `FYERS_SECRET_KEY`, and `FYERS_REDIRECT_URI` are already configured directly in Cloudflare by the user — no credentials were pasted into chat. See `PHASE_2C_ENGINEERING_CONTEXT.md` Section 4 for the exact assumed `env` names Step 3's code will read.
+
+### Phase 2C — superseded placeholder text (kept for history)
+The original placeholder here ("implementing a real data source... `uploaded-ohlc` is the lowest-effort... `angel-one`/`nse-feed`/`tradingview-data` require external API integration") is superseded now that Phase 2C has an approved design targeting `fyers` specifically (a new provider ID, not a repurposing of the `angel-one` stub).
 
 ### Phase 3 (not started, not designed)
 Not yet defined in any prior session. Do not assume scope — ask before designing.
