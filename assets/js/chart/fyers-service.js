@@ -78,6 +78,23 @@
 
     if(!res.ok || !json || json.ok !== true || !Array.isArray(json.candles)){
       const detail = (json && json.error) ? json.error : `HTTP ${res.status}`;
+
+      // --- TEMPORARY DIAGNOSTIC (401 investigation) — remove once resolved.
+      // Identifies which of the two 401 branches in worker/fyers.js's
+      // handleFyersCandles() actually fired, using the exact wording of
+      // each branch's error message (see that file). Does not change
+      // which error is thrown below — only adds console output first.
+      if(res.status === 401){
+        const branch = detail.indexOf('Not authenticated with FYERS') !== -1
+          ? 'No access token found in KV'
+          : (detail.indexOf('FYERS rejected the stored access token') !== -1
+            ? 'Stored access token rejected by FYERS'
+            : 'Unknown 401 branch (unexpected error text — Worker message did not match either known branch)');
+        console.log('[FyersService][DIAG] 401 branch:', branch);
+        console.log('[FyersService][DIAG] exact Worker error message:', detail);
+      }
+      // --- END TEMPORARY DIAGNOSTIC ---
+
       throw new Error(`[FyersService] ${detail}`);
     }
     return json.candles;
