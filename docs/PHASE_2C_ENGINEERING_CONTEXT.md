@@ -8,7 +8,7 @@
 
 ## 1. Current State
 
-**Phase 2C, Step 2 of 7 — complete.** `wrangler.toml` now declares the `FYERS_TOKENS` KV namespace binding. No FYERS code exists anywhere in the project yet — Step 2 was deliberately config-only, per explicit scope. Phase 2B is otherwise complete except its own intentionally-postponed Step 5 (unrelated to this phase).
+**Phase 2C, Step 3 of 7 — complete.** FYERS OAuth authentication (login redirect + token-exchange callback) is implemented and KV-tested with mocks. Historical data fetching, live streaming, and order placement are explicitly not implemented yet. Phase 2B is otherwise complete except its own intentionally-postponed Step 5 (unrelated to this phase).
 
 Objective: replace the mock data adapter with FYERS API v3 as the first live/historical NSE/BSE/MCX data source, registered as a new `fyers` provider satisfying the existing Provider interface in `data-adapter.js`. Flattrade is a later, separate milestone once that account is active.
 
@@ -56,13 +56,41 @@ Note: Decision B simplifies Step 4 relative to the original design proposal's fr
 
 ## 5. Step 2 — KV Namespace Configuration + `wrangler.toml`
 
-**Status: complete.** Config-only, as explicitly scoped — no FYERS authentication code was written.
+**Status: complete.** Config-only, as explicitly scoped — no FYERS authentication code was written in this step.
 
-- `wrangler.toml` gained a `[[kv_namespaces]]` block: `binding = "FYERS_TOKENS"`, `id = "REPLACE_WITH_KV_NAMESPACE_ID"`.
-- **Setup action required from the user, outside this repo, before Step 3 is deployed:** run `wrangler kv namespace create FYERS_TOKENS` (this requires Cloudflare account access Claude does not have) and replace `REPLACE_WITH_KV_NAMESPACE_ID` in `wrangler.toml` with the real id it prints. If local `wrangler dev` testing is used, also run `wrangler kv namespace create FYERS_TOKENS --preview` and add a `preview_id` to the same block.
-- Nothing in the codebase reads or writes this namespace yet — that begins in Step 3.
-- **Testing performed:** `wrangler.toml` was parsed with Python's `tomllib` to confirm it's syntactically valid TOML and that the `kv_namespaces` table has the expected shape (`binding`/`id` keys, list form). Grepped the full codebase for `FYERS`/`fyers` and confirmed zero references exist outside `docs/` and `wrangler.toml`'s own comments — Step 2 introduced no code. **Not tested:** actual Cloudflare-side namespace creation or binding resolution — that requires `wrangler` deployment access Claude does not have; the user must create the real namespace and swap in its id before Step 3's code can run against it.
+- `wrangler.toml` gained a `[[kv_namespaces]]` block: `binding = "FYERS_TOKENS"`. The user has since created the real namespace via `wrangler kv namespace create FYERS_TOKENS` and replaced the placeholder id with the real one (confirmed complete before Step 3 began).
+- **Testing performed at the time:** `wrangler.toml` was parsed with Python's `tomllib` to confirm valid TOML and correct `kv_namespaces` shape. Grepped the codebase to confirm zero FYERS code existed yet. Actual Cloudflare-side namespace creation/binding was necessarily untested by Claude (no deployment access) — the user completed and confirmed that part directly.
 
-## 6. Next Exact Step
+## 6. Step 3 — FYERS OAuth Authentication
 
-**Step 3 — OAuth login + callback routes.** Not yet approved — do not implement until the user explicitly approves it. Adds `worker/fyers.js` (new file) plus `/api/fyers/login` and `/api/fyers/callback` routing in `worker/index.js`, per `PHASE_2C_DESIGN_PROPOSAL.md` Sections 2 and 5. This is the first step that writes to the `FYERS_TOKENS` KV namespace and the first step that touches FYERS credentials at runtime (reading `env.FYERS_APP_ID` / `env.FYERS_SECRET_KEY` / `env.FYERS_REDIRECT_URI`, already confirmed present in Cloudflare). Before this step is deployed, the real KV namespace id from Step 2's setup action must be in place, or the Worker will fail to bind at deploy time.
+**Status: complete.** Scope strictly followed: OAuth login/callback/token-exchange/storage only. No historical data fetching, no live WebSocket streaming, no order placement.
+
+**New file — `worker/fyers.js`:**
+- `handleFyersLogin(request, env)` — generates a random CSRF `state`, stores it in `FYERS_TOKENS` KV with a 5-minute TTL (`oauth_state:<state>` → `'1'`), and redirects the browser to FYERS's login page (`client_id`, `redirect_uri`, `response_type=code`, `state`). Returns a plain-text 500 if `FYERS_APP_ID`/`FYERS_REDIRECT_URI`/the KV binding are missing, rather than failing silently.
+- `handleFyersCallback(request, env)` — reads `auth_code` (falls back to `code` defensively) and `state` from the query string; validates `state` against KV and deletes it immediately (single-use, so a replayed callback URL can't be reused); computes `appIdHash` = SHA-256(`app_id:secret_key`) via the Workers-native `crypto.subtle`; POSTs to FYERS's token-exchange endpoint; on success, stores **only** `{access_token, obtainedAt, estimatedExpiresAt}` under the singleton KV key `fyers_access_token`; returns a plain HTML confirmation page (no token, code, or secret in the response body) that redirects back to `studio.html?fyersConnected=1`.
+- **Decision B enforced in code, not just in the docs:** `tokenJson.refresh_token`, if FYERS returns one, is read from the response but never written to KV, never logged, never returned — verified explicitly by a dedicated test (Section 7). No PIN is referenced anywhere in this file.
+- **Unverified assumption, flagged in the file's own header comment:** the exact FYERS hostnames/paths (`api-t1.fyers.in/api/v3/generate-authcode` and `.../validate-authcode`) and the callback's authorization-code query parameter name (`auth_code`, with a defensive fallback to `code`) were not exercised against a live FYERS endpoint — Claude has no network access to test them. If the first real login attempt fails specifically at the token-exchange step, re-verify these against https://myapi.fyers.in/docsv3 first.
+
+**`worker/index.js` changes (additive only):**
+- One new top-of-file import: `import { handleFyersLogin, handleFyersCallback } from './fyers.js';`
+- Two new routing branches inside the existing `fetch()` handler, checked after `/api/analyze` and before the static-asset fallback: `/api/fyers/login` → `handleFyersLogin`, `/api/fyers/callback` → `handleFyersCallback`. Nothing about the existing `/api/analyze` handling, CORS, model resolution, or static-asset serving was touched.
+
+## 7. Testing Performed
+
+No deployment access, so nothing was tested against a live FYERS endpoint or a real Cloudflare KV namespace. Instead:
+- `node --check` passed on both `worker/fyers.js` and `worker/index.js`.
+- A 25-assertion mocked test harness (in-memory KV mock replicating `get`/`put`-with-`expirationTtl`/`delete`; a mocked `global.fetch` standing in for the FYERS token endpoint; Node's real `crypto.subtle` for the hash) exercised both handlers end-to-end, all 25 passing:
+  - Missing-config paths (`FYERS_APP_ID`/`FYERS_REDIRECT_URI`/`FYERS_TOKENS` binding absent) return a clear 500, not a crash.
+  - A successful login redirect targets the correct URL with the correct query params, generates and stores a `state`, and never puts the secret key anywhere in the redirect URL.
+  - A callback missing `state`, or presenting an unknown/expired `state`, is rejected with 400.
+  - A successful callback: calls the token endpoint with the correct `grant_type`, `code`, and a `appIdHash` independently recomputed and verified byte-for-byte against the expected SHA-256; stores exactly `access_token` in KV; **confirms `refresh_token` is never persisted** (Decision B); returns HTML with no token string anywhere in the body; deletes the `state` from KV.
+  - **Replay protection verified directly:** re-submitting the exact same (now-consumed) callback URL is rejected with 400, proving the single-use `state` check actually prevents reuse, not just that it exists in code.
+  - A FYERS token-exchange failure response (`s: "error"`) is surfaced as a 502 with the FYERS-provided message, not a silent failure or a 200.
+- Diffed against the pre-Step-3 project state: only `worker/fyers.js` (new) and `worker/index.js` (exactly the import + 2 routing branches) changed. No other file touched.
+- Grepped `worker/fyers.js` for any reference to historical data, WebSocket, or order placement — none found outside the header comment explicitly stating they're excluded.
+
+**Not tested, and cannot be tested without deployment access:** an actual FYERS login page redirect and real user login; the real token-exchange call reaching FYERS's actual endpoint (hostname/path correctness — flagged above); real Cloudflare KV read/write latency or consistency behavior; whether the assumed `env.FYERS_APP_ID`/`FYERS_SECRET_KEY`/`FYERS_REDIRECT_URI`/`FYERS_TOKENS` bindings the user confirmed in Cloudflare actually match these exact names once deployed. **The first real end-to-end login attempt after deployment is the true test of this step** — treat it accordingly, not as a formality.
+
+## 8. Next Exact Step
+
+**Step 4 — token status route (`/api/fyers/status`).** Not yet approved — do not implement until the user explicitly approves it. Simplified by Decision B: since there's no auto-refresh path, this step is just a read-only check of whether `fyers_access_token` exists in KV (and, loosely, whether `estimatedExpiresAt` has passed) — not a refresh implementation. This is what the `fyers` provider's `connect()` method (Step 6) will call to decide whether to prompt the user to log in.
