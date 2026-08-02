@@ -8,7 +8,7 @@
 
 ## 1. Current State
 
-**Phase 2C, Step 1 of 7 — complete.** No code has been written yet (Step 1 has none by design). Phase 2B is otherwise complete except its own intentionally-postponed Step 5 (unrelated to this phase).
+**Phase 2C, Step 2 of 7 — complete.** `wrangler.toml` now declares the `FYERS_TOKENS` KV namespace binding. No FYERS code exists anywhere in the project yet — Step 2 was deliberately config-only, per explicit scope. Phase 2B is otherwise complete except its own intentionally-postponed Step 5 (unrelated to this phase).
 
 Objective: replace the mock data adapter with FYERS API v3 as the first live/historical NSE/BSE/MCX data source, registered as a new `fyers` provider satisfying the existing Provider interface in `data-adapter.js`. Flattrade is a later, separate milestone once that account is active.
 
@@ -54,8 +54,15 @@ Note: Decision B simplifies Step 4 relative to the original design proposal's fr
 
 ---
 
-## 5. Next Exact Step
+## 5. Step 2 — KV Namespace Configuration + `wrangler.toml`
 
-**Step 2 — KV namespace + `wrangler.toml` wiring (config only).** Not yet approved — do not implement until the user explicitly approves it. Creates and binds a new `FYERS_TOKENS` KV namespace (see `PHASE_2C_DESIGN_PROPOSAL.md` Section 6) to persist the OAuth `access_token`/`refresh_token` across requests. No behavior change yet — nothing reads or writes the namespace until Step 3.
+**Status: complete.** Config-only, as explicitly scoped — no FYERS authentication code was written.
 
-**Cloudflare action the user will need to take for Step 2** (to be given exactly, per the user's standing instruction, once Step 2 is approved and proposed): run `wrangler kv namespace create FYERS_TOKENS` (or the dashboard equivalent) to obtain a namespace `id`, which then goes into `wrangler.toml`'s `[[kv_namespaces]]` block alongside the `binding = "FYERS_TOKENS"` entry Claude will add to the file.
+- `wrangler.toml` gained a `[[kv_namespaces]]` block: `binding = "FYERS_TOKENS"`, `id = "REPLACE_WITH_KV_NAMESPACE_ID"`.
+- **Setup action required from the user, outside this repo, before Step 3 is deployed:** run `wrangler kv namespace create FYERS_TOKENS` (this requires Cloudflare account access Claude does not have) and replace `REPLACE_WITH_KV_NAMESPACE_ID` in `wrangler.toml` with the real id it prints. If local `wrangler dev` testing is used, also run `wrangler kv namespace create FYERS_TOKENS --preview` and add a `preview_id` to the same block.
+- Nothing in the codebase reads or writes this namespace yet — that begins in Step 3.
+- **Testing performed:** `wrangler.toml` was parsed with Python's `tomllib` to confirm it's syntactically valid TOML and that the `kv_namespaces` table has the expected shape (`binding`/`id` keys, list form). Grepped the full codebase for `FYERS`/`fyers` and confirmed zero references exist outside `docs/` and `wrangler.toml`'s own comments — Step 2 introduced no code. **Not tested:** actual Cloudflare-side namespace creation or binding resolution — that requires `wrangler` deployment access Claude does not have; the user must create the real namespace and swap in its id before Step 3's code can run against it.
+
+## 6. Next Exact Step
+
+**Step 3 — OAuth login + callback routes.** Not yet approved — do not implement until the user explicitly approves it. Adds `worker/fyers.js` (new file) plus `/api/fyers/login` and `/api/fyers/callback` routing in `worker/index.js`, per `PHASE_2C_DESIGN_PROPOSAL.md` Sections 2 and 5. This is the first step that writes to the `FYERS_TOKENS` KV namespace and the first step that touches FYERS credentials at runtime (reading `env.FYERS_APP_ID` / `env.FYERS_SECRET_KEY` / `env.FYERS_REDIRECT_URI`, already confirmed present in Cloudflare). Before this step is deployed, the real KV namespace id from Step 2's setup action must be in place, or the Worker will fail to bind at deploy time.
