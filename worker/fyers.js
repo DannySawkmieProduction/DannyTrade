@@ -340,6 +340,10 @@ export async function handleFyersCandles(request, env) {
 
   const accessToken = await getStoredAccessToken(env);
   if (!accessToken) {
+    // --- TEMPORARY DIAGNOSTIC (401 investigation) — remove once resolved.
+    // Visible via `wrangler tail` / the Cloudflare dashboard logs, not the
+    // browser console (this runs server-side). ---
+    console.log('[FYERS DIAG][Worker] 401 branch: No access token found in KV (key:', ACCESS_TOKEN_KV_KEY, ')');
     return jsonEnvelope({ ok: false, error: 'Not authenticated with FYERS. Visit /api/fyers/login to connect your account.' }, 401);
   }
 
@@ -367,6 +371,10 @@ export async function handleFyersCandles(request, env) {
   if (fyersRes.status === 401 || fyersRes.status === 403) {
     // Decision B: no auto-refresh. Surface this plainly rather than
     // attempting anything automatic.
+    // --- TEMPORARY DIAGNOSTIC (401 investigation) — remove once resolved.
+    // Visible via `wrangler tail` / the Cloudflare dashboard logs, not the
+    // browser console (this runs server-side). ---
+    console.log('[FYERS DIAG][Worker] 401 branch: Stored access token rejected by FYERS (FYERS status:', fyersRes.status, ')');
     return jsonEnvelope({
       ok: false,
       error: 'FYERS rejected the stored access token (expired or invalid). Visit /api/fyers/login to reconnect — this project does not auto-refresh tokens (Decision B).'
