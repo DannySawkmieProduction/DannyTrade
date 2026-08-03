@@ -371,13 +371,42 @@ export async function handleFyersCandles(request, env) {
   if (fyersRes.status === 401 || fyersRes.status === 403) {
     // Decision B: no auto-refresh. Surface this plainly rather than
     // attempting anything automatic.
-    // --- TEMPORARY DIAGNOSTIC (401 investigation) — remove once resolved.
-    // Visible via `wrangler tail` / the Cloudflare dashboard logs, not the
-    // browser console (this runs server-side). ---
-    console.log('[FYERS DIAG][Worker] 401 branch: Stored access token rejected by FYERS (FYERS status:', fyersRes.status, ')');
+    //
+    // Read FYERS's actual response body before returning anything —
+    // do not guess at why FYERS rejected the token. Body may or may
+    // not be valid JSON, so preserve the raw text either way.
+    let rawBody = '';
+    try { rawBody = await fyersRes.text(); } catch { rawBody = ''; }
+
+    let parsedBody = null;
+    try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = null; }
+
+    const responseHeaders = {};
+    fyersRes.headers.forEach((value, key) => { responseHeaders[key] = value; });
+
+    const fyersS = parsedBody && parsedBody.s !== undefined ? parsedBody.s : null;
+    const fyersCode = parsedBody && parsedBody.code !== undefined ? parsedBody.code : null;
+    const fyersMessage = parsedBody && parsedBody.message !== undefined ? parsedBody.message : null;
+
+    // Never let the access token or app secret reach the logs, even if
+    // FYERS happened to echo something containing them back.
+    const secretsToMask = [accessToken, env.FYERS_SECRET_KEY].filter(Boolean);
+    const mask = (value) => {
+      if (typeof value !== 'string') return value;
+      let out = value;
+      for (const secret of secretsToMask) out = out.split(secret).join('[REDACTED]');
+      return out;
+    };
+
+    console.log('[FYERS DIAG][Worker] /data/history rejected — HTTP status:', fyersRes.status);
+    console.log('[FYERS DIAG][Worker] FYERS response headers:', mask(JSON.stringify(responseHeaders)));
+    console.log('[FYERS DIAG][Worker] FYERS raw response body:', mask(rawBody));
+    console.log('[FYERS DIAG][Worker] FYERS parsed s:', fyersS, 'code:', fyersCode, 'message:', mask(fyersMessage));
+
     return jsonEnvelope({
       ok: false,
-      error: 'FYERS rejected the stored access token (expired or invalid). Visit /api/fyers/login to reconnect — this project does not auto-refresh tokens (Decision B).'
+      error: 'FYERS rejected the stored access token (expired or invalid). Visit /api/fyers/login to reconnect — this project does not auto-refresh tokens (Decision B).',
+      fyers: { code: fyersCode, message: fyersMessage }
     }, 401);
   }
   if (fyersRes.status === 429) {
