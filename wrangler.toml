@@ -1,6 +1,7 @@
 name = "dannytrade"
 main = "worker/index.js"
 compatibility_date = "2026-07-01"
+keep_vars = true
 
 # Serves the existing static site (index.html, studio.html, style.css,
 # assets/js/*, etc.) unchanged. The Worker only intercepts /api/analyze;
@@ -14,7 +15,7 @@ binding = "ASSETS"
 [vars]
 GEMINI_MODEL = "gemini-3.6-flash"
 
-# Phase 2C, Step 2 — persists the FYERS OAuth access_token (and its
+# Phase 2C, Step 2 persists the FYERS OAuth access_token (and its
 # expiry) across requests and Worker isolate recycles. Nothing reads
 # or writes this namespace yet — that starts in Step 3 (OAuth login/
 # callback routes). No refresh_token/PIN logic is stored here or
@@ -23,9 +24,8 @@ GEMINI_MODEL = "gemini-3.6-flash"
 #
 # SETUP REQUIRED (run once, outside this repo, before Step 3 is
 # deployed): `wrangler kv namespace create FYERS_TOKENS` prints a
-# namespace id — replace REPLACE_WITH_KV_NAMESPACE_ID below with that
-# id. `wrangler kv namespace create FYERS_TOKENS --preview` for a
-# separate preview_id if you use `wrangler dev` locally.
+# namespace id. Replace the id below if you create a different
+# namespace.
 [[kv_namespaces]]
 binding = "FYERS_TOKENS"
 id = "9bcd786979a94628826c9c35ff08fa01"
