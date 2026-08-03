@@ -58,6 +58,7 @@ const panelSub = document.getElementById('panelSub');
 const analysisFields = document.getElementById('analysisFields');
 const connDot = document.getElementById('connDot');
 const connStatusText = document.getElementById('connStatusText');
+const heroConnStatus = document.getElementById('heroConnStatus');
 const verdictTag = document.getElementById('verdictTag');
 const confidenceFill = document.getElementById('confidenceFill');
 const entryVal = document.getElementById('entryVal');
@@ -142,6 +143,9 @@ function renderConnectionStatus(){
   const connected = typeof AIService !== 'undefined' && AIService.isConnected();
   connDot.className = 'conn-dot' + (connected ? ' connected' : '');
   connStatusText.textContent = connected ? 'Gemini AI Connected' : 'AI Provider Not Connected';
+  if (heroConnStatus) {
+    heroConnStatus.textContent = connected ? 'Gemini AI Connected.' : 'AI Provider Not Connected.';
+  }
 }
 
 function buildCard(f){
