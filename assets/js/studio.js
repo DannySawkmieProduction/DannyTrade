@@ -141,7 +141,7 @@ function render(){
 function renderConnectionStatus(){
   const connected = typeof AIService !== 'undefined' && AIService.isConnected();
   connDot.className = 'conn-dot' + (connected ? ' connected' : '');
-  connStatusText.textContent = connected ? 'AI Provider Connected' : 'AI Provider Not Connected';
+  connStatusText.textContent = connected ? 'Gemini AI Connected' : 'AI Provider Not Connected';
 }
 
 function buildCard(f){
