@@ -281,8 +281,11 @@
     }
   };
 
-  register(mockProvider);
   register(fyersProvider);
+register(mockProvider);
+
+// Force FYERS as the active provider
+setActive('fyers');
   register(createStubProvider('uploaded-ohlc', 'Uploaded OHLC (CSV/XLSX)', TIMEFRAMES.slice()));
   register(createStubProvider('angel-one', 'Angel One SmartAPI', TIMEFRAMES.slice()));
   register(createStubProvider('tradingview-data', 'TradingView Market Data', TIMEFRAMES.slice()));
