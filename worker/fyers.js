@@ -102,6 +102,12 @@ function connectedHtml() {
    are entered on FYERS's domain — never inside DannyTrade's UI.
 --------------------------------------------------------------- */
 export async function handleFyersLogin(request, env) {
+  // --- TEMPORARY DIAGNOSTIC (env var presence check) — remove once resolved.
+  // Logs booleans ONLY — never the actual secret/id/uri values.
+  console.log('[FYERS DIAG][login] FYERS_APP_ID present:', !!env.FYERS_APP_ID,
+    '| FYERS_SECRET_KEY present:', !!env.FYERS_SECRET_KEY,
+    '| FYERS_REDIRECT_URI present:', !!env.FYERS_REDIRECT_URI);
+
   if (!env.FYERS_APP_ID || !env.FYERS_REDIRECT_URI) {
     return textResponse(
       'FYERS is not configured on this Worker (missing FYERS_APP_ID or FYERS_REDIRECT_URI). ' +
@@ -138,6 +144,12 @@ export async function handleFyersLogin(request, env) {
    token, the code, or any secret to the browser.
 --------------------------------------------------------------- */
 export async function handleFyersCallback(request, env) {
+  // --- TEMPORARY DIAGNOSTIC (env var presence check) — remove once resolved.
+  // Logs booleans ONLY — never the actual secret/id/uri values.
+  console.log('[FYERS DIAG][callback] FYERS_APP_ID present:', !!env.FYERS_APP_ID,
+    '| FYERS_SECRET_KEY present:', !!env.FYERS_SECRET_KEY,
+    '| FYERS_REDIRECT_URI present:', !!env.FYERS_REDIRECT_URI);
+
   const url = new URL(request.url);
   const authCode = url.searchParams.get('auth_code') || url.searchParams.get('code');
   const state = url.searchParams.get('state');
