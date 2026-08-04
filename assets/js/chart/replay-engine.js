@@ -30,6 +30,37 @@
        touching any UI directly.
 
    =====================================================================
+   INITIAL VIEW vs. REPLAY START POSITION
+   =====================================================================
+   These are two different concepts and this module keeps them as two
+   different pieces of state:
+
+     - `resetIndex` (derived from the `startIndex` constructor option)
+       is where reset() rewinds playback to — e.g. the oldest candle
+       in the fetched window, for a step-by-step backtest walkthrough.
+       This is unchanged from before and callers configure it exactly
+       as they always have.
+
+     - `currentIndex` or the very first paint (before reset()/play()/
+       stepForward()/stepBack()/jumpToCandle() is ever called) is the
+       LATEST candle, i.e. the full fetched series is shown — this is
+       "what does the live chart look like right now", not "where does
+       replay begin". `candlesUpTo(maxIndex)` is, by construction, the
+       entire candle array, so no separate rendering path is needed:
+       the existing initial-paint call already does the right thing
+       once `currentIndex` starts at `maxIndex` instead of `resetIndex`.
+
+   Because `completed` starts `true` in this state, the existing
+   "caller must reset()/jumpToCandle() first — no implicit rewind"
+   guard on play()/stepForward() now also naturally covers "replay
+   hasn't been started yet" on a fresh load: the user presses Reset
+   to jump to the configured replay start position, exactly like they
+   would to restart a finished replay. stepBack() and jumpToCandle()
+   are unaffected — both already fully replace the chart's candle set
+   on every call, so they're safe to call directly from this initial
+   full-series view too.
+
+   =====================================================================
    HOW ANNOTATIONS BECOME VISIBLE (requirement: only at their candle)
    =====================================================================
    annotation-model.js sets every annotation's `startTime` to the exact
@@ -54,7 +85,7 @@
    * @param {object} opts.renderer   - a chart-renderer.js instance (the ONLY thing this module talks to for drawing)
    * @param {Array}  opts.candles    - full Candle[] for the replay, ascending by time
    * @param {Array}  opts.annotations - full Annotation[] for the replay (from annotation-model.js)
-   * @param {number} [opts.startIndex=0] - index to start playback from (candles[0..startIndex] visible initially)
+   * @param {number} [opts.startIndex=0] - index reset() rewinds playback to (candles[0..startIndex] visible after a reset); the very first paint, before any replay control is used, always shows the full live series instead — see "INITIAL VIEW vs. REPLAY START POSITION" above
    * @param {number} [opts.speed=800]    - ms between automatic steps during play()
    */
   function create({ renderer, candles, annotations, startIndex = 0, speed = 800 }){
@@ -65,7 +96,17 @@
     const allAnnotations = Array.isArray(annotations) ? annotations : [];
     const maxIndex = allCandles.length - 1;
 
-    let currentIndex = clamp(startIndex, 0, maxIndex);
+    // Where reset() rewinds playback to — the configured replay start
+    // position. Distinct from the initial paint below, which always
+    // shows the full live series regardless of this value.
+    const resetIndex = clamp(startIndex, 0, maxIndex);
+
+    // Initial view = the latest candle, i.e. candlesUpTo(maxIndex) is
+    // the entire fetched series. `completed = true` to match, which
+    // means play()/stepForward() correctly require a reset()/
+    // jumpToCandle() first — same guard that already existed for "a
+    // finished replay", now also covering "replay not yet started".
+    let currentIndex = maxIndex;
     let playing = false;
     let speedMs = speed;
     let direction = 1;   // 1 = forward, -1 = backward — kept for future reverse auto-play, per requirement 5
@@ -88,8 +129,11 @@
       renderer.emit(event, { ...extra, index: currentIndex, replayState: getState() });
     }
 
-    /* ---- initial paint at startIndex — full replace, since this is
-       not a "step" from anywhere, it's the starting snapshot ---- */
+    /* ---- initial paint — full replace, since this is not a "step"
+       from anywhere, it's the starting snapshot. currentIndex ===
+       maxIndex here, so candlesUpTo(currentIndex) is the entire
+       fetched series: the chart shows the latest live candle on
+       load, not the replay start position. ---- */
     renderer.setCandles(candlesUpTo(currentIndex));
     renderer.setAnnotations(annotationsUpTo(currentIndex));
     renderer.setReplayActive(false);
@@ -180,9 +224,14 @@
       emit('replayPaused', {});
     }
 
+    /** Rewind to the configured replay start position (resetIndex) —
+     *  NOT the initial-view latest candle. This is what lets a fresh
+     *  page load (showing the full live series) and "restart the
+     *  replay from the beginning" be two distinct, addressable
+     *  states. */
     function reset(){
       pause();
-      currentIndex = clamp(startIndex, 0, maxIndex);
+      currentIndex = resetIndex;
       completed = currentIndex >= maxIndex;
       renderer.setCandles(candlesUpTo(currentIndex));
       renderer.setAnnotations(annotationsUpTo(currentIndex));

@@ -232,13 +232,30 @@
         state.renderer.setTheme(next);
       });
 
-      // Renderer/replay bus -> minor UI sync this orchestrator owns
+      // Renderer/replay bus -> minor UI sync this orchestrator owns.
+      // syncProgressFill is a named helper (not inlined into the event
+      // listener) so it can also run once immediately below — the
+      // ReplayEngine's initial paint shows the full live series
+      // (currentIndex === totalCandles - 1) without emitting a
+      // 'replayStepped' event for it (that event means "a step just
+      // happened", and none has), so without this immediate call the
+      // progress bar would sit at its 0%-width HTML/CSS default while
+      // the chart is already showing every candle. One shared function,
+      // no duplicated width math between the initial sync and the
+      // ongoing listener.
+      function syncProgressFill(replayState){
+        if(!rc.progressFill || !replayState) return;
+        rc.progressFill.style.width = Math.round((replayState.currentIndex / Math.max(1, replayState.totalCandles - 1)) * 100) + '%';
+      }
       if(rc.progressFill){
-        cleanups.push(r.on('replayStepped', ({ replayState }) => {
-          rc.progressFill.style.width = Math.round((replayState.currentIndex / Math.max(1, replayState.totalCandles - 1)) * 100) + '%';
-        }));
+        syncProgressFill(state.replayEngine ? state.replayEngine.getState() : null);
+        cleanups.push(r.on('replayStepped', ({ replayState }) => syncProgressFill(replayState)));
       }
       if(rc.playIcon){
+        // Seed the icon's data-state to match the engine's actual
+        // initial `playing: false`, rather than leaving it unset until
+        // the first replayStarted/replayPaused/replayFinished event.
+        rc.playIcon.dataset.state = 'paused';
         cleanups.push(r.on('replayStarted', () => rc.playIcon.dataset.state = 'playing'));
         cleanups.push(r.on('replayPaused', () => rc.playIcon.dataset.state = 'paused'));
         cleanups.push(r.on('replayFinished', () => rc.playIcon.dataset.state = 'finished'));
