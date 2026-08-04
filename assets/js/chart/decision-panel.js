@@ -89,7 +89,7 @@
 
     const head = document.createElement('div');
     head.className = 'ai-decision-head';
-    head.innerHTML = `<h3>AI Decision Panel</h3><span class="ai-decision-badge" data-field="badge">Demo data</span>`;
+    head.innerHTML = `<h3>AI Decision Panel</h3><span class="ai-decision-badge" data-field="badge">Loading</span>`;
     container.appendChild(head);
 
     const finalBlock = document.createElement('div');
@@ -226,7 +226,7 @@
             : `<li class="notes-empty">${NOT_AVAILABLE}</li>`;
           break;
         }
-        case 'badge': setText('badge', value || 'Demo data'); break;
+        case 'badge': setText('badge', value || 'Loading'); break;
       }
     }
 
@@ -252,7 +252,7 @@
       const decision = (analysis && analysis.decision) || {};
       lastAnalysis = analysis || null;
 
-      let badge = 'Demo data';
+      let badge = 'Live';
       if(context.replayState && context.replayState.playing) badge = 'Replaying';
       else if(context.rendererState && context.rendererState.chartReady === false) badge = 'Loading';
 
@@ -300,7 +300,7 @@
       // next update() only reports fields that differ from THIS reset
       // state — not every field, just because lastValues was cleared.
       lastValues = {
-        badge: 'Demo data', finalDecision: null, confidence: null, reasoningSummary: null,
+        badge: 'Loading', finalDecision: null, confidence: null, reasoningSummary: null,
         tradeGrade: null, tradeQuality: null, riskReward: null,
         marketPhase: null, trend: null,
         structureSummary: null, lastStructureEvent: null,
@@ -311,7 +311,7 @@
     }
 
     function buildDomFieldsToDefault(){
-      applyField('badge', 'Demo data');
+      applyField('badge', 'Loading');
       applyField('finalDecision', null);
       applyField('confidence', null);
       applyField('reasoningSummary', null);

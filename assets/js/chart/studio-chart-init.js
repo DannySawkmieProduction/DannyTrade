@@ -50,6 +50,12 @@
       symbol: 'NIFTY', timeframe: 'D', providerId: null,
       replayStartIndex: 0, replaySpeed: 800,
       getStructuredAnalysis: defaultAnalysisProvider,
+      // Defaults to the studio.html toolbar's own symbol label so this
+      // file can keep it in sync with the active provider without
+      // studio-bootstrap.js needing to pass it explicitly — same
+      // "sensible default, still overridable via config" pattern as
+      // every module reference below.
+      symbolLabelEl: document.getElementById('chartSymbol'),
       // DI: module references, not instances — this file calls their
       // factory methods (initialize/create/mount) itself, using config
       // (DOM elements, initial symbol/timeframe) only it has.
@@ -87,13 +93,32 @@
       catch(err){ warn(name, err); return null; }
     }
 
+    /** Syncs the toolbar's "<symbol> · <provider> Live" label to whichever
+     *  provider actually served the candles just resolved. Reads the
+     *  provider that's already resolved everywhere else in this file
+     *  (config.providerId locked, or DataAdapter.getActive() as the
+     *  fallback) — never a second, independent source of truth for
+     *  "which provider is active". Only called once real candles have
+     *  successfully loaded (see resolveAnnotations below), so the
+     *  static "Loading…" markup in studio.html is left alone until then
+     *  and this never fires on a failed fetch. */
+    function updateSymbolLabel(symbol){
+      const el = config.symbolLabelEl;
+      if(!el) return;
+      const provider = config.providerId ? config.DataAdapter.get(config.providerId) : config.DataAdapter.getActive();
+      el.textContent = (provider && provider.name) ? `${symbol} · ${provider.name} Live` : `${symbol} · Live`;
+    }
+
     /** The one place candles+analysis become annotations+decision-panel
      *  content. Used both for the initial bootstrap (step 5) and every
      *  subsequent timeframe/symbol switch (step 6's annotationsProvider) —
      *  intentionally the same function so there's exactly one code path,
-     *  not two copies of the same glue. */
+     *  not two copies of the same glue. Syncing the symbol label here
+     *  too (rather than duplicating a second call at both call sites)
+     *  keeps that same one-code-path guarantee. */
     async function resolveAnnotations(candles, timeframe, symbol){
       state.lastCandles = candles;
+      updateSymbolLabel(symbol);
       let analysis;
       try{ analysis = await Promise.resolve(config.getStructuredAnalysis(candles, timeframe, symbol)); }
       catch(err){ warn('getStructuredAnalysis', err); analysis = defaultAnalysisProvider(candles, timeframe); }
