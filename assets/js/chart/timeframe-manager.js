@@ -100,19 +100,25 @@
       }
     }
 
+    /** Returns a structured result — { ok:true, candles, source, timestamp }
+     *  or { ok:false, error, superseded? } — so callers that need to know
+     *  the outcome (refresh(), below) can act on it, while the existing
+     *  fire-and-forget callers (setTimeframe/setSymbol/setProvider) keep
+     *  working unchanged since they never read the return value. */
     async function loadAndApply(requestId, targetSymbol, targetTimeframe){
       const provider = resolveProvider();
       if(!provider){
         loading = false;
-        emitEvent('timeframeError', { symbol: targetSymbol, timeframe: targetTimeframe, error: 'No active data provider is registered.' });
-        return;
+        const error = 'No active data provider is registered.';
+        emitEvent('timeframeError', { symbol: targetSymbol, timeframe: targetTimeframe, error });
+        return { ok: false, error };
       }
 
       const cacheKey = makeCacheKey(provider.id, targetSymbol, targetTimeframe);
       const cached = cache.get(cacheKey);
       if(cached){
         applyResult(requestId, cached.candles, cached.annotations, targetSymbol, targetTimeframe);
-        return;
+        return { ok: true, candles: cached.candles, source: 'cache', timestamp: Date.now() };
       }
 
       loading = true;
@@ -121,7 +127,7 @@
       try{
         await provider.connect();
         const candles = await provider.getCandles({ symbol: targetSymbol, timeframe: targetTimeframe, limit: 180 });
-        if(requestId !== activeRequestId) return; // superseded while awaiting candles — discard silently
+        if(requestId !== activeRequestId) return { ok: false, error: 'superseded', superseded: true }; // superseded while awaiting candles — discard silently
 
         let annotations = [];
         try{
@@ -130,15 +136,17 @@
           console.warn('[TimeframeManager] annotationsProvider threw — continuing with no annotations:', annErr.message);
           annotations = [];
         }
-        if(requestId !== activeRequestId) return; // superseded while awaiting annotations — discard silently
+        if(requestId !== activeRequestId) return { ok: false, error: 'superseded', superseded: true }; // superseded while awaiting annotations — discard silently
 
         cache.set(cacheKey, { candles, annotations });
         enforceCacheLimit();
         applyResult(requestId, candles, annotations, targetSymbol, targetTimeframe);
+        return { ok: true, candles, source: provider.id, timestamp: Date.now() };
       } catch(err){
-        if(requestId !== activeRequestId) return; // superseded — don't report a stale error over a newer, possibly-successful switch
+        if(requestId !== activeRequestId) return { ok: false, error: 'superseded', superseded: true }; // superseded — don't report a stale error over a newer, possibly-successful switch
         loading = false;
         emitEvent('timeframeError', { symbol: targetSymbol, timeframe: targetTimeframe, error: err.message });
+        return { ok: false, error: err.message };
       }
     }
 
@@ -189,6 +197,38 @@
       await loadAndApply(requestId, currentSymbol, currentTimeframe);
     }
 
+    /** Refresh the current symbol/timeframe from its source.
+     *  - force=false (default): a cache hit is honored — same behavior
+     *    a plain reload would have — so refresh() is cheap to call
+     *    speculatively (e.g. on tab focus) without hammering the provider.
+     *  - force=true: the cache entry is evicted first, guaranteeing a
+     *    live provider round-trip — used for auto/manual "get the
+     *    latest bar" refreshes where a stale cache hit would defeat
+     *    the purpose of refreshing at all.
+     *  Returns the same structured result loadAndApply() produces:
+     *  { ok:true, candles, source, timestamp } or { ok:false, error }
+     *  (with superseded:true if a newer request already won) — this is
+     *  the entry point Auto Refresh Manager (Phase 5C) drives; nothing
+     *  else about the fetch/cache/apply pipeline is exposed or
+     *  duplicated for it. */
+    async function refresh(options){
+      const force = !!(options && options.force);
+      const provider = resolveProvider();
+      if(!provider){
+        const error = 'No active data provider is registered.';
+        emitEvent('timeframeError', { symbol: currentSymbol, timeframe: currentTimeframe, error });
+        return { ok: false, error };
+      }
+
+      if(force){
+        cache.delete(makeCacheKey(provider.id, currentSymbol, currentTimeframe));
+      }
+
+      const requestId = ++activeRequestId;
+      emitEvent('timeframeRefreshing', { symbol: currentSymbol, timeframe: currentTimeframe, providerId: provider.id, force });
+      return loadAndApply(requestId, currentSymbol, currentTimeframe);
+    }
+
     function getTimeframes(){ return availableTimeframes.slice(); }
 
     function getState(){
@@ -206,7 +246,7 @@
     }
 
     return {
-      setTimeframe, setSymbol, setProvider,
+      setTimeframe, setSymbol, setProvider, refresh,
       getTimeframes, getState,
       destroy,
       // Proxy the renderer's own event bus so callers (and mount(), below)

@@ -65,7 +65,17 @@
       Legend: window.DannyChart.Legend,
       ReplayEngine: window.DannyChart.ReplayEngine,
       TimeframeManager: window.DannyChart.TimeframeManager,
-      DecisionPanel: window.DannyChart.DecisionPanel
+      DecisionPanel: window.DannyChart.DecisionPanel,
+      AutoRefreshManager: window.DannyChart.AutoRefreshManager,
+      // Phase 5C: on by default, like every other module here. Set to
+      // false to skip creating it entirely (e.g. tests, or a page that
+      // never wants live polling); autoRefreshOptions is passed straight
+      // through to AutoRefreshManager.create() (intervalMs, isMarketOpen,
+      // respectMarketHours, etc.) — this file never inspects or defaults
+      // those values itself, same "config is a pass-through, not a second
+      // source of truth" rule every other DI entry above follows.
+      autoRefreshEnabled: true,
+      autoRefreshOptions: {}
     }, userConfig);
 
     // Single shared application state: references to initialized
@@ -76,7 +86,7 @@
     // fresh annotation set on demand.
     const state = {
       renderer: null, legendHandle: null, replayEngine: null,
-      timeframeManager: null, decisionPanel: null,
+      timeframeManager: null, decisionPanel: null, autoRefreshManager: null,
       lastCandles: [], lastAnalysis: null,
       initialized: false
     };
@@ -225,6 +235,28 @@
         });
       }
 
+      // 8. Auto Refresh Manager (Phase 5C) — keeps the just-loaded
+      //    (symbol, timeframe) series fresh over time. Created last, and
+      //    gated on both state.renderer and state.timeframeManager already
+      //    being live: it drives itself entirely through
+      //    timeframeManager.refresh() (see auto-refresh-manager.js) and
+      //    has nothing to do — and nothing to safely inject — without a
+      //    successful chart load ahead of it. Pause-during-replay and
+      //    resume-after-replay need no wiring here: AutoRefreshManager
+      //    listens on the same renderer event bus this file already
+      //    relies on, entirely inside its own module.
+      if(config.autoRefreshEnabled && state.renderer && state.timeframeManager){
+        state.autoRefreshManager = await safeStep('autoRefreshManager', async () => {
+          if(!config.AutoRefreshManager || typeof config.AutoRefreshManager.create !== 'function'){
+            throw new Error('AutoRefreshManager.create is not available');
+          }
+          return config.AutoRefreshManager.create(Object.assign({
+            renderer: state.renderer,
+            timeframeManager: state.timeframeManager
+          }, config.autoRefreshOptions));
+        });
+      }
+
       registerEventListeners();
       state.initialized = true;
       if(state.renderer) state.renderer.emit('studioReady', { config: { symbol: config.symbol, timeframe: config.timeframe } });
@@ -306,13 +338,17 @@
     function destroy(){
       cleanups.splice(0).forEach(fn => { try{ fn(); } catch(e){ /* already gone */ } });
       if(state.renderer) state.renderer.emit('studioDestroyed', {});
+      // Torn down first, ahead of the renderer/timeframeManager it holds
+      // references to, so its timers/listeners never fire against an
+      // already-destroyed dependency during the rest of this sequence.
+      if(state.autoRefreshManager) safeCall(() => state.autoRefreshManager.destroy());
       if(state.decisionPanel) safeCall(() => state.decisionPanel.destroy());
       if(state.timeframeManager) safeCall(() => state.timeframeManager.destroy());
       if(state.replayEngine) safeCall(() => state.replayEngine.destroy());
       if(state.legendHandle) safeCall(() => state.legendHandle.destroy());
       if(state.renderer) safeCall(() => state.renderer.destroy());
       state.renderer = null; state.legendHandle = null; state.replayEngine = null;
-      state.timeframeManager = null; state.decisionPanel = null;
+      state.timeframeManager = null; state.decisionPanel = null; state.autoRefreshManager = null;
       state.lastCandles = []; state.lastAnalysis = null;
       state.initialized = false;
     }
@@ -349,7 +385,23 @@
       });
     }
 
-    return { initialize, destroy, reload, loadSymbol, loadTimeframe, loadAnalysis, getState: () => ({ ...state }) };
+    /** Manual refresh (Phase 5C) — a normal, gated refresh of the
+     *  current symbol/timeframe right now. No-op (resolves null) if
+     *  Auto Refresh Manager never initialized. */
+    function refreshNow(){
+      return state.autoRefreshManager ? state.autoRefreshManager.refreshNow() : Promise.resolve(null);
+    }
+    /** Force refresh (Phase 5C) — bypasses the market-closed gate only;
+     *  still respects replay/offline. See auto-refresh-manager.js. */
+    function forceRefresh(){
+      return state.autoRefreshManager ? state.autoRefreshManager.forceRefresh() : Promise.resolve(null);
+    }
+
+    return {
+      initialize, destroy, reload, loadSymbol, loadTimeframe, loadAnalysis,
+      refreshNow, forceRefresh,
+      getState: () => ({ ...state })
+    };
   }
 
   window.DannyChart.StudioChartInit = { create, INIT_ORDER };
