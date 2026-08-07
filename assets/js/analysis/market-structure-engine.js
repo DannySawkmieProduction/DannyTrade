@@ -587,7 +587,7 @@
   window.DannyChart.Analysis.MarketStructureEngine = {
     name: ENGINE_NAME,
     version: VERSION,
-    author: 'DannyTrade Quant Engineering',
+    author: 'Amazing Grace Trading Quant Engineering',
     description: 'Deterministic Smart Money Concept market-structure detection: fractal swing highs/lows, HH/HL/LH/LL classification, and BOS/CHoCH structural breaks, computed at both external (major) and internal (minor) resolutions.',
     DEFAULT_OPTIONS,
     analyze
