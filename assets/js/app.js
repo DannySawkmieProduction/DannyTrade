@@ -1,5 +1,5 @@
 /* =====================================================================
-   DannyTrade — Site-wide app script (assets/js/app.js)
+   Amazing Grace Trading — Site-wide app script (assets/js/app.js)
 
    Loaded with `defer` on every page. Contains:
      1. Mobile nav toggle — shared by index.html and studio.html

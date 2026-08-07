@@ -1,5 +1,5 @@
 /* =====================================================================
-   DannyTrade — AI Provider Layer (assets/js/ai-service.js)
+   Amazing Grace Trading — AI Provider Layer (assets/js/ai-service.js)
 
    This module is the ONLY thing that should ever change when a real AI
    provider is wired in. It is a small adapter/service layer that sits
@@ -297,7 +297,7 @@
   /* ---------------------------------------------------------------
      Live provider — talks to the Cloudflare Worker at /api/analyze,
      which holds GEMINI_API_KEY server-side and calls Gemini. This is
-     the only provider DannyTrade ships; it implements every method
+     the only provider Amazing Grace Trading ships; it implements every method
      PROVIDER_INTERFACE lists above, each just posting { type, payload }
      and unwrapping { ok, analysis } / { ok:false, error }.
   --------------------------------------------------------------- */

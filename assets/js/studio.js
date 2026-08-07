@@ -1,5 +1,5 @@
 /* =====================================================================
-   DannyTrade — AI Analysis Studio
+   Amazing Grace Trading — AI Analysis Studio
    Client-side file intake (validation, previews, metadata extraction)
    PLUS the full analysis pipeline:
 
