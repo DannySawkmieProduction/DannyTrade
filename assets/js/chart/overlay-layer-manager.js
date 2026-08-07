@@ -1,0 +1,63 @@
+/* =====================================================================
+   assets/js/chart/overlay-layer-manager.js — Phase 5B
+
+   Overlay Layer Manager — the single declarative registry of every
+   user-facing overlay "button" and which chart-renderer.js layer it
+   controls. Nothing else in the overlay subsystem hardcodes this
+   mapping; every other Phase 5B module reads it from here.
+
+   Responsibility boundary:
+     - Pure data + tiny lookup helpers. No DOM, no canvas, no renderer
+       calls, no market-structure/trend/volume/S-R calculation of any
+       kind — it doesn't even know a renderer instance exists.
+     - Colors are read from window.DannyChart.ChartRenderer.STYLES where
+       a real one exists (same "single source of truth" rule legend.js
+       already follows for its swatches) — this file never invents a
+       drawing color, only a UI swatch hint for the toggle button itself.
+     - Three entries (volume, trend, supportResistance) point at real,
+       already-toggleable chart-renderer.js layers that are currently
+       empty because their Analysis Engines (Phase 5A) don't exist yet.
+       Nothing here fabricates data for them — connecting real overlays
+       later is purely an annotation-model.js + chart-renderer.js
+       TYPE_TO_LAYER change, with zero change required to this file or
+       to the Toggle Controller that reads it.
+===================================================================== */
+
+(function initOverlayLayerManager(){
+  window.DannyChart = window.DannyChart || {};
+
+  const PENDING_COLOR = '#565C70'; // muted — matches the palette already used elsewhere (e.g. FVG "filled" subtype) for "nothing here yet"
+
+  /** Built lazily (not at parse time) so this file can load in any
+   *  order relative to chart-renderer.js — STYLES is only read the
+   *  first time a caller actually asks for the registry. */
+  function buildRegistry(){
+    const ChartRenderer = window.DannyChart.ChartRenderer;
+    const STYLES = (ChartRenderer && ChartRenderer.STYLES) || {};
+
+    return [
+      { key: 'candlestick',      label: 'Candlestick',          rendererLayer: 'candlesticks',      color: '#8D93A6', dataAvailable: true },
+      { key: 'marketStructure',  label: 'Market Structure',     rendererLayer: 'marketStructure',   color: STYLES.SWING_HIGH ? STYLES.SWING_HIGH.color : '#D4AF6A', dataAvailable: true },
+      { key: 'liquidity',        label: 'Liquidity',            rendererLayer: 'liquidity',         color: STYLES.LIQUIDITY ? STYLES.LIQUIDITY.subtypeColor.buyside : '#4FD1E8', dataAvailable: true },
+      { key: 'orderBlocks',      label: 'Order Blocks',         rendererLayer: 'orderBlocks',        color: STYLES.ORDER_BLOCK ? STYLES.ORDER_BLOCK.subtypeColor.bullish : '#35D399', dataAvailable: true },
+      { key: 'fvg',              label: 'Fair Value Gaps',      rendererLayer: 'fvg',                color: STYLES.FVG ? STYLES.FVG.subtypeColor.bullish : '#35D399', dataAvailable: true },
+      { key: 'premiumDiscount',  label: 'Premium / Discount',   rendererLayer: 'premiumDiscount',    color: '#D4AF6A', dataAvailable: true },
+      // Pending — real, independently-toggleable layers with no data
+      // source yet (their Analysis Engines are still Phase 5A work).
+      { key: 'volume',           label: 'Volume',               rendererLayer: 'volume',             color: PENDING_COLOR, dataAvailable: false },
+      { key: 'trend',            label: 'Trend',                rendererLayer: 'trend',              color: PENDING_COLOR, dataAvailable: false },
+      { key: 'supportResistance',label: 'Support & Resistance', rendererLayer: 'supportResistance',  color: PENDING_COLOR, dataAvailable: false }
+    ];
+  }
+
+  function getLayerDefs(){ return buildRegistry(); }
+
+  function getLayerDef(key){ return buildRegistry().find(e => e.key === key) || null; }
+
+  function getRendererLayer(key){
+    const def = getLayerDef(key);
+    return def ? def.rendererLayer : null;
+  }
+
+  window.DannyChart.OverlayLayerManager = { getLayerDefs, getLayerDef, getRendererLayer };
+})();
