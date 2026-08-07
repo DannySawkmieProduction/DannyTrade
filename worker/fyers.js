@@ -21,7 +21,7 @@
         user to re-login — it never attempts to refresh it.
      C. This module holds ALL FYERS-specific server-side logic; nothing
         FYERS-shaped leaks into worker/index.js beyond route checks
-        and an import. Symbol/timeframe mapping (DannyTrade's internal
+        and an import. Symbol/timeframe mapping (Amazing Grace Trading's internal
         symbol codes and TIMEFRAMES → FYERS's own formats) lives
         client-side in assets/js/chart/fyers-service.js, not here —
         this file expects an already-FYERS-shaped symbol string and a
@@ -58,7 +58,7 @@ const OAUTH_STATE_TTL_SECONDS = 300; // 5 minutes
 
 // Singleton KV key — this is a single-user personal tool (one FYERS
 // account), so there is exactly one stored access token, not one per
-// user. Revisit this if DannyTrade ever needs multi-user support.
+// user. Revisit this if Amazing Grace Trading ever needs multi-user support.
 const ACCESS_TOKEN_KV_KEY = 'fyers_access_token';
 
 /* ---------------------------------------------------------------
@@ -88,10 +88,10 @@ function textResponse(message, status) {
 
 function connectedHtml() {
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>FYERS Connected — DannyTrade</title></head>
+<html><head><meta charset="utf-8"><title>FYERS Connected — Amazing Grace Trading</title></head>
 <body style="font-family:system-ui,sans-serif;text-align:center;padding:4rem;">
 <h2>FYERS account connected.</h2>
-<p>Redirecting you back to DannyTrade…</p>
+<p>Redirecting you back to Amazing Grace Trading…</p>
 <script>setTimeout(function(){ window.location.href = '/studio.html?fyersConnected=1'; }, 1200);</script>
 </body></html>`;
 }
@@ -99,7 +99,7 @@ function connectedHtml() {
 /* ---------------------------------------------------------------
    GET /api/fyers/login
    Redirects the browser to FYERS's own login page. FYERS credentials
-   are entered on FYERS's domain — never inside DannyTrade's UI.
+   are entered on FYERS's domain — never inside Amazing Grace Trading's UI.
 --------------------------------------------------------------- */
 export async function handleFyersLogin(request, env) {
   // --- TEMPORARY DIAGNOSTIC (env var presence check) — remove once resolved.
@@ -247,7 +247,7 @@ const FYERS_HISTORY_URL = 'https://api-t1.fyers.in/data/history';
 
 // FYERS resolution values accepted directly by /data/history: whole
 // minutes, or the literal string 'D' for daily. There is no native
-// weekly/monthly resolution — DannyTrade's 'W'/'M' timeframes are
+// weekly/monthly resolution — Amazing Grace Trading's 'W'/'M' timeframes are
 // intentionally NOT in this map and are rejected below with a clear
 // error, rather than silently resampled. Resampling daily candles
 // into calendar weeks/months correctly is deferred to a future step,
@@ -309,11 +309,11 @@ function jsonEnvelope(body, status) {
            "NSE:NIFTY50-INDEX">', timeframe: one of
            '1m'|'3m'|'5m'|'15m'|'30m'|'1H'|'4H'|'D', limit: number }
 
-   Symbol/timeframe mapping from DannyTrade's own internal codes is
+   Symbol/timeframe mapping from Amazing Grace Trading's own internal codes is
    the caller's job (assets/js/chart/fyers-service.js, Decision C) —
    this route expects an already-FYERS-shaped symbol string. Returns
    { ok:true, candles:[{time,open,high,low,close,volume}, ...] }
-   (oldest first, matching DannyTrade's Candle contract) or
+   (oldest first, matching Amazing Grace Trading's Candle contract) or
    { ok:false, error } with an appropriate status code.
 --------------------------------------------------------------- */
 export async function handleFyersCandles(request, env) {
@@ -438,9 +438,9 @@ export async function handleFyersCandles(request, env) {
   }
 
   // Convert FYERS's [timestamp, open, high, low, close, volume] arrays
-  // into DannyTrade's Candle contract. Not re-sorted here: FYERS's
+  // into Amazing Grace Trading's Candle contract. Not re-sorted here: FYERS's
   // documented response is ascending-time (oldest first), matching
-  // what DannyTrade expects — re-sorting defensively would silently
+  // what Amazing Grace Trading expects — re-sorting defensively would silently
   // mask it if that were ever untrue, rather than surfacing it.
   const candles = fyersJson.candles.map(row => ({
     time: row[0],

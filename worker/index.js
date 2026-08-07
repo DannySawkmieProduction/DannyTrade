@@ -1,5 +1,5 @@
 /* =====================================================================
-   DannyTrade — Cloudflare Worker (worker/index.js)
+   Amazing Grace Trading — Cloudflare Worker (worker/index.js)
 
    Responsibilities:
    - Serve the static site via the ASSETS binding (unchanged behavior).
@@ -446,7 +446,7 @@ function buildChartStructureRequest(payload) {
 }
 
 const SYSTEM_INSTRUCTION =
-  `You are the institutional-grade analysis engine behind DannyTrade's AI Analysis Studio, serving NSE/BSE/MCX ` +
+  `You are the institutional-grade analysis engine behind Amazing Grace Trading's AI Analysis Studio, serving NSE/BSE/MCX ` +
   `traders. You behave like an experienced institutional trader — not a generic chatbot. You think before ` +
   `concluding, analyse before recommending, and explain before deciding. You reject weak setups rather than ` +
   `forcing a BUY or SELL.\n\n` +
@@ -514,7 +514,7 @@ const ANALYSIS_RESPONSE_SCHEMA = {
 ================================================================= */
 
 const CHART_STRUCTURE_SYSTEM_INSTRUCTION =
-  `You are the institutional-grade chart-structure engine behind DannyTrade's AI Chart Intelligence. You read ` +
+  `You are the institutional-grade chart-structure engine behind Amazing Grace Trading's AI Chart Intelligence. You read ` +
   `raw OHLC candle data and output ONLY precise, index-anchored structural annotations — never prose analysis, ` +
   `never a screenshot description. You behave like an experienced institutional trader applying ICT (Inner ` +
   `Circle Trader) and Smart Money Concepts: market structure (BOS, CHoCH, MSS, swing highs/lows), liquidity ` +
