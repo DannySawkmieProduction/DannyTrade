@@ -1,0 +1,88 @@
+/* =====================================================================
+   Amazing Grace Trading — Opening Experience stylesheet
+   (assets/css/intro.css)
+
+   Linked only from index.html. Never loaded by studio.html, so it can
+   never compete with chart-init resources on that page. All animation
+   here uses transform/opacity only (GPU-composited, no layout thrash),
+   and every effect is gated behind prefers-reduced-motion.
+   ===================================================================== */
+
+#introOverlay{
+  position:fixed;inset:0;z-index:999;
+  background:#05060A;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  overflow:hidden;
+  opacity:1;
+  transition:opacity .45s ease;
+}
+#introOverlay.intro-fade-out{opacity:0;pointer-events:none}
+
+.intro-particle{
+  position:absolute;border-radius:50%;
+  background:rgba(212,175,106,0.55);
+  will-change:transform,opacity;
+  animation:introParticleFloat linear infinite;
+}
+@keyframes introParticleFloat{
+  0%{transform:translateY(0) scale(1);opacity:0}
+  10%{opacity:.6}
+  90%{opacity:.35}
+  100%{transform:translateY(-140px) scale(1.15);opacity:0}
+}
+
+.intro-text-wrap{
+  text-align:center;
+  padding:0 24px;
+}
+.intro-scramble{
+  font-family:var(--font-mono);
+  font-size:clamp(20px,5.4vw,44px);
+  letter-spacing:0.12em;
+  color:#8D93A6;
+  white-space:pre-wrap;
+  min-height:1.3em;
+}
+.intro-scramble.intro-resolved{
+  color:#D4AF6A;
+  transition:color .6s ease,text-shadow .8s ease;
+  text-shadow:0 0 18px rgba(212,175,106,0.55),0 0 42px rgba(212,175,106,0.25);
+}
+
+.intro-mark{
+  width:64px;height:64px;margin:26px auto 0;
+  opacity:0;transform:scale(.85);
+  transition:opacity .6s ease,transform .6s ease;
+}
+.intro-mark.intro-visible{opacity:1;transform:scale(1)}
+
+.intro-tagline{
+  margin-top:16px;
+  font-family:var(--font-mono);
+  font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+  color:#565C70;
+  opacity:0;
+  transition:opacity .6s ease;
+}
+.intro-tagline.intro-visible{opacity:1}
+
+.intro-skip{
+  position:absolute;bottom:28px;right:28px;
+  background:none;border:1px solid #232838;color:#8D93A6;
+  font-family:var(--font-mono);font-size:12px;letter-spacing:.05em;
+  padding:9px 16px;border-radius:8px;cursor:pointer;
+  opacity:0;transition:opacity .3s ease,border-color .15s,color .15s;
+}
+.intro-skip.intro-visible{opacity:1}
+.intro-skip:hover,.intro-skip:focus-visible{border-color:#D4AF6A;color:#D4AF6A;outline:none}
+
+.intro-sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;
+}
+
+/* Reduced-motion fallback: no particles, no scramble, one simple fade */
+@media (prefers-reduced-motion: reduce){
+  .intro-particle{display:none}
+  .intro-scramble{transition:opacity .5s ease}
+}
