@@ -148,18 +148,33 @@
     }
   };
 
-  /** type -> which of the 7 layers it belongs to. */
+  /** type -> which layer it belongs to.
+   *  PREMIUM_DISCOUNT is its own layer (not bundled into marketStructure)
+   *  so it can be shown/hidden independently — see Phase 5B. VOLUME,
+   *  TREND, and SUPPORT_RESISTANCE are deliberately absent: those
+   *  Analysis Engines don't exist yet (Phase 5A, still in progress), so
+   *  no annotation of those types can ever be produced today. Their
+   *  layers still exist below (empty, toggleable, harmless) so the
+   *  overlay UI's buttons for them are wired and ready; adding their
+   *  TYPE_TO_LAYER entries is the only step needed to connect real data
+   *  later, with zero further changes to this file. */
   const TYPE_TO_LAYER = {
     SWING_HIGH: 'marketStructure', SWING_LOW: 'marketStructure',
     BOS: 'marketStructure', CHOCH: 'marketStructure', MSS: 'marketStructure',
-    PREMIUM_DISCOUNT: 'marketStructure',
+    PREMIUM_DISCOUNT: 'premiumDiscount',
     ORDER_BLOCK: 'orderBlocks',
     FVG: 'fvg',
     LIQUIDITY: 'liquidity',
     TRADE_LEVEL: 'tradeLevels'
   };
 
-  const LAYER_ORDER = ['marketStructure','orderBlocks','fvg','liquidity','tradeLevels','labels'];
+  // 'volume'/'trend'/'supportResistance' are intentionally empty today —
+  // no TYPE_TO_LAYER entry feeds them until their Analysis Engines (Phase
+  // 5A) exist — but they're real, independently-toggleable layers from
+  // day one so Phase 5B's overlay buttons are fully functional as
+  // toggles now, per the Chart -> Overlay Manager -> Layer Manager
+  // architecture.
+  const LAYER_ORDER = ['marketStructure','premiumDiscount','orderBlocks','fvg','liquidity','volume','trend','supportResistance','tradeLevels','labels'];
   // 'candlesticks' is a 7th, notional layer — it isn't drawn on the
   // canvas at all; showLayer/hideLayer('candlesticks') toggles the
   // TradingView series' own visibility instead.
@@ -732,7 +747,7 @@
     };
   }
 
-  window.DannyChart.ChartRenderer = { initialize, STYLES, THEMES, LAYER_ORDER };
+  window.DannyChart.ChartRenderer = { initialize, STYLES, THEMES, LAYER_ORDER, TYPE_TO_LAYER };
 
   /* ---------------------------------------------------------------
      Note on replay (requirement: "keep rendering independent of the

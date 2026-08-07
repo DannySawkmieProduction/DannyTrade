@@ -75,7 +75,14 @@
       // those values itself, same "config is a pass-through, not a second
       // source of truth" rule every other DI entry above follows.
       autoRefreshEnabled: true,
-      autoRefreshOptions: {}
+      autoRefreshOptions: {},
+      // Phase 5B: OverlayManager is always constructed once state.renderer
+      // exists (it's a facade with no drawing/computation of its own, so
+      // there's no reason to gate it behind a flag the way AutoRefreshManager
+      // is). ToggleController only mounts if overlayToggleContainer is
+      // supplied — same opt-in pattern legendContainer already uses below.
+      OverlayManager: window.DannyChart.OverlayManager,
+      ToggleController: window.DannyChart.ToggleController
     }, userConfig);
 
     // Single shared application state: references to initialized
@@ -87,6 +94,7 @@
     const state = {
       renderer: null, legendHandle: null, replayEngine: null,
       timeframeManager: null, decisionPanel: null, autoRefreshManager: null,
+      overlayManager: null, toggleControllerHandle: null,
       lastCandles: [], lastAnalysis: null,
       initialized: false
     };
@@ -257,6 +265,33 @@
         });
       }
 
+      // 9. Overlay Manager + Toggle Controller (Phase 5B) — the 9
+      //    overlay buttons (Candlestick, Market Structure, Liquidity,
+      //    Order Blocks, Fair Value Gaps, Premium/Discount, Volume,
+      //    Trend, Support & Resistance). Built entirely on top of
+      //    chart-renderer.js's own existing layer/Drawable engine — this
+      //    step never draws anything and never computes market
+      //    structure/trend/volume/S-R itself; OverlayManager is a pure
+      //    facade. Mirrors exactly how Legend is constructed above:
+      //    OverlayManager only needs state.renderer; ToggleController
+      //    only mounts if a container was supplied.
+      if(state.renderer){
+        state.overlayManager = await safeStep('overlayManager', async () => {
+          if(!config.OverlayManager || typeof config.OverlayManager.create !== 'function'){
+            throw new Error('OverlayManager.create is not available');
+          }
+          return config.OverlayManager.create({ renderer: state.renderer });
+        });
+        if(state.overlayManager && config.overlayToggleContainer){
+          state.toggleControllerHandle = await safeStep('toggleController', async () => {
+            if(!config.ToggleController || typeof config.ToggleController.mount !== 'function'){
+              throw new Error('ToggleController.mount is not available');
+            }
+            return config.ToggleController.mount(config.overlayToggleContainer, state.overlayManager);
+          });
+        }
+      }
+
       registerEventListeners();
       state.initialized = true;
       if(state.renderer) state.renderer.emit('studioReady', { config: { symbol: config.symbol, timeframe: config.timeframe } });
@@ -342,6 +377,11 @@
       // references to, so its timers/listeners never fire against an
       // already-destroyed dependency during the rest of this sequence.
       if(state.autoRefreshManager) safeCall(() => state.autoRefreshManager.destroy());
+      // Reverse of creation order: the Toggle Controller's DOM was
+      // mounted after Overlay Manager was constructed, so it's torn
+      // down first.
+      if(state.toggleControllerHandle) safeCall(() => state.toggleControllerHandle.destroy());
+      if(state.overlayManager) safeCall(() => state.overlayManager.destroy());
       if(state.decisionPanel) safeCall(() => state.decisionPanel.destroy());
       if(state.timeframeManager) safeCall(() => state.timeframeManager.destroy());
       if(state.replayEngine) safeCall(() => state.replayEngine.destroy());
@@ -349,6 +389,7 @@
       if(state.renderer) safeCall(() => state.renderer.destroy());
       state.renderer = null; state.legendHandle = null; state.replayEngine = null;
       state.timeframeManager = null; state.decisionPanel = null; state.autoRefreshManager = null;
+      state.overlayManager = null; state.toggleControllerHandle = null;
       state.lastCandles = []; state.lastAnalysis = null;
       state.initialized = false;
     }

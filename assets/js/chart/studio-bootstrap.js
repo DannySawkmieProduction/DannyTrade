@@ -30,6 +30,7 @@
       loadingEl: document.getElementById('chartLoadingState'),
 
       legendContainer: document.getElementById('chartLegend'),
+      overlayToggleContainer: document.getElementById('overlayToggleBar'),
       tfTabsContainer: document.getElementById('tfTabs'),
       decisionPanelContainer: document.getElementById('aiDecisionPanel'),
 
