@@ -693,7 +693,7 @@
   window.DannyChart.Analysis.OrderBlockEngine = {
     name: ENGINE_NAME,
     version: VERSION,
-    author: 'Amazing Grace Trading Quant Engineering',
+    author: 'DannyTrade Quant Engineering',
     description: 'Deterministic Smart Money Concept order block detection: bullish/bearish order blocks anchored to MarketStructureEngine breaks, fresh/mitigated/broken lifecycle tracking, weighted quality breakdown, and deterministic evidence flags.',
     DEFAULT_OPTIONS,
     analyze

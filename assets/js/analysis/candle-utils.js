@@ -585,7 +585,7 @@
   window.DannyChart.Analysis.CandleUtils = {
     name: 'CandleUtils',
     version: VERSION,
-    author: 'Amazing Grace Trading Quant Engineering',
+    author: 'DannyTrade Quant Engineering',
     description: 'Shared, stateless primitives for the Analysis Engine: candle validation, fractal pivot detection, moving averages, diagnostics collection, and deep-freeze immutability. Not a pipeline-stage engine itself — no analyze()/data/diagnostics output contract; every consuming engine composes these primitives into its own output.',
     DEFAULT_PIVOT_OPTIONS,
     validateCandles,

@@ -538,7 +538,7 @@
   window.DannyChart.Analysis.LiquidityEngine = {
     name: ENGINE_NAME,
     version: VERSION,
-    author: 'Amazing Grace Trading Quant Engineering',
+    author: 'DannyTrade Quant Engineering',
     description: 'Deterministic Smart Money Concept liquidity detection: buy-side/sell-side liquidity pools clustered from MarketStructureEngine swing points, equal highs/lows, liquidity sweeps, and stop-hunt qualification.',
     DEFAULT_OPTIONS,
     analyze
