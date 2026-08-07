@@ -1,6 +1,6 @@
-# DannyTrade — Project State & Engineering Handover
+# Amazing Grace Trading — Project State & Engineering Handover
 
-**Document purpose:** This is the permanent single source of truth for DannyTrade's architecture and development status. It is written so that a future Claude session — with zero prior context, possibly on a different account — can read this file alone and immediately continue development safely, without re-deriving the architecture from source.
+**Document purpose:** This is the permanent single source of truth for Amazing Grace Trading's architecture and development status. It is written so that a future Claude session — with zero prior context, possibly on a different account — can read this file alone and immediately continue development safely, without re-deriving the architecture from source.
 
 **Last updated:** Phase 2B is complete through Step 4, with Step 5 intentionally postponed until shortly before final release (see Phase 2B section below). Phase 2C (FYERS live market data) is now in progress — Step 1 of 7.
 
@@ -15,7 +15,7 @@ This document (`PHASE_2A_PROJECT_STATE.md`) remains the full-project source of t
 ## 1. Project Overview
 
 ### Purpose
-DannyTrade is an AI-powered chart intelligence platform for NSE/BSE/MCX traders. It is transitioning from a text-based "upload a file, get a written analysis" tool (Phase 1) into a platform where an AI engine produces precise, chart-anchored institutional annotations (Smart Money Concepts / ICT: swings, structure breaks, order blocks, fair value gaps, liquidity, premium/discount zones, trade levels) rendered directly on a live TradingView-style candlestick chart, with a replay engine and a decision panel (Phase 2A → 2B).
+Amazing Grace Trading is an AI-powered chart intelligence platform for NSE/BSE/MCX traders. It is transitioning from a text-based "upload a file, get a written analysis" tool (Phase 1) into a platform where an AI engine produces precise, chart-anchored institutional annotations (Smart Money Concepts / ICT: swings, structure breaks, order blocks, fair value gaps, liquidity, premium/discount zones, trade levels) rendered directly on a live TradingView-style candlestick chart, with a replay engine and a decision panel (Phase 2A → 2B).
 
 ### Current Architecture (one-line summary)
 A static site (HTML/CSS/vanilla JS, no build step, no framework) served by a Cloudflare Worker, which also proxies exactly one API route (`/api/analyze`) to Google Gemini. The chart side is a set of small, strictly-decoupled vanilla-JS modules communicating through one shared event bus and one shared data contract (see Section 5).
@@ -383,7 +383,8 @@ Not yet defined in any prior session. Do not assume scope — ask before designi
 ## 10. File Inventory
 
 ```
-DannyTrade-main/
+DannyTrade-main/                        (repo folder name; Cloudflare Worker name in
+│                                        wrangler.toml also unchanged — see rebrand notes)
 ├── index.html                          Marketing/landing page. Loads only app.js.
 ├── studio.html                         The Studio page — both Phase 1 file-upload UI and
 │                                        Phase 2A/2B live chart UI live here. Loads PapaParse,

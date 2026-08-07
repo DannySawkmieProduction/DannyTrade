@@ -1,8 +1,8 @@
-# DannyTrade — Phase 2B Engineering Context
+# Amazing Grace Trading — Phase 2B Engineering Context
 
 **Companion document:** `PHASE_2A_PROJECT_STATE.md` (repo root) is the full-project source of truth — overview, all modules, all contracts, all completed Phase 1/2A work, full file inventory, and binding development rules. Read it first if you have not already; this document assumes it and does not repeat the full architecture. This document is a **focused supplement** for resuming Phase 2B specifically: exact step status, exact files touched, exact interfaces added, and the exact next action.
 
-**Objective of Phase 2B:** Transform DannyTrade from an AI text analyzer into an AI chart intelligence platform. The AI must become the single source of truth for every annotation rendered on the chart. The renderer must never infer market structure. (User's original framing, preserved verbatim as the north star for this phase.)
+**Objective of Phase 2B:** Transform Amazing Grace Trading from an AI text analyzer into an AI chart intelligence platform. The AI must become the single source of truth for every annotation rendered on the chart. The renderer must never infer market structure. (User's original framing, preserved verbatim as the north star for this phase.)
 
 ---
 

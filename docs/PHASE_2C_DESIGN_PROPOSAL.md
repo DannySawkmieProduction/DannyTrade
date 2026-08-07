@@ -1,4 +1,4 @@
-# DannyTrade — Phase 2C Design Proposal: FYERS Live Market Data
+# Amazing Grace Trading — Phase 2C Design Proposal: FYERS Live Market Data
 
 **Status: Planning only. No code written. Not merged into `PHASE_2A_PROJECT_STATE.md` or `PHASE_2B_ENGINEERING_CONTEXT.md` — this is a standalone proposal awaiting approval, per explicit instruction.**
 
@@ -22,7 +22,7 @@
   - `GET /api/fyers/callback` — receives the `auth_code`, exchanges it for tokens, stores them, redirects back into the app.
   - `GET /api/fyers/status` — reports whether a valid token currently exists (used by the provider's `connect()`).
   - `POST /api/fyers/history` — proxies historical candle requests.
-- **New provider object** registered in `data-adapter.js`: `id: 'fyers'`, backed by calls to the routes above instead of `notImplemented()`. A client-side symbol/timeframe mapping layer translates DannyTrade's internal symbol list and `TIMEFRAMES` into FYERS's `EXCHANGE:SYMBOL-SEGMENT` / `resolution` formats.
+- **New provider object** registered in `data-adapter.js`: `id: 'fyers'`, backed by calls to the routes above instead of `notImplemented()`. A client-side symbol/timeframe mapping layer translates Amazing Grace Trading's internal symbol list and `TIMEFRAMES` into FYERS's `EXCHANGE:SYMBOL-SEGMENT` / `resolution` formats.
 - **Auth state lives in Cloudflare KV** (new), not in browser storage and not in Worker in-memory variables — a token needs to survive a full trading day across many separate, stateless Worker invocations, which the existing `modelCache`-style in-memory pattern (used for Gemini model discovery) is not durable enough for.
 - Live tick streaming is **explicitly out of scope for the first milestone** — see Sections 3 and 8.
 
@@ -43,7 +43,7 @@ FYERS API v3 (login, token exchange/refresh, /data/history)
 FYERS uses an OAuth2-style authorization-code flow. Verified against current FYERS v3 documentation and community sources; exact hostnames/paths should be re-confirmed against live docs at implementation time since FYERS has changed API hosts across versions before.
 
 1. **One-time app registration (manual, outside the codebase).** You create an app at myapi.fyers.in, get an `app_id` (client ID) and `secret_key`, and register a `redirect_uri` pointing at the deployed Worker (e.g. `https://<your-worker>.workers.dev/api/fyers/callback`).
-2. **Login redirect.** `/api/fyers/login` builds FYERS's login URL (`app_id`, `redirect_uri`, `response_type=code`, a random `state` for CSRF protection) and redirects the browser there. FYERS credentials are entered on FYERS's own domain — never inside DannyTrade's UI.
+2. **Login redirect.** `/api/fyers/login` builds FYERS's login URL (`app_id`, `redirect_uri`, `response_type=code`, a random `state` for CSRF protection) and redirects the browser there. FYERS credentials are entered on FYERS's own domain — never inside Amazing Grace Trading's UI.
 3. **Callback.** FYERS redirects back to `/api/fyers/callback?auth_code=...&state=...`. The Worker validates `state`, then exchanges `auth_code` for `access_token` + `refresh_token` by POSTing to FYERS's token-validation endpoint with an `appIdHash` (SHA-256 of `app_id:secret_key`, computed via the Workers-native `crypto.subtle.digest` — no extra crypto library needed).
 4. **Token storage.** The resulting tokens are written to a new KV namespace, never returned to the browser. The callback redirects back to `studio.html` with a plain `?fyersConnected=1` flag — no tokens ever appear in a URL or client-side JS.
 5. **Daily refresh — open decision.** FYERS `access_token`s expire roughly once per trading day; the `refresh_token` (valid ~15 days) can mint a new one, but FYERS's refresh endpoint requires the account **PIN** as a parameter. Two options, genuinely trading off automation against secret surface:
@@ -59,8 +59,8 @@ FYERS uses an OAuth2-style authorization-code flow. Verified against current FYE
 
 - `capabilities`: `{ historical: true, live: false, timeframes: [...] }` for the first milestone. `live` stays `false` until a dedicated later step — see Section 8.
 - `connect()` → calls `/api/fyers/status`; resolves if a valid token exists server-side, rejects with a clear "not authenticated — connect FYERS first" message otherwise (surfaced in the UI as a visible "Connect FYERS" action, not a silent failure, consistent with how the mock provider's `connect()` behaves today).
-- `getSymbols()` → initially a small **static list**, the same handful of instruments DannyTrade already knows about (NIFTY, BANKNIFTY, RELIANCE, GOLDMCX, HDFCBANK), each mapped to its FYERS symbol string. FYERS's full instrument master is tens of thousands of rows — importing/caching all of it is explicitly out of scope for this milestone.
-- `getCandles({symbol, timeframe, limit})` → maps `timeframe` to a FYERS `resolution`, computes a `range_from`/`range_to` window, chunks the request if `limit` needs more range than FYERS allows in one call (Section 8), calls `/api/fyers/history`, and maps FYERS's `[timestamp, open, high, low, close, volume]` arrays into DannyTrade's `{time, open, high, low, close, volume}` Candle objects.
+- `getSymbols()` → initially a small **static list**, the same handful of instruments Amazing Grace Trading already knows about (NIFTY, BANKNIFTY, RELIANCE, GOLDMCX, HDFCBANK), each mapped to its FYERS symbol string. FYERS's full instrument master is tens of thousands of rows — importing/caching all of it is explicitly out of scope for this milestone.
+- `getCandles({symbol, timeframe, limit})` → maps `timeframe` to a FYERS `resolution`, computes a `range_from`/`range_to` window, chunks the request if `limit` needs more range than FYERS allows in one call (Section 8), calls `/api/fyers/history`, and maps FYERS's `[timestamp, open, high, low, close, volume]` arrays into Amazing Grace Trading's `{time, open, high, low, close, volume}` Candle objects.
 - `subscribe()` → throws "not implemented yet," identical in spirit to the current stub providers, until live streaming gets its own step.
 - **No changes required** to `chart-renderer.js`, `replay-engine.js`, `timeframe-manager.js`, `legend.js`, `annotation-model.js`, or `decision-panel.js`. Switching to FYERS is `DataAdapters.setActive('fyers')` — the rest of the chain doesn't know or care.
 
