@@ -49,6 +49,9 @@
 
     var rows = [
       ['Status', fmt(diag.status)],
+      ['Message', fmt(diag.message)],
+      ['Response Keys', fmt(diag.responseKeys)],
+      ['Data Is Null', fmt(diag.dataIsNull)],
       ['Swings', fmt(diag.swings)],
       ['Structure Events', fmt(diag.structureEvents)],
       ['Order Blocks', fmt(diag.orderBlocks)],
@@ -128,6 +131,9 @@
           var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
           var diag = {
             status: resp && resp.status,
+            message: resp && resp.message,          // safe: dispatchStructured() always sets this to a plain err.message string or a fixed fallback — never a secret
+            responseKeys: resp ? Object.keys(resp).join(',') : undefined,
+            dataIsNull: resp ? (resp.data === null) : undefined,
             swings: resp?.data?.swings?.length,
             structureEvents: resp?.data?.structureEvents?.length,
             orderBlocks: resp?.data?.orderBlocks?.length,
@@ -148,7 +154,9 @@
         } catch(err){
           console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
           renderDiagPanel({
-            status: 'threw: ' + (err && err.message ? err.message : String(err)),
+            status: 'threw',
+            message: (err && err.message) ? err.message : String(err),
+            responseKeys: undefined, dataIsNull: undefined,
             swings: undefined, structureEvents: undefined, orderBlocks: undefined,
             fvgs: undefined, liquidity: undefined,
             premiumDiscount: false, tradeLevels: false, decision: false
