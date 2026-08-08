@@ -38,6 +38,7 @@
 .tf-tab:hover{color:var(--text);}
 .tf-tab.active{background:var(--gold);color:#12161A;font-weight:600;}
 .tf-tab-loading{opacity:0.55;position:relative;}
+.tf-tab-error{border:1px solid #FF5C6C;color:#FF5C6C;}
 
 /* ---------- Layout: chart + floating decision panel ---------- */
 .chart-studio-body{
