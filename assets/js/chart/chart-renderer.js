@@ -340,7 +340,28 @@
       clear(){ drawables.clear(); },
       paint(dc){
         if(!visible) return;
-        drawables.forEach(d => d.paint(dc));
+        drawables.forEach(d => {
+          try{
+            d.paint(dc);
+          } catch(err){
+            const ann = (d && d.annotation) || null;
+            const detail = {
+              layer: name,
+              annotationType: ann ? ann.type : undefined,
+              annotationId: ann ? ann.id : undefined,
+              errorName: err && err.name,
+              errorMessage: err && err.message,
+              stack: err && err.stack
+            };
+            console.error('[RENDER-DIAG]', detail);
+            if(window.DannyChart){
+              window.DannyChart.lastRenderError = detail;
+            }
+            // Diagnostic only — the failing drawable is skipped for this
+            // frame; every other drawable in this and every other layer
+            // continues to paint normally. No rendering behavior changes.
+          }
+        });
       }
     };
   }
