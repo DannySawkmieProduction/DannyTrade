@@ -109,53 +109,68 @@ body.dtgate-ready{opacity:1;transition:opacity .25s ease}
 
 /* ---- stage 3: PIN panel ---- */
 .dtgate-panel{
-  width:100%;max-width:340px;
-  background:rgba(18,22,31,0.72);
-  border:1px solid rgba(212,175,106,0.22);
-  border-radius:16px;
-  padding:30px 26px 26px;
-  backdrop-filter:blur(14px);
-  -webkit-backdrop-filter:blur(14px);
-  box-shadow:0 20px 60px rgba(0,0,0,0.45);
+  width:min(92vw,460px);
+  background:rgba(18,22,31,0.74);
+  border:1px solid rgba(212,175,106,0.24);
+  border-radius:22px;
+  padding:clamp(28px,6vw,40px) clamp(22px,6vw,34px) clamp(24px,5vw,30px);
+  backdrop-filter:blur(16px);
+  -webkit-backdrop-filter:blur(16px);
+  box-shadow:0 24px 70px rgba(0,0,0,0.5),0 0 0 1px rgba(212,175,106,0.05) inset;
   text-align:center;
 }
 .dtgate-panel-eyebrow{
   font-family:var(--font-mono);
-  font-size:11px;letter-spacing:.2em;text-transform:uppercase;
+  font-size:clamp(11px,2.6vw,12.5px);letter-spacing:.22em;text-transform:uppercase;
   color:var(--gold,#D4AF6A);
-  margin-bottom:6px;
+  margin-bottom:8px;
 }
 .dtgate-panel-title{
   font-family:var(--font-wordmark,'Italiana',serif);
-  font-size:22px;letter-spacing:.03em;
+  font-size:clamp(26px,7.2vw,36px);letter-spacing:.03em;
   color:var(--text,#E9EBF1);
-  margin-bottom:4px;
+  margin-bottom:6px;
+  line-height:1.15;
 }
 .dtgate-panel-sub{
-  font-size:12.5px;color:var(--text-faint,#565C70);
-  margin-bottom:24px;
+  font-size:clamp(12.5px,3vw,14px);color:var(--text-faint,#565C70);
+  margin-bottom:clamp(28px,6vw,36px);
+  letter-spacing:.02em;
 }
 
 .dtgate-pin-dots{
-  display:flex;justify-content:center;gap:12px;margin-bottom:18px;
+  display:flex;justify-content:center;gap:clamp(14px,3.6vw,20px);
+  margin-bottom:clamp(24px,5.5vw,30px);
 }
 .dtgate-pin-dot{
-  width:13px;height:13px;border-radius:50%;
-  border:1.5px solid rgba(212,175,106,0.4);
+  width:clamp(14px,3.8vw,18px);height:clamp(14px,3.8vw,18px);border-radius:50%;
+  border:1.6px solid rgba(212,175,106,0.42);
   background:transparent;
   transition:background .12s ease,border-color .12s ease,transform .12s ease;
 }
 .dtgate-pin-dot.filled{
   background:var(--gold,#D4AF6A);
   border-color:var(--gold,#D4AF6A);
-  transform:scale(1.08);
+  transform:scale(1.1);
+}
+.dtgate-pin-dot.dtgate-pin-dot-pop{animation:dtgateDotPop .32s cubic-bezier(.34,1.56,.64,1)}
+@keyframes dtgateDotPop{
+  0%{transform:scale(1)}
+  45%{transform:scale(1.55)}
+  100%{transform:scale(1.1)}
+}
+.dtgate-pin-dots.dtgate-pin-success .dtgate-pin-dot{
+  border-color:var(--gold,#D4AF6A);
+  background:var(--gold,#D4AF6A);
+  box-shadow:0 0 14px rgba(212,175,106,0.75);
+  transition:box-shadow .3s ease;
 }
 .dtgate-panel.dtgate-shake .dtgate-pin-dots{animation:dtgateShake .38s ease}
 @keyframes dtgateShake{
   0%,100%{transform:translateX(0)}
-  20%{transform:translateX(-8px)}
-  40%{transform:translateX(7px)}
-  60%{transform:translateX(-5px)}
+  20%{transform:translateX(-9px)}
+  40%{transform:translateX(8px)}
+  60%{transform:translateX(-6px)}
   80%{transform:translateX(3px)}
 }
 
@@ -164,44 +179,54 @@ body.dtgate-ready{opacity:1;transition:opacity .25s ease}
 }
 
 .dtgate-keypad{
-  display:grid;grid-template-columns:repeat(3,1fr);gap:10px;
-  margin-bottom:18px;
+  display:grid;grid-template-columns:repeat(3,1fr);gap:clamp(10px,3vw,16px);
+  margin-bottom:clamp(22px,5vw,26px);
 }
 .dtgate-key{
-  font-family:var(--font-mono);font-size:17px;
+  font-family:var(--font-mono);font-size:clamp(20px,6vw,26px);font-weight:500;
   background:var(--bg-elev-2,#1A1F2B);
   border:1px solid var(--border,#232838);
   color:var(--text,#E9EBF1);
-  border-radius:10px;
-  padding:13px 0;
+  border-radius:14px;
+  padding:clamp(16px,5.4vw,22px) 0;
   cursor:pointer;
-  transition:border-color .12s ease,background .12s ease,transform .08s ease;
+  min-height:48px;
+  transition:border-color .12s ease,background .12s ease,transform .1s ease,box-shadow .15s ease;
   -webkit-tap-highlight-color:transparent;
+  touch-action:manipulation;
 }
-.dtgate-key:active{transform:scale(.94)}
+.dtgate-key:active{
+  transform:scale(.92);
+  border-color:var(--gold,#D4AF6A);
+  box-shadow:0 0 0 3px rgba(212,175,106,0.18),0 0 16px rgba(212,175,106,0.3);
+}
 .dtgate-key:hover,.dtgate-key:focus-visible{border-color:var(--gold,#D4AF6A);outline:none}
+.dtgate-key:disabled{opacity:.4;cursor:not-allowed;transform:none}
 .dtgate-key-clear,.dtgate-key-back{
-  font-size:12px;color:var(--text-dim,#8D93A6);letter-spacing:.03em;
+  font-size:clamp(12px,3.2vw,13px);color:var(--text-dim,#8D93A6);letter-spacing:.03em;
 }
 
 .dtgate-unlock-btn{
   width:100%;
   background:var(--gold,#D4AF6A);
   color:#12161A;
-  border:none;border-radius:10px;
-  padding:13px;
-  font-family:var(--font-body);font-weight:600;font-size:14px;
+  border:none;border-radius:14px;
+  padding:clamp(15px,4.4vw,19px);
+  font-family:var(--font-body);font-weight:600;font-size:clamp(15px,4vw,17px);
+  letter-spacing:.02em;
   cursor:pointer;
-  transition:transform .15s ease,opacity .15s ease;
+  min-height:48px;
+  transition:transform .15s ease,opacity .15s ease,box-shadow .15s ease;
 }
-.dtgate-unlock-btn:hover{transform:translateY(-1px)}
-.dtgate-unlock-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.dtgate-unlock-btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(212,175,106,0.25)}
+.dtgate-unlock-btn:active{transform:scale(.97)}
+.dtgate-unlock-btn:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
 
 .dtgate-error{
-  min-height:18px;
-  margin-top:14px;
+  min-height:20px;
+  margin-top:clamp(14px,3.6vw,18px);
   font-family:var(--font-mono);
-  font-size:11.5px;
+  font-size:clamp(11.5px,2.8vw,12.5px);
   color:var(--red,#FF5C6C);
   opacity:0;
   transition:opacity .2s ease;
@@ -209,9 +234,9 @@ body.dtgate-ready{opacity:1;transition:opacity .25s ease}
 .dtgate-error.dtgate-visible{opacity:1}
 
 .dtgate-footnote{
-  margin-top:20px;
+  margin-top:clamp(20px,4.4vw,26px);
   font-family:var(--font-mono);
-  font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
   color:var(--text-faint,#565C70);
 }
 
@@ -249,13 +274,83 @@ body.dtgate-ready{opacity:1;transition:opacity .25s ease}
 }
 .dtgate-lock-btn:hover,.dtgate-lock-btn:focus-visible{border-color:var(--gold,#D4AF6A);color:var(--gold,#D4AF6A);outline:none}
 
+/* ---- stage 4: success + Christian cross transition ---- */
+.dtgate-success-text{
+  font-family:var(--font-mono);
+  font-size:clamp(13px,3.4vw,16px);
+  letter-spacing:.28em;
+  text-transform:uppercase;
+  color:#F0DDB0;
+  text-shadow:0 0 20px rgba(212,175,106,0.5);
+  opacity:0;
+  transition:opacity .4s ease,transform .4s ease;
+  transform:translateY(6px);
+  margin-bottom:34px;
+}
+.dtgate-stage.dtgate-active .dtgate-success-text.dtgate-visible{
+  opacity:1;transform:translateY(0);
+}
+
+.dtgate-cross-wrap{
+  display:flex;align-items:center;justify-content:center;
+  width:100%;height:clamp(140px,34vh,220px);
+}
+.dtgate-cross{
+  position:relative;
+  width:clamp(46px,11vw,64px);
+  height:clamp(64px,15vw,88px);
+  opacity:0;
+  transform:scale(.15);
+  transform-origin:center center;
+  will-change:transform,opacity;
+}
+.dtgate-cross::before,
+.dtgate-cross::after{
+  content:'';
+  position:absolute;
+  background:linear-gradient(180deg,#FBEFD0,#D4AF6A 60%,#B8935A);
+  border-radius:3px;
+  box-shadow:0 0 18px rgba(212,175,106,0.65),0 0 46px rgba(212,175,106,0.35);
+}
+/* vertical shaft */
+.dtgate-cross::before{
+  left:50%;top:0;
+  width:16%;height:100%;
+  transform:translateX(-50%);
+}
+/* horizontal bar, positioned above center — Latin cross proportions */
+.dtgate-cross::after{
+  left:50%;top:26%;
+  width:78%;height:16%;
+  transform:translateX(-50%);
+}
+.dtgate-cross.dtgate-cross-grow{
+  animation:dtgateCrossGrow 2.6s cubic-bezier(.22,.61,.36,1) forwards;
+}
+@keyframes dtgateCrossGrow{
+  0%   {opacity:0;   transform:scale(.15)}
+  8%   {opacity:1;   transform:scale(.3)}
+  38%  {opacity:1;   transform:scale(1.6)}
+  65%  {opacity:1;   transform:scale(5.2)}
+  88%  {opacity:.55; transform:scale(15)}
+  100% {opacity:0;   transform:scale(30)}
+}
+.dtgate-cross.dtgate-cross-grow-reduced{
+  animation:dtgateCrossGrowReduced .9s ease-out forwards;
+}
+@keyframes dtgateCrossGrowReduced{
+  0%   {opacity:0; transform:scale(.4)}
+  30%  {opacity:1; transform:scale(1)}
+  70%  {opacity:1; transform:scale(2.4)}
+  100% {opacity:0; transform:scale(6)}
+}
+
 @media (max-width:420px){
-  .dtgate-panel{padding:24px 20px 20px}
-  .dtgate-keypad{gap:8px}
-  .dtgate-key{padding:12px 0;font-size:16px}
+  .dtgate-panel{border-radius:20px}
 }
 
 @media (prefers-reduced-motion: reduce){
   .dtgate-particle{display:none}
   .dtgate-stage,.dtgate-welcome-mark,.dtgate-welcome-line1,.dtgate-welcome-line2{transition-duration:.4s !important}
+  .dtgate-success-text{transition-duration:.25s !important}
 }
