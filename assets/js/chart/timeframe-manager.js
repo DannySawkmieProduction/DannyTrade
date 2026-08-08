@@ -285,13 +285,38 @@
       const btn = tabEls.get(tf);
       if(btn) btn.classList.toggle('tf-tab-loading', isLoading);
     }
+    function setError(tf, isError){
+      const btn = tabEls.get(tf);
+      if(btn) btn.classList.toggle('tf-tab-error', isError);
+      if(isError && btn) btn.title = 'Could not load this timeframe — the chart still shows the previous one. Click to retry.';
+      else if(btn) btn.removeAttribute('title');
+    }
 
-    setActive(manager.getState().timeframe);
+    // The tab that actually matches what's on screen right now — only
+    // ever moved forward by a CONFIRMED 'timeframeChanged', never by
+    // the optimistic 'timeframeChanging' (which fires before the
+    // network request even starts and says nothing about whether it
+    // will succeed). This is what fixes "tab shows active / spinner
+    // clears, but the chart silently kept the old candles": previously
+    // setActive() ran on 'timeframeChanging', so a failed fetch (e.g.
+    // FYERS returning 401) still left the clicked tab looking selected
+    // with no on-screen indication anything went wrong.
+    let confirmedTf = manager.getState().timeframe;
+    setActive(confirmedTf);
 
-    const offChanging = manager.on('timeframeChanging', ({ to }) => setActive(to));
+    const offChanging = manager.on('timeframeChanging', ({ to }) => setError(to, false));
     const offLoading  = manager.on('timeframeLoading',  ({ timeframe }) => setLoading(timeframe, true));
-    const offChanged  = manager.on('timeframeChanged',  ({ timeframe }) => setLoading(timeframe, false));
-    const offError    = manager.on('timeframeError',    ({ timeframe }) => setLoading(timeframe, false));
+    const offChanged  = manager.on('timeframeChanged',  ({ timeframe }) => {
+      confirmedTf = timeframe;
+      setActive(timeframe);
+      setLoading(timeframe, false);
+      setError(timeframe, false);
+    });
+    const offError    = manager.on('timeframeError',    ({ timeframe }) => {
+      setLoading(timeframe, false);
+      setError(timeframe, true);
+      setActive(confirmedTf); // revert the visual selection to the last timeframe that actually loaded
+    });
 
     return {
       destroy(){
