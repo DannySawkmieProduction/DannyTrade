@@ -188,6 +188,25 @@
     stagePin.appendChild(panel.el);
     overlay.appendChild(stagePin);
 
+    // Stage 4 — success feedback + Christian cross transition. Only
+    // ever activated after wirePin's onUnlocked fires (real PIN
+    // validation success) — see runSuccessSequence().
+    var stageSuccess = document.createElement('div');
+    stageSuccess.className = 'dtgate-stage';
+    var successText = document.createElement('div');
+    successText.className = 'dtgate-success-text';
+    successText.textContent = 'Access Granted';
+    successText.setAttribute('aria-live', 'polite');
+    var crossWrap = document.createElement('div');
+    crossWrap.className = 'dtgate-cross-wrap';
+    var cross = document.createElement('div');
+    cross.className = 'dtgate-cross';
+    cross.setAttribute('aria-hidden', 'true');
+    crossWrap.appendChild(cross);
+    stageSuccess.appendChild(successText);
+    stageSuccess.appendChild(crossWrap);
+    overlay.appendChild(stageSuccess);
+
     var skipBtn = document.createElement('button');
     skipBtn.type = 'button';
     skipBtn.className = 'dtgate-skip';
@@ -208,6 +227,9 @@
       stageIntro: stageIntro,
       stageWelcome: stageWelcome,
       stagePin: stagePin,
+      stageSuccess: stageSuccess,
+      successText: successText,
+      cross: cross,
       skipBtn: skipBtn,
       skipNote: skipNote,
       pin: panel
@@ -309,12 +331,22 @@
   function wirePin(refs, onUnlocked) {
     var pin = refs.pin;
     var value = '';
+    var prevLength = 0;
+    var submitting = false; // guards against double-triggering attemptUnlock
 
     function render() {
       pin.dots.forEach(function (d, i) {
-        d.classList.toggle('filled', i < value.length);
+        var isFilled = i < value.length;
+        d.classList.toggle('filled', isFilled);
+        if (isFilled && i === value.length - 1 && value.length > prevLength) {
+          d.classList.remove('dtgate-pin-dot-pop');
+          // Force reflow so the animation can retrigger on repeat digits.
+          void d.offsetWidth;
+          d.classList.add('dtgate-pin-dot-pop');
+        }
       });
-      pin.unlockBtn.disabled = value.length !== CFG.PIN_LENGTH;
+      prevLength = value.length;
+      pin.unlockBtn.disabled = value.length !== CFG.PIN_LENGTH || submitting;
     }
 
     function setError(msg) {
@@ -369,16 +401,24 @@
     }
 
     function attemptUnlock() {
+      if (submitting) return; // already mid-check, ignore extra taps
       if (lockoutRemainingSeconds() > 0) return;
       if (value.length !== CFG.PIN_LENGTH || !CFG.PIN_HASH_HEX) return;
+      submitting = true;
+      pin.unlockBtn.disabled = true;
+      Object.keys(pin.keyEls).forEach(function (k) { pin.keyEls[k].disabled = true; });
       sha256Hex(value).then(function (hex) {
         if (hex && hex === CFG.PIN_HASH_HEX) {
           resetAttempts();
           setError('');
+          pin.el.querySelector('.dtgate-pin-dots').classList.add('dtgate-pin-success');
           value = '';
-          render();
-          onUnlocked();
+          // submitting stays true — the PIN panel is done with input
+          // for the remainder of this authentication; wirePin doesn't
+          // get used again this page load once unlocked.
+          window.setTimeout(function () { onUnlocked(); }, 320);
         } else {
+          submitting = false;
           recordFailure();
           setError(lockoutRemainingSeconds() > 0 ? pin.error.textContent : 'Incorrect PIN.');
           shake();
@@ -453,9 +493,36 @@
     refs.skipBtn.classList.remove('dtgate-visible');
     window.setTimeout(function () {
       refs.stagePin.classList.add('dtgate-active');
-      var wiring = wirePin(refs, function () { finish(refs); });
+      var wiring = wirePin(refs, function () { goToSuccess(refs); });
       window.setTimeout(function () { wiring.focusInput(); }, 300);
     }, reduceMotion ? 0 : 500);
+  }
+
+  // Runs exactly once per successful authentication (attemptUnlock's
+  // submitting guard prevents this from being reached twice). PIN
+  // validation has already succeeded by the time this is called —
+  // this stage is purely a celebratory transition, it does not grant
+  // access itself. finish() is what actually marks the session
+  // unlocked, and it only runs at the end of this sequence.
+  function goToSuccess(refs) {
+    if (refs.overlay.dataset.successStarted) return;
+    refs.overlay.dataset.successStarted = '1';
+
+    refs.stagePin.classList.remove('dtgate-active');
+    window.setTimeout(function () {
+      refs.stageSuccess.classList.add('dtgate-active');
+      window.requestAnimationFrame(function () {
+        refs.successText.classList.add('dtgate-visible');
+      });
+
+      var textHoldMs = reduceMotion ? 200 : 500;
+      window.setTimeout(function () {
+        refs.cross.classList.add(reduceMotion ? 'dtgate-cross-grow-reduced' : 'dtgate-cross-grow');
+      }, textHoldMs);
+
+      var crossDurationMs = reduceMotion ? 900 : 2600;
+      window.setTimeout(function () { finish(refs); }, textHoldMs + crossDurationMs + 150);
+    }, reduceMotion ? 0 : 400);
   }
 
   function finish(refs) {
