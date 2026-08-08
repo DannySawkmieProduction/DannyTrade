@@ -13,7 +13,7 @@ binding = "ASSETS"
 # GEMINI_API_KEY is already stored as a secret (wrangler secret put
 # GEMINI_API_KEY) — do not add it here.
 [vars]
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 # Phase 2C, Step 2 persists the FYERS OAuth access_token (and its
 # expiry) across requests and Worker isolate recycles. Nothing reads
