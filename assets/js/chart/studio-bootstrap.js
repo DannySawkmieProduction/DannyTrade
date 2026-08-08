@@ -13,73 +13,20 @@
 ===================================================================== */
 (function bootstrapStudioChart(){
 
-  /* ---------------------------------------------------------------
-     TEMPORARY DIAGNOSTIC PANEL — mobile-visible substitute for
-     DevTools console output. Pure UI, self-contained in this file:
-     touches nothing outside a single injected <div>. Renders/updates
-     after every getStructuredAnalysis() call (success or thrown
-     error) so the panel always reflects the most recent attempt,
-     including a failed one. Remove renderDiagPanel() and its call
-     sites above to fully revert once the root cause is confirmed.
-  --------------------------------------------------------------- */
-  function fmt(v){ return v === undefined ? 'undefined' : String(v); }
-
-  function renderDiagPanel(diag){
-    var panel = document.getElementById('dannyTempDiagPanel');
-    if(!panel){
-      panel = document.createElement('div');
-      panel.id = 'dannyTempDiagPanel';
-      panel.style.cssText = [
-        'position:fixed', 'left:0', 'right:0', 'bottom:0',
-        'z-index:999999',
-        'background:rgba(10,12,18,0.96)',
-        'color:#E8EAF0',
-        'font-family:"JetBrains Mono",monospace',
-        'font-size:13px',
-        'line-height:1.5',
-        'padding:12px 14px 16px',
-        'max-height:60vh',
-        'overflow-y:auto',
-        'border-top:2px solid #D4AF6A',
-        'box-shadow:0 -4px 16px rgba(0,0,0,0.5)',
-        '-webkit-overflow-scrolling:touch'
-      ].join(';');
-      document.body.appendChild(panel);
-    }
-
-    var rows = [
-      ['Status', fmt(diag.status)],
-      ['Message', fmt(diag.message)],
-      ['Response Keys', fmt(diag.responseKeys)],
-      ['Data Is Null', fmt(diag.dataIsNull)],
-      ['Swings', fmt(diag.swings)],
-      ['Structure Events', fmt(diag.structureEvents)],
-      ['Order Blocks', fmt(diag.orderBlocks)],
-      ['FVGs', fmt(diag.fvgs)],
-      ['Liquidity', fmt(diag.liquidity)],
-      ['Premium/Discount', fmt(diag.premiumDiscount)],
-      ['Trade Levels', fmt(diag.tradeLevels)],
-      ['Decision', fmt(diag.decision)]
-    ];
-
-    var rowsHtml = rows.map(function(r){
-      return '<div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0;">' +
-        '<span style="color:#8D93A6;">' + r[0] + '</span>' +
-        '<span style="color:#E8EAF0;">' + r[1] + '</span>' +
-        '</div>';
-    }).join('');
-
-    panel.innerHTML =
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
-        '<span style="color:#D4AF6A;font-weight:700;letter-spacing:0.03em;">TEMPORARY DIAGNOSTIC — [DIAG]</span>' +
-        '<button type="button" id="dannyTempDiagPanelClose" style="background:#1B1F2B;color:#E8EAF0;border:1px solid #3A3F52;border-radius:6px;padding:4px 12px;font-size:13px;font-family:inherit;">Close</button>' +
-      '</div>' +
-      rowsHtml;
-
-    document.getElementById('dannyTempDiagPanelClose').addEventListener('click', function(){
-      panel.remove();
-    });
-  }
+  // Temporary quota-protection mitigation (not the permanent Gemini fix —
+  // see PHASE notes / conversation history). auto-refresh-manager.js calls
+  // this function every ~15s via timeframe-manager.js's annotationsProvider,
+  // regardless of whether the previous call succeeded. Without this gate,
+  // a single Gemini 429 just repeats every tick forever. When a 429 is
+  // detected in the AI response message, further calls are skipped for a
+  // cooldown window — no network call, no repeated warning — and the
+  // existing "unavailable" analysis shape is returned unchanged, so the
+  // rest of the app (candles, timeframe switching, replay, rendering)
+  // behaves exactly as it already does on any AI failure. Once the
+  // cooldown elapses, the very next call — automatic or from a manual
+  // timeframe/symbol switch — tries Gemini again normally.
+  var QUOTA_PAUSE_MS = 5 * 60 * 1000; // 5 minutes
+  var quotaPausedUntil = 0;
 
   function boot(){
     var DC = window.DannyChart;
@@ -127,46 +74,36 @@
       // crashing the chart. studio-chart-init.js's resolveAnnotations()
       // also wraps this call in its own try/catch as a second safety net.
       getStructuredAnalysis: async function(candles, timeframe, symbol){
+        var emptyAnalysis = {
+          version: '1.0', timeframe: timeframe,
+          swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
+          premiumDiscount: null, tradeLevels: null, decision: null
+        };
+
+        // Quota cooldown active — skip the network call entirely. Analysis
+        // stays in the same "unavailable" state it's already in; this is
+        // not a fabricated success. Deliberately silent (no log) so a
+        // 15s-interval auto-refresh doesn't spam the console while paused.
+        if(Date.now() < quotaPausedUntil){
+          return emptyAnalysis;
+        }
+
         try{
           var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
-          var diag = {
-            status: resp && resp.status,
-            message: resp && resp.message,          // safe: dispatchStructured() always sets this to a plain err.message string or a fixed fallback — never a secret
-            responseKeys: resp ? Object.keys(resp).join(',') : undefined,
-            dataIsNull: resp ? (resp.data === null) : undefined,
-            swings: resp?.data?.swings?.length,
-            structureEvents: resp?.data?.structureEvents?.length,
-            orderBlocks: resp?.data?.orderBlocks?.length,
-            fvgs: resp?.data?.fvgs?.length,
-            liquidity: resp?.data?.liquidity?.length,
-            premiumDiscount: !!resp?.data?.premiumDiscount,
-            tradeLevels: !!resp?.data?.tradeLevels,
-            decision: !!resp?.data?.decision
-          };
-          console.log('[DIAG]', diag);
-          renderDiagPanel(diag);
           if(resp && resp.status === 'ok' && resp.data){
             return resp.data;
           }
           if(resp && resp.status === 'error'){
             console.warn('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
+            if(resp.message && /\b429\b/.test(resp.message)){
+              quotaPausedUntil = Date.now() + QUOTA_PAUSE_MS;
+              console.warn('[StudioBootstrap] Gemini quota exceeded — pausing automatic analysis for ' + Math.round(QUOTA_PAUSE_MS/1000) + 's. Manual timeframe/symbol switches will resume trying once the pause elapses.');
+            }
           }
         } catch(err){
           console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
-          renderDiagPanel({
-            status: 'threw',
-            message: (err && err.message) ? err.message : String(err),
-            responseKeys: undefined, dataIsNull: undefined,
-            swings: undefined, structureEvents: undefined, orderBlocks: undefined,
-            fvgs: undefined, liquidity: undefined,
-            premiumDiscount: false, tradeLevels: false, decision: false
-          });
         }
-        return {
-          version: '1.0', timeframe: timeframe,
-          swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
-          premiumDiscount: null, tradeLevels: null, decision: null
-        };
+        return emptyAnalysis;
       }
     });
 
