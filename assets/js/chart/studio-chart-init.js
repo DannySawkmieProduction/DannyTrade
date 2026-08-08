@@ -56,6 +56,9 @@
       // "sensible default, still overridable via config" pattern as
       // every module reference below.
       symbolLabelEl: document.getElementById('chartSymbol'),
+      // Same "sensible default, still overridable via config" pattern —
+      // see updateAnalysisStatusBanner() above.
+      analysisStatusEl: document.getElementById('chartAnalysisStatus'),
       // DI: module references, not instances — this file calls their
       // factory methods (initialize/create/mount) itself, using config
       // (DOM elements, initial symbol/timeframe) only it has.
@@ -127,6 +130,30 @@
       el.textContent = (provider && provider.name) ? `${symbol} · ${provider.name} Live` : `${symbol} · Live`;
     }
 
+    /** Small, honest, user-visible banner over the chart itself — NOT
+     *  the shared upload-pipeline "AI Provider Connected" status text
+     *  elsewhere on this page, which only reflects that a provider
+     *  object was configured, never that a chart-structure analysis
+     *  request has actually succeeded. This is specifically about the
+     *  live analysis-for-this-chart pipeline, so a failed/empty result
+     *  is visible without opening devtools. Hidden entirely on a
+     *  normal successful, non-empty result. */
+    function updateAnalysisStatusBanner(diag){
+      const el = config.analysisStatusEl;
+      if(!el) return;
+      if(diag.requestStatus && diag.requestStatus !== 'ok'){
+        el.hidden = false;
+        el.classList.remove('is-empty');
+        el.textContent = `Analysis request failed (${diag.requestStatus}): ${diag.requestMessage || 'no message'} — chart shows candles only, no overlays.`;
+      } else if(diag.annotationsGenerated === 0 && diag.candlesReceived > 0){
+        el.hidden = false;
+        el.classList.add('is-empty');
+        el.textContent = 'Analysis succeeded but found no structures in this window.';
+      } else {
+        el.hidden = true;
+      }
+    }
+
     /** Console diagnostics for the full FYERS candles -> Gemini analysis
      *  -> AnnotationModel -> ChartRenderer pipeline. Dev-only signal;
      *  never changes what gets rendered. Reads analysis.__meta (see
@@ -158,6 +185,7 @@
       }
       window.DannyChart.__lastDiagnostics = diag;
       if(state.renderer) state.renderer.emit('analysisDiagnostics', diag);
+      updateAnalysisStatusBanner(diag);
       // Post-apply pass: the caller (ReplayEngine.create / TimeframeManager
       // .applyResult) calls renderer.setAnnotations() synchronously right
       // after this function returns, so a macrotask delay is enough to
