@@ -58,22 +58,38 @@
       // crashing the chart. studio-chart-init.js's resolveAnnotations()
       // also wraps this call in its own try/catch as a second safety net.
       getStructuredAnalysis: async function(candles, timeframe, symbol){
+        // __meta is a diagnostic-only field, not part of the Structured
+        // Analysis schema itself (annotation-model.js never reads it) —
+        // it exists so callers can tell "Gemini legitimately found
+        // nothing" apart from "the request never actually succeeded",
+        // which the previous version of this function collapsed into
+        // the exact same silent empty-analysis object either way.
         try{
           var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
           if(resp && resp.status === 'ok' && resp.data){
+            resp.data.__meta = { requestStatus: 'ok' };
             return resp.data;
           }
           if(resp && resp.status === 'error'){
-            console.warn('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
+            console.error('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
+            var errResult = { version: '1.0', timeframe: timeframe, swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [], premiumDiscount: null, tradeLevels: null, decision: null };
+            errResult.__meta = { requestStatus: 'error', message: resp.message || 'analyzeChartStructure returned status "error"' };
+            return errResult;
           }
+          console.error('[StudioBootstrap] analyzeChartStructure returned an unexpected response shape:', resp);
+          var shapeResult = { version: '1.0', timeframe: timeframe, swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [], premiumDiscount: null, tradeLevels: null, decision: null };
+          shapeResult.__meta = { requestStatus: 'unexpected_response', message: 'Response had no status:"ok" + data, and no status:"error" either.' };
+          return shapeResult;
         } catch(err){
           console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
+          var exResult = {
+            version: '1.0', timeframe: timeframe,
+            swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
+            premiumDiscount: null, tradeLevels: null, decision: null
+          };
+          exResult.__meta = { requestStatus: 'exception', message: err && err.message || String(err) };
+          return exResult;
         }
-        return {
-          version: '1.0', timeframe: timeframe,
-          swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
-          premiumDiscount: null, tradeLevels: null, decision: null
-        };
       }
     });
 

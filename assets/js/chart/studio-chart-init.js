@@ -127,6 +127,55 @@
       el.textContent = (provider && provider.name) ? `${symbol} · ${provider.name} Live` : `${symbol} · Live`;
     }
 
+    /** Console diagnostics for the full FYERS candles -> Gemini analysis
+     *  -> AnnotationModel -> ChartRenderer pipeline. Dev-only signal;
+     *  never changes what gets rendered. Reads analysis.__meta (see
+     *  studio-bootstrap.js's getStructuredAnalysis) to tell "Gemini
+     *  legitimately returned nothing" apart from "the request never
+     *  actually succeeded" -- both used to collapse into the exact
+     *  same silent empty-analysis object with no visible difference. */
+    function logDiagnostics(candles, analysis, annotations){
+      const meta = (analysis && analysis.__meta) || { requestStatus: 'unknown (no __meta on this analysis object)' };
+      const diag = {
+        candlesReceived: Array.isArray(candles) ? candles.length : 0,
+        requestStatus: meta.requestStatus,
+        requestMessage: meta.message || null,
+        swings: (analysis && analysis.swings || []).length,
+        structureEvents: (analysis && analysis.structureEvents || []).length,
+        orderBlocks: (analysis && analysis.orderBlocks || []).length,
+        fvgs: (analysis && analysis.fvgs || []).length,
+        liquidity: (analysis && analysis.liquidity || []).length,
+        premiumDiscount: !!(analysis && analysis.premiumDiscount) ? 'present' : 'null',
+        tradeLevels: !!(analysis && analysis.tradeLevels) ? 'present' : 'null',
+        annotationsGenerated: annotations.length
+      };
+      if(meta.requestStatus && meta.requestStatus !== 'ok' && diag.annotationsGenerated === 0){
+        console.error('[StudioChartInit] Analysis pipeline diagnostics — annotations are EMPTY because the request did not succeed (requestStatus != "ok"), not because Gemini found no structures:', diag);
+      } else if(diag.annotationsGenerated === 0 && diag.candlesReceived > 0){
+        console.warn('[StudioChartInit] Analysis pipeline diagnostics — request succeeded but produced zero annotations (Gemini legitimately found no structures in this window):', diag);
+      } else {
+        console.log('[StudioChartInit] Analysis pipeline diagnostics:', diag);
+      }
+      window.DannyChart.__lastDiagnostics = diag;
+      if(state.renderer) state.renderer.emit('analysisDiagnostics', diag);
+      // Post-apply pass: the caller (ReplayEngine.create / TimeframeManager
+      // .applyResult) calls renderer.setAnnotations() synchronously right
+      // after this function returns, so a macrotask delay is enough to
+      // read the counts AFTER that has happened -- confirms annotations
+      // actually reached the renderer (and, via OverlayManager, which
+      // layer each one landed in), not just that AnnotationModel produced
+      // them.
+      setTimeout(() => {
+        if(!state.renderer) return;
+        const rs = state.renderer.getState();
+        const byLayer = state.overlayManager ? state.overlayManager.getAllCounts() : null;
+        const postDiag = { rendererAnnotationsReceived: rs.annotationCount, drawablesByLayer: byLayer };
+        console.log('[StudioChartInit] Post-apply diagnostics (renderer + overlay layers):', postDiag);
+        window.DannyChart.__lastDiagnostics = Object.assign({}, window.DannyChart.__lastDiagnostics, postDiag);
+        state.renderer.emit('overlayDiagnostics', postDiag);
+      }, 0);
+    }
+
     /** The one place candles+analysis become annotations+decision-panel
      *  content. Used both for the initial bootstrap (step 5) and every
      *  subsequent timeframe/symbol switch (step 6's annotationsProvider) —
@@ -139,7 +188,7 @@
       updateSymbolLabel(symbol);
       let analysis;
       try{ analysis = await Promise.resolve(config.getStructuredAnalysis(candles, timeframe, symbol)); }
-      catch(err){ warn('getStructuredAnalysis', err); analysis = defaultAnalysisProvider(candles, timeframe); }
+      catch(err){ warn('getStructuredAnalysis', err); analysis = defaultAnalysisProvider(candles, timeframe); analysis.__meta = { requestStatus: 'exception', message: err && err.message || String(err) }; }
       state.lastAnalysis = analysis;
       if(state.decisionPanel){
         state.decisionPanel.update(analysis, {
@@ -147,7 +196,9 @@
           replayState: state.replayEngine ? state.replayEngine.getState() : null
         });
       }
-      return config.AnnotationModel ? config.AnnotationModel.buildAnnotations(candles, analysis) : [];
+      const annotations = config.AnnotationModel ? config.AnnotationModel.buildAnnotations(candles, analysis) : [];
+      logDiagnostics(candles, analysis, annotations);
+      return annotations;
     }
 
     /* ---------------------------------------------------------------
@@ -182,12 +233,45 @@
         }
       });
 
-      // 4. Legend
+      // 5. Overlay Manager (Phase 5B) — the 9 overlay layer keys
+      //    (Candlestick, Market Structure, Liquidity, Order Blocks, Fair
+      //    Value Gaps, Premium/Discount, Volume, Trend, Support &
+      //    Resistance). Built entirely on top of chart-renderer.js's own
+      //    existing layer/Drawable engine; OverlayManager is a pure
+      //    facade and draws/computes nothing itself.
+      //
+      //    MUST be constructed before the Replay Engine step below,
+      //    not after it. OverlayCache (owned by OverlayManager) seeds
+      //    its per-layer id counts purely by observing the renderer's
+      //    'annotationAdded'/'annotationRemoved' events as they fire —
+      //    it never scans existing state on construction (see
+      //    overlay-cache.js's own responsibility-boundary comment). The
+      //    Replay Engine step immediately below makes the FIRST
+      //    setAnnotations() call of the whole session; if OverlayManager
+      //    were built afterward (as it previously was, at old step 9),
+      //    OverlayCache would miss every one of those initial
+      //    annotationAdded events and remain at zero counts for every
+      //    layer until the next timeframe switch/refresh, even though
+      //    the renderer itself already holds and paints the annotations
+      //    correctly. Toggling was never affected by this (it reads
+      //    renderer.isLayerVisible()/showLayer()/hideLayer() directly,
+      //    not the cache) — this ordering fix is specifically for the
+      //    per-layer Drawable counts now surfaced via diagnostics.
+      if(state.renderer){
+        state.overlayManager = await safeStep('overlayManager', async () => {
+          if(!config.OverlayManager || typeof config.OverlayManager.create !== 'function'){
+            throw new Error('OverlayManager.create is not available');
+          }
+          return config.OverlayManager.create({ renderer: state.renderer });
+        });
+      }
+
+      // 6. Legend
       if(config.legendContainer){
         state.legendHandle = await safeStep('Mounting legend', async () => config.Legend.mount(config.legendContainer, state.renderer));
       }
 
-      // 5. Replay Engine — needs an initial candle batch, so this step
+      // 7. Replay Engine — needs an initial candle batch, so this step
       //    coordinates one direct Data Adapter fetch (allowed: this is
       //    the orchestrator coordinating with the Data Adapter, not
       //    business logic) before constructing the engine. Each
@@ -223,7 +307,7 @@
         }
       });
 
-      // 6. Timeframe Manager
+      // 8. Timeframe Manager
       state.timeframeManager = await safeStep('timeframeManager', async () => {
         const manager = config.TimeframeManager.create({
           renderer: state.renderer, symbol: config.symbol, timeframe: config.timeframe,
@@ -234,7 +318,7 @@
         return manager;
       });
 
-      // 7. Decision Panel
+      // 9. Decision Panel
       if(config.decisionPanelContainer){
         state.decisionPanel = await safeStep('Mounting decision panel', async () => {
           const panel = config.DecisionPanel.mount(config.decisionPanelContainer, state.renderer);
@@ -243,7 +327,7 @@
         });
       }
 
-      // 8. Auto Refresh Manager (Phase 5C) — keeps the just-loaded
+      // 10. Auto Refresh Manager (Phase 5C) — keeps the just-loaded
       //    (symbol, timeframe) series fresh over time. Created last, and
       //    gated on both state.renderer and state.timeframeManager already
       //    being live: it drives itself entirely through
@@ -265,31 +349,17 @@
         });
       }
 
-      // 9. Overlay Manager + Toggle Controller (Phase 5B) — the 9
-      //    overlay buttons (Candlestick, Market Structure, Liquidity,
-      //    Order Blocks, Fair Value Gaps, Premium/Discount, Volume,
-      //    Trend, Support & Resistance). Built entirely on top of
-      //    chart-renderer.js's own existing layer/Drawable engine — this
-      //    step never draws anything and never computes market
-      //    structure/trend/volume/S-R itself; OverlayManager is a pure
-      //    facade. Mirrors exactly how Legend is constructed above:
-      //    OverlayManager only needs state.renderer; ToggleController
-      //    only mounts if a container was supplied.
-      if(state.renderer){
-        state.overlayManager = await safeStep('overlayManager', async () => {
-          if(!config.OverlayManager || typeof config.OverlayManager.create !== 'function'){
-            throw new Error('OverlayManager.create is not available');
+      // 11. Toggle Controller (Phase 5B) — mounted last since it only
+      //     needs state.overlayManager (already built at step 5) and a
+      //     container; ordering here doesn't affect OverlayCache the
+      //     way step 5's position does.
+      if(state.overlayManager && config.overlayToggleContainer){
+        state.toggleControllerHandle = await safeStep('toggleController', async () => {
+          if(!config.ToggleController || typeof config.ToggleController.mount !== 'function'){
+            throw new Error('ToggleController.mount is not available');
           }
-          return config.OverlayManager.create({ renderer: state.renderer });
+          return config.ToggleController.mount(config.overlayToggleContainer, state.overlayManager);
         });
-        if(state.overlayManager && config.overlayToggleContainer){
-          state.toggleControllerHandle = await safeStep('toggleController', async () => {
-            if(!config.ToggleController || typeof config.ToggleController.mount !== 'function'){
-              throw new Error('ToggleController.mount is not available');
-            }
-            return config.ToggleController.mount(config.overlayToggleContainer, state.overlayManager);
-          });
-        }
       }
 
       registerEventListeners();

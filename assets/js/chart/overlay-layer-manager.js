@@ -42,6 +42,7 @@
       { key: 'orderBlocks',      label: 'Order Blocks',         rendererLayer: 'orderBlocks',        color: STYLES.ORDER_BLOCK ? STYLES.ORDER_BLOCK.subtypeColor.bullish : '#35D399', dataAvailable: true },
       { key: 'fvg',              label: 'Fair Value Gaps',      rendererLayer: 'fvg',                color: STYLES.FVG ? STYLES.FVG.subtypeColor.bullish : '#35D399', dataAvailable: true },
       { key: 'premiumDiscount',  label: 'Premium / Discount',   rendererLayer: 'premiumDiscount',    color: '#D4AF6A', dataAvailable: true },
+      { key: 'tradeLevels',      label: 'Trade Levels',         rendererLayer: 'tradeLevels',         color: STYLES.TRADE_LEVEL ? STYLES.TRADE_LEVEL.subtypeColor.entry : '#D4AF6A', dataAvailable: true },
       // Pending — real, independently-toggleable layers with no data
       // source yet (their Analysis Engines are still Phase 5A work).
       { key: 'volume',           label: 'Volume',               rendererLayer: 'volume',             color: PENDING_COLOR, dataAvailable: false },
