@@ -39,6 +39,12 @@
 .tf-tab.active{background:var(--gold);color:#12161A;font-weight:600;}
 .tf-tab-loading{opacity:0.55;position:relative;}
 .tf-tab-error{border:1px solid #FF5C6C;color:#FF5C6C;}
+.chart-analysis-status{
+  position:absolute; left:12px; bottom:12px; z-index:6; max-width:min(420px, calc(100% - 24px));
+  padding:8px 12px; border-radius:8px; font-size:12.5px; line-height:1.4;
+  background:rgba(20,22,28,0.92); border:1px solid #FF5C6C; color:#FF5C6C;
+}
+.chart-analysis-status.is-empty{border-color:var(--border-soft, #333); color:var(--text-dim, #9AA1B4);}
 
 /* ---------- Layout: chart + floating decision panel ---------- */
 .chart-studio-body{
