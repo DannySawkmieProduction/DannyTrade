@@ -1,0 +1,261 @@
+/* =====================================================================
+   Amazing Grace Trading — Studio Private Access Gate stylesheet
+   (assets/css/studio-gate.css)
+
+   Linked ONLY from studio.html. index.html never loads this file, so
+   the public marketing site and its own intro (intro.css /
+   intro-sequence.js) are completely unaffected.
+
+   Visual language deliberately mirrors intro.css (same dark background,
+   gold accent, particle drift, JetBrains Mono scramble text) so the
+   Studio's opening feels like the same brand experience, without
+   editing or duplicating the index.html-only intro engine itself.
+   All animation is transform/opacity only and is gated behind
+   prefers-reduced-motion.
+   ===================================================================== */
+
+/* Pre-paint hide: set by the inline snippet in studio.html's <head>,
+   removed by studio-gate.js the instant the gate overlay already
+   exists in the DOM — so the locked page is never visible, even for
+   a single frame, before the overlay is ready to cover it. */
+html.dtgate-pending body{opacity:0}
+body.dtgate-ready{opacity:1;transition:opacity .25s ease}
+
+#dtGateOverlay{
+  position:fixed;inset:0;z-index:2000;
+  background:#05060A;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  overflow:hidden;
+  opacity:1;
+  padding:24px;
+  padding:max(24px,env(safe-area-inset-top)) max(24px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(24px,env(safe-area-inset-left));
+  transition:opacity .5s ease;
+}
+#dtGateOverlay.dtgate-fade-out{opacity:0;pointer-events:none}
+
+/* ---- shared particle atmosphere (same recipe as intro.css) ---- */
+.dtgate-particle{
+  position:absolute;border-radius:50%;
+  background:rgba(212,175,106,0.5);
+  will-change:transform,opacity;
+  animation:dtgateParticleFloat linear infinite;
+  pointer-events:none;
+}
+@keyframes dtgateParticleFloat{
+  0%{transform:translateY(0) scale(1);opacity:0}
+  10%{opacity:.55}
+  90%{opacity:.3}
+  100%{transform:translateY(-140px) scale(1.15);opacity:0}
+}
+
+/* ---- stage 1: brand scramble (reuses the intro's visual grammar) ---- */
+.dtgate-stage{
+  text-align:center;
+  padding:0 20px;
+  position:absolute;
+  opacity:0;
+  transform:translateY(10px);
+  transition:opacity .5s ease,transform .5s ease;
+  pointer-events:none;
+  max-width:92vw;
+}
+.dtgate-stage.dtgate-active{opacity:1;transform:translateY(0);pointer-events:auto}
+
+.dtgate-scramble{
+  font-family:var(--font-mono);
+  font-size:clamp(18px,5vw,38px);
+  letter-spacing:0.1em;
+  color:#8D93A6;
+  white-space:pre-wrap;
+  min-height:1.3em;
+}
+.dtgate-scramble.dtgate-resolved{
+  color:#D4AF6A;
+  transition:color .6s ease,text-shadow .8s ease;
+  text-shadow:0 0 18px rgba(212,175,106,0.55),0 0 42px rgba(212,175,106,0.25);
+}
+
+/* ---- stage 2: personal welcome ---- */
+.dtgate-welcome-mark{
+  width:52px;height:52px;margin:0 auto 22px;
+  opacity:0;transform:scale(.85);
+  transition:opacity .7s ease,transform .7s ease;
+}
+.dtgate-stage.dtgate-active .dtgate-welcome-mark{opacity:1;transform:scale(1)}
+
+.dtgate-welcome-line1{
+  font-family:var(--font-wordmark,'Italiana',serif);
+  font-weight:400;
+  font-size:clamp(24px,5.4vw,40px);
+  letter-spacing:0.03em;
+  color:#F0DDB0;
+  text-shadow:0 0 24px rgba(212,175,106,0.35);
+  opacity:0;transform:translateY(8px);
+  transition:opacity 1s ease .15s,transform 1s ease .15s;
+}
+.dtgate-stage.dtgate-active .dtgate-welcome-line1{opacity:1;transform:translateY(0)}
+
+.dtgate-welcome-line2{
+  margin-top:14px;
+  font-family:var(--font-body);
+  font-weight:400;
+  font-size:clamp(13px,2.6vw,16px);
+  letter-spacing:0.04em;
+  color:var(--text-dim,#8D93A6);
+  opacity:0;
+  transition:opacity 1.1s ease .55s;
+}
+.dtgate-stage.dtgate-active .dtgate-welcome-line2{opacity:1}
+
+/* ---- stage 3: PIN panel ---- */
+.dtgate-panel{
+  width:100%;max-width:340px;
+  background:rgba(18,22,31,0.72);
+  border:1px solid rgba(212,175,106,0.22);
+  border-radius:16px;
+  padding:30px 26px 26px;
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  box-shadow:0 20px 60px rgba(0,0,0,0.45);
+  text-align:center;
+}
+.dtgate-panel-eyebrow{
+  font-family:var(--font-mono);
+  font-size:11px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--gold,#D4AF6A);
+  margin-bottom:6px;
+}
+.dtgate-panel-title{
+  font-family:var(--font-wordmark,'Italiana',serif);
+  font-size:22px;letter-spacing:.03em;
+  color:var(--text,#E9EBF1);
+  margin-bottom:4px;
+}
+.dtgate-panel-sub{
+  font-size:12.5px;color:var(--text-faint,#565C70);
+  margin-bottom:24px;
+}
+
+.dtgate-pin-dots{
+  display:flex;justify-content:center;gap:12px;margin-bottom:18px;
+}
+.dtgate-pin-dot{
+  width:13px;height:13px;border-radius:50%;
+  border:1.5px solid rgba(212,175,106,0.4);
+  background:transparent;
+  transition:background .12s ease,border-color .12s ease,transform .12s ease;
+}
+.dtgate-pin-dot.filled{
+  background:var(--gold,#D4AF6A);
+  border-color:var(--gold,#D4AF6A);
+  transform:scale(1.08);
+}
+.dtgate-panel.dtgate-shake .dtgate-pin-dots{animation:dtgateShake .38s ease}
+@keyframes dtgateShake{
+  0%,100%{transform:translateX(0)}
+  20%{transform:translateX(-8px)}
+  40%{transform:translateX(7px)}
+  60%{transform:translateX(-5px)}
+  80%{transform:translateX(3px)}
+}
+
+.dtgate-pin-input{
+  position:absolute;opacity:0;pointer-events:none;
+}
+
+.dtgate-keypad{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:10px;
+  margin-bottom:18px;
+}
+.dtgate-key{
+  font-family:var(--font-mono);font-size:17px;
+  background:var(--bg-elev-2,#1A1F2B);
+  border:1px solid var(--border,#232838);
+  color:var(--text,#E9EBF1);
+  border-radius:10px;
+  padding:13px 0;
+  cursor:pointer;
+  transition:border-color .12s ease,background .12s ease,transform .08s ease;
+  -webkit-tap-highlight-color:transparent;
+}
+.dtgate-key:active{transform:scale(.94)}
+.dtgate-key:hover,.dtgate-key:focus-visible{border-color:var(--gold,#D4AF6A);outline:none}
+.dtgate-key-clear,.dtgate-key-back{
+  font-size:12px;color:var(--text-dim,#8D93A6);letter-spacing:.03em;
+}
+
+.dtgate-unlock-btn{
+  width:100%;
+  background:var(--gold,#D4AF6A);
+  color:#12161A;
+  border:none;border-radius:10px;
+  padding:13px;
+  font-family:var(--font-body);font-weight:600;font-size:14px;
+  cursor:pointer;
+  transition:transform .15s ease,opacity .15s ease;
+}
+.dtgate-unlock-btn:hover{transform:translateY(-1px)}
+.dtgate-unlock-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+
+.dtgate-error{
+  min-height:18px;
+  margin-top:14px;
+  font-family:var(--font-mono);
+  font-size:11.5px;
+  color:var(--red,#FF5C6C);
+  opacity:0;
+  transition:opacity .2s ease;
+}
+.dtgate-error.dtgate-visible{opacity:1}
+
+.dtgate-footnote{
+  margin-top:20px;
+  font-family:var(--font-mono);
+  font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-faint,#565C70);
+}
+
+.dtgate-skip-blocked{
+  position:absolute;bottom:22px;left:0;right:0;
+  text-align:center;
+  font-family:var(--font-mono);font-size:11px;
+  color:var(--text-faint,#565C70);
+  opacity:0;transition:opacity .4s ease;
+}
+.dtgate-skip-blocked.dtgate-visible{opacity:1}
+
+.dtgate-skip{
+  position:absolute;bottom:28px;right:28px;
+  background:none;border:1px solid #232838;color:#8D93A6;
+  font-family:var(--font-mono);font-size:12px;letter-spacing:.05em;
+  padding:9px 16px;border-radius:8px;cursor:pointer;
+  opacity:0;transition:opacity .3s ease,border-color .15s,color .15s;
+}
+.dtgate-skip.dtgate-visible{opacity:1}
+.dtgate-skip:hover,.dtgate-skip:focus-visible{border-color:#D4AF6A;color:#D4AF6A;outline:none}
+
+.dtgate-sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;
+}
+
+/* ---- in-app lock button (studio nav) ---- */
+.dtgate-lock-btn{
+  background:none;border:1px solid var(--border,#232838);
+  color:var(--text-dim,#8D93A6);
+  border-radius:8px;padding:8px 10px;
+  display:inline-flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:border-color .15s,color .15s;
+}
+.dtgate-lock-btn:hover,.dtgate-lock-btn:focus-visible{border-color:var(--gold,#D4AF6A);color:var(--gold,#D4AF6A);outline:none}
+
+@media (max-width:420px){
+  .dtgate-panel{padding:24px 20px 20px}
+  .dtgate-keypad{gap:8px}
+  .dtgate-key{padding:12px 0;font-size:16px}
+}
+
+@media (prefers-reduced-motion: reduce){
+  .dtgate-particle{display:none}
+  .dtgate-stage,.dtgate-welcome-mark,.dtgate-welcome-line1,.dtgate-welcome-line2{transition-duration:.4s !important}
+}
