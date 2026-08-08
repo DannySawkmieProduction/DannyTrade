@@ -38,15 +38,16 @@
    4. Upload this file to: assets/js/studio-gate-config.js
 
    -------------------------------------------------------------------
-   DEFAULT PIN SHIPPED HERE: 1234 — CHANGE THIS BEFORE RELYING ON IT.
+   CURRENT PIN: 1028 (set via the steps above; hash only, not stored
+   in plain text).
    ===================================================================== */
 
 (function () {
   'use strict';
 
   window.DTGateConfig = {
-    // SHA-256 of "1234". Replace using the steps above.
-    PIN_HASH_HEX: '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
+    // SHA-256 of "1028".
+    PIN_HASH_HEX: 'a73060afb61efe1b7c817645d00c342df02407f65435a64c88d251d56150ff42',
 
     // How many digits the PIN pad expects. 4–8 is reasonable for a
     // touch keypad; must match the length of the PIN you hashed above.
