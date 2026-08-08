@@ -12,72 +12,6 @@
    orchestrator's public API.
 ===================================================================== */
 (function bootstrapStudioChart(){
-
-  /* ---------------------------------------------------------------
-     TEMPORARY DIAGNOSTIC PANEL — mobile-visible substitute for
-     DevTools console output. Pure UI, self-contained in this file:
-     touches nothing outside a single injected <div>. Renders/updates
-     after every getStructuredAnalysis() call (success or thrown
-     error) so the panel always reflects the most recent attempt,
-     including a failed one. Remove renderDiagPanel() and its call
-     sites above to fully revert once the root cause is confirmed.
-  --------------------------------------------------------------- */
-  function fmt(v){ return v === undefined ? 'undefined' : String(v); }
-
-  function renderDiagPanel(diag){
-    var panel = document.getElementById('dannyTempDiagPanel');
-    if(!panel){
-      panel = document.createElement('div');
-      panel.id = 'dannyTempDiagPanel';
-      panel.style.cssText = [
-        'position:fixed', 'left:0', 'right:0', 'bottom:0',
-        'z-index:999999',
-        'background:rgba(10,12,18,0.96)',
-        'color:#E8EAF0',
-        'font-family:"JetBrains Mono",monospace',
-        'font-size:13px',
-        'line-height:1.5',
-        'padding:12px 14px 16px',
-        'max-height:60vh',
-        'overflow-y:auto',
-        'border-top:2px solid #D4AF6A',
-        'box-shadow:0 -4px 16px rgba(0,0,0,0.5)',
-        '-webkit-overflow-scrolling:touch'
-      ].join(';');
-      document.body.appendChild(panel);
-    }
-
-    var rows = [
-      ['Status', fmt(diag.status)],
-      ['Swings', fmt(diag.swings)],
-      ['Structure Events', fmt(diag.structureEvents)],
-      ['Order Blocks', fmt(diag.orderBlocks)],
-      ['FVGs', fmt(diag.fvgs)],
-      ['Liquidity', fmt(diag.liquidity)],
-      ['Premium/Discount', fmt(diag.premiumDiscount)],
-      ['Trade Levels', fmt(diag.tradeLevels)],
-      ['Decision', fmt(diag.decision)]
-    ];
-
-    var rowsHtml = rows.map(function(r){
-      return '<div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0;">' +
-        '<span style="color:#8D93A6;">' + r[0] + '</span>' +
-        '<span style="color:#E8EAF0;">' + r[1] + '</span>' +
-        '</div>';
-    }).join('');
-
-    panel.innerHTML =
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
-        '<span style="color:#D4AF6A;font-weight:700;letter-spacing:0.03em;">TEMPORARY DIAGNOSTIC — [DIAG]</span>' +
-        '<button type="button" id="dannyTempDiagPanelClose" style="background:#1B1F2B;color:#E8EAF0;border:1px solid #3A3F52;border-radius:6px;padding:4px 12px;font-size:13px;font-family:inherit;">Close</button>' +
-      '</div>' +
-      rowsHtml;
-
-    document.getElementById('dannyTempDiagPanelClose').addEventListener('click', function(){
-      panel.remove();
-    });
-  }
-
   function boot(){
     var DC = window.DannyChart;
     if(!DC || !DC.StudioChartInit){
@@ -124,41 +58,38 @@
       // crashing the chart. studio-chart-init.js's resolveAnnotations()
       // also wraps this call in its own try/catch as a second safety net.
       getStructuredAnalysis: async function(candles, timeframe, symbol){
+        // __meta is a diagnostic-only field, not part of the Structured
+        // Analysis schema itself (annotation-model.js never reads it) —
+        // it exists so callers can tell "Gemini legitimately found
+        // nothing" apart from "the request never actually succeeded",
+        // which the previous version of this function collapsed into
+        // the exact same silent empty-analysis object either way.
         try{
           var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
-          var diag = {
-            status: resp && resp.status,
-            swings: resp?.data?.swings?.length,
-            structureEvents: resp?.data?.structureEvents?.length,
-            orderBlocks: resp?.data?.orderBlocks?.length,
-            fvgs: resp?.data?.fvgs?.length,
-            liquidity: resp?.data?.liquidity?.length,
-            premiumDiscount: !!resp?.data?.premiumDiscount,
-            tradeLevels: !!resp?.data?.tradeLevels,
-            decision: !!resp?.data?.decision
-          };
-          console.log('[DIAG]', diag);
-          renderDiagPanel(diag);
           if(resp && resp.status === 'ok' && resp.data){
+            resp.data.__meta = { requestStatus: 'ok' };
             return resp.data;
           }
           if(resp && resp.status === 'error'){
-            console.warn('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
+            console.error('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
+            var errResult = { version: '1.0', timeframe: timeframe, swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [], premiumDiscount: null, tradeLevels: null, decision: null };
+            errResult.__meta = { requestStatus: 'error', message: resp.message || 'analyzeChartStructure returned status "error"' };
+            return errResult;
           }
+          console.error('[StudioBootstrap] analyzeChartStructure returned an unexpected response shape:', resp);
+          var shapeResult = { version: '1.0', timeframe: timeframe, swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [], premiumDiscount: null, tradeLevels: null, decision: null };
+          shapeResult.__meta = { requestStatus: 'unexpected_response', message: 'Response had no status:"ok" + data, and no status:"error" either.' };
+          return shapeResult;
         } catch(err){
           console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
-          renderDiagPanel({
-            status: 'threw: ' + (err && err.message ? err.message : String(err)),
-            swings: undefined, structureEvents: undefined, orderBlocks: undefined,
-            fvgs: undefined, liquidity: undefined,
-            premiumDiscount: false, tradeLevels: false, decision: false
-          });
+          var exResult = {
+            version: '1.0', timeframe: timeframe,
+            swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
+            premiumDiscount: null, tradeLevels: null, decision: null
+          };
+          exResult.__meta = { requestStatus: 'exception', message: err && err.message || String(err) };
+          return exResult;
         }
-        return {
-          version: '1.0', timeframe: timeframe,
-          swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
-          premiumDiscount: null, tradeLevels: null, decision: null
-        };
       }
     });
 
