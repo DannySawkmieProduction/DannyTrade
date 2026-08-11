@@ -387,6 +387,52 @@
   AIService.getProviderName = getProviderName;
   AIService.SUPPORTED_AI_PROVIDER_NAMES = SUPPORTED_AI_PROVIDER_NAMES.slice();
 
+  /* ---------------------------------------------------------------
+     Thin, additive aliases matching the literal AIService contract
+     requested for the AI Provider UI layer. These do not replace
+     setProviderName()/getProviderName() (kept for backward
+     compatibility with ai-connections.js and anything else already
+     calling them) — they just give the provider layer the exact
+     method names a UI expects, without duplicating logic:
+       getProviderStatus()      -> live GET /api/analyze/status, same
+                                    contract ai-connections.js's own
+                                    checkStatus() already uses.
+       getActiveProvider()      -> alias for getProviderName().
+       setProvider(name)        -> alias for setProviderName(name).
+       isProviderAvailable(name)-> true only if the Worker reports
+                                    that provider as configured.
+     None of this changes request routing, response normalization, or
+     which provider is active by default — see setProviderName() above
+     for that logic, unchanged.
+  --------------------------------------------------------------- */
+  async function getProviderStatus() {
+    try {
+      const res = await fetch('/api/analyze/status');
+      const json = await res.json();
+      if (!json || json.ok !== true) throw new Error('bad response');
+      return {
+        gemini: { configured: !!(json.gemini && json.gemini.configured) },
+        openrouter: {
+          configured: !!(json.openrouter && json.openrouter.configured),
+          model: (json.openrouter && json.openrouter.model) || null
+        },
+        defaultProvider: (json.defaultProvider === 'openrouter') ? 'openrouter' : 'gemini'
+      };
+    } catch (err) {
+      return { gemini: { configured: false }, openrouter: { configured: false, model: null }, defaultProvider: 'gemini' };
+    }
+  }
+
+  async function isProviderAvailable(name) {
+    const status = await getProviderStatus();
+    return !!(status[name] && status[name].configured);
+  }
+
+  AIService.getProviderStatus = getProviderStatus;
+  AIService.getActiveProvider = getProviderName;
+  AIService.setProvider = setProviderName;
+  AIService.isProviderAvailable = isProviderAvailable;
+
   setProviderName('gemini'); // Gemini remains the default AI provider — unchanged external behavior.
 
   global.AIService = AIService;
