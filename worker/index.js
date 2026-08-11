@@ -1,5 +1,5 @@
 /* =====================================================================
-   Amazing Grace Trading — Cloudflare Worker (worker/index.js)
+   DannyTrade — Cloudflare Worker (worker/index.js)
 
    Responsibilities:
    - Serve the static site via the ASSETS binding (unchanged behavior).
@@ -36,6 +36,8 @@
 ===================================================================== */
 
 import { handleFyersLogin, handleFyersCallback, handleFyersCandles } from './fyers.js';
+import { handleOpenRouterAnalyze } from './openrouter.js';
+import { fetchWithRetry } from './http-utils.js';
 
 /* ---------------------------------------------------------------
    Single source of truth for the analysis response shape. Every
@@ -107,6 +109,25 @@ export default {
         return jsonResponse({ ok: false, error: 'Method not allowed.' }, 405);
       }
       return handleAnalyze(request, env);
+    }
+
+    // Read-only, additive. Reports only whether each AI backend's
+    // required config is present server-side (a Cloudflare secret/var
+    // presence check) — NOT a live test call to either API, which
+    // would be slow and cost a real request for what's meant to be a
+    // cheap UI status check. Does not call handleAnalyze or touch any
+    // existing Gemini/OpenRouter code path.
+    if (url.pathname === '/api/analyze/status') {
+      return jsonResponse({
+        ok: true,
+        gemini: { configured: !!env.GEMINI_API_KEY },
+        openrouter: { configured: !!(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL), model: env.OPENROUTER_MODEL || null },
+        // Reports the server's configured default (AI_PROVIDER in
+        // wrangler.toml) — not a live decision, just surfacing the
+        // same config value handleAnalyze() itself falls back to when
+        // a request doesn't specify a provider explicitly.
+        defaultProvider: env.AI_PROVIDER || 'gemini'
+      });
     }
 
     // Phase 2C, Step 3 — FYERS OAuth only (login redirect + token-
@@ -227,13 +248,6 @@ async function resolveModel(env) {
 }
 
 async function handleAnalyze(request, env) {
-  if (!env.GEMINI_API_KEY) {
-    return jsonResponse({
-      ok: false,
-      error: 'GEMINI_API_KEY is not configured on this Worker. Run: wrangler secret put GEMINI_API_KEY'
-    }, 500);
-  }
-
   let body;
   try {
     body = await request.json();
@@ -241,9 +255,44 @@ async function handleAnalyze(request, env) {
     return jsonResponse({ ok: false, error: 'Request body must be JSON.' }, 400);
   }
 
-  const { type, payload } = body || {};
+  const { type, payload, provider } = body || {};
   if (!VALID_TYPES.has(type)) {
     return jsonResponse({ ok: false, error: `Unknown analysis type: "${type}".` }, 400);
+  }
+
+  // Multi-provider routing: defaults to 'gemini' when omitted, so
+  // every existing caller (which never sends `provider` today) is
+  // completely unaffected. Only an explicit provider:"openrouter"
+  // reaches the new module below; everything else falls through to
+  // the ORIGINAL, unchanged Gemini code that follows.
+  // Provider resolution order: an explicit client request always wins
+  // (this is what the AI Provider UI sends); otherwise the server's
+  // configured default (AI_PROVIDER in wrangler.toml) applies; if
+  // neither is set, Gemini is the final safety net. This is NOT
+  // existence-based auto-detection (a key existing doesn't select a
+  // provider) — AI_PROVIDER is an explicit, visible config value you
+  // set deliberately, and the client's own explicit choice, once
+  // made, is never silently overridden by it.
+  const selectedProvider = provider || env.AI_PROVIDER || 'gemini';
+
+  if (selectedProvider === 'openrouter') {
+    return handleOpenRouterAnalyze(type, payload || {}, env);
+  }
+
+  if (selectedProvider !== 'gemini') {
+    return jsonResponse({ ok: false, error: `Unknown AI provider: "${selectedProvider}".` }, 400);
+  }
+
+  // ---- Everything below this line is the ORIGINAL Gemini code. The
+  // GEMINI_API_KEY check (previously the very first thing in this
+  // function) had to move to here — it cannot run before we know the
+  // request even wants Gemini, or every OpenRouter-only request would
+  // wrongly fail whenever GEMINI_API_KEY happens to be unset. ----
+  if (!env.GEMINI_API_KEY) {
+    return jsonResponse({
+      ok: false,
+      error: 'GEMINI_API_KEY is not configured on this Worker. Run: wrangler secret put GEMINI_API_KEY'
+    }, 500);
   }
 
   let geminiRequest;
@@ -263,7 +312,11 @@ async function handleAnalyze(request, env) {
 
   let geminiRes;
   try {
-    geminiRes = await fetch(endpoint, {
+    // Uses the same shared fetchWithRetry() OpenRouter uses (worker/
+    // http-utils.js) — retries only a network-level failure, never a
+    // real HTTP response. Purely additive: does not change Gemini's
+    // success or error-response behavior in any way.
+    geminiRes = await fetchWithRetry(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(geminiRequest)
@@ -274,6 +327,17 @@ async function handleAnalyze(request, env) {
 
   if (!geminiRes.ok) {
     const errText = await safeText(geminiRes);
+    // Specific, actionable messages for the two most common failure
+    // modes — everything else keeps the prior generic message.
+    if (geminiRes.status === 401 || geminiRes.status === 403) {
+      return jsonResponse({
+        ok: false,
+        error: `Gemini API rejected the request (${geminiRes.status}) — check that GEMINI_API_KEY is valid. ${errText.slice(0, 200)}`
+      }, 502);
+    }
+    if (geminiRes.status === 429) {
+      return jsonResponse({ ok: false, error: 'Gemini API rate limit reached. Please try again shortly.' }, 502);
+    }
     return jsonResponse({
       ok: false,
       error: `Gemini API error (${geminiRes.status}): ${errText.slice(0, 300)}`
@@ -446,7 +510,7 @@ function buildChartStructureRequest(payload) {
 }
 
 const SYSTEM_INSTRUCTION =
-  `You are the institutional-grade analysis engine behind Amazing Grace Trading's AI Analysis Studio, serving NSE/BSE/MCX ` +
+  `You are the institutional-grade analysis engine behind DannyTrade's AI Analysis Studio, serving NSE/BSE/MCX ` +
   `traders. You behave like an experienced institutional trader — not a generic chatbot. You think before ` +
   `concluding, analyse before recommending, and explain before deciding. You reject weak setups rather than ` +
   `forcing a BUY or SELL.\n\n` +
@@ -514,7 +578,7 @@ const ANALYSIS_RESPONSE_SCHEMA = {
 ================================================================= */
 
 const CHART_STRUCTURE_SYSTEM_INSTRUCTION =
-  `You are the institutional-grade chart-structure engine behind Amazing Grace Trading's AI Chart Intelligence. You read ` +
+  `You are the institutional-grade chart-structure engine behind DannyTrade's AI Chart Intelligence. You read ` +
   `raw OHLC candle data and output ONLY precise, index-anchored structural annotations — never prose analysis, ` +
   `never a screenshot description. You behave like an experienced institutional trader applying ICT (Inner ` +
   `Circle Trader) and Smart Money Concepts: market structure (BOS, CHoCH, MSS, swing highs/lows), liquidity ` +
