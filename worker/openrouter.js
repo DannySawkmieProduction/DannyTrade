@@ -97,14 +97,107 @@ const ANALYSIS_SCHEMA_KEYS = [
   'tradeQualityReasoning', 'educationalNotes'
 ];
 
-// Mirrors worker/index.js's CHART_STRUCTURE_RESPONSE_SCHEMA's
-// top-level keys, duplicated rather than imported (same reasoning).
-const CHART_STRUCTURE_TOP_LEVEL_KEYS = [
-  'version', 'timeframe', 'swings', 'structureEvents', 'orderBlocks',
-  'fvgs', 'liquidity', 'premiumDiscount', 'tradeLevels', 'decision'
-];
+// Mirrors worker/index.js's CHART_STRUCTURE_RESPONSE_SCHEMA's array-type
+// top-level keys, duplicated rather than imported (same reasoning as
+// ANALYSIS_SCHEMA_KEYS above). premiumDiscount/tradeLevels/decision are
+// validated individually below (validatePremiumDiscount/validateTradeLevels/
+// validateDecision) rather than listed generically here, since each has
+// its own required-field shape.
 const CHART_STRUCTURE_ARRAY_KEYS = ['swings', 'structureEvents', 'orderBlocks', 'fvgs', 'liquidity'];
-const CHART_STRUCTURE_NULLABLE_OBJECT_KEYS = ['premiumDiscount', 'tradeLevels', 'decision'];
+
+/* ---------------------------------------------------------------
+   Canonical enum sets — copied verbatim from worker/index.js's
+   CHART_STRUCTURE_RESPONSE_SCHEMA (Gemini side) and ANALYSIS_FIELDS'
+   `enum` entries (flat-schema side), so both providers are validated
+   against the exact same allowed values. Gemini can never violate
+   these because Google's responseSchema mechanism enforces them at
+   generation time; OpenRouter's json_object mode has no equivalent
+   enforcement — it only guarantees syntactically valid JSON, not
+   compliant field values — so this file has to check by hand.
+--------------------------------------------------------------- */
+const FINAL_DECISION_ENUM = ['BUY', 'SELL', 'WAIT', 'NO_TRADE'];
+const TRADE_GRADE_ENUM = ['A+', 'A', 'B', 'C', 'D'];
+const TRAP_RISK_ENUM = ['Very High', 'High', 'Moderate', 'Low'];
+const TREND_ENUM = ['Bullish', 'Bearish', 'Sideways'];
+const TRADE_LEVELS_DIRECTION_ENUM = ['bullish', 'bearish'];
+const FLAT_VERDICT_ENUM = ['BUY', 'SELL', 'WAIT', 'NO TRADE']; // note the space — matches ANALYSIS_FIELDS exactly
+const FLAT_GRADE_ENUM = ['A+', 'A', 'B', 'C', 'D'];
+
+function isFiniteNumber(v) {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+// Mirrors worker/index.js's NARRATIVE_PROPS/NARRATIVE_KEYS (the four
+// evidence-narrative fields shared by tradeLevels there) — duplicated
+// rather than imported, same reasoning as ANALYSIS_SCHEMA_KEYS above.
+const NARRATIVE_KEYS = ['observation', 'evidence', 'reasoning', 'tradingImplication'];
+
+/* ---------------------------------------------------------------
+   decision.* validation — this is the object the AI Decision Panel
+   (assets/js/chart/decision-panel.js) reads directly and verbatim,
+   so it is validated field-by-field rather than just container-type-
+   checked. Every key decision-panel.js's DECISION SCHEMA comment
+   documents is required here too. A model that returns a nonstandard
+   value (e.g. "LONG" instead of "BUY"/"SELL"/"WAIT"/"NO_TRADE" — the
+   exact failure observed from the "openrouter/free" auto-router) or
+   omits fields fails this check, which is deliberate: the panel must
+   never render a partially-populated, real-looking trade decision.
+--------------------------------------------------------------- */
+function validateDecision(d) {
+  if (d === null) return true; // no trade call is a legitimate outcome — mirrors Gemini's `nullable: true`
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
+  if (!FINAL_DECISION_ENUM.includes(d.finalDecision)) return false;
+  if (!TRADE_GRADE_ENUM.includes(d.tradeGrade)) return false;
+  if (!TRAP_RISK_ENUM.includes(d.trapRisk)) return false;
+  if (!TREND_ENUM.includes(d.trend)) return false;
+  if (typeof d.marketPhase !== 'string') return false;
+  if (typeof d.liquidityTarget !== 'string') return false;
+  if (typeof d.tradeQuality !== 'string') return false;
+  if (typeof d.reasoningSummary !== 'string') return false;
+  if (typeof d.structureSummary !== 'string') return false;
+  if (typeof d.lastStructureEvent !== 'string') return false;
+  if (typeof d.invalidationLevel !== 'string') return false;
+  if (!isFiniteNumber(d.confidence)) return false;
+  if (!isFiniteNumber(d.riskReward)) return false;
+  if (!Array.isArray(d.educationalNotes) || !d.educationalNotes.every(n => typeof n === 'string')) return false;
+  return true;
+}
+
+/* ---------------------------------------------------------------
+   tradeLevels.* validation — feeds real entry/stop/target prices
+   into annotation-model.js's trade-level lines on the chart, so a
+   malformed non-null object here is exactly as unsafe to pass
+   through as a malformed decision object, for the same reason.
+--------------------------------------------------------------- */
+function validateTradeLevels(t) {
+  if (t === null) return true;
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
+  if (!TRADE_LEVELS_DIRECTION_ENUM.includes(t.direction)) return false;
+  if (!isFiniteNumber(t.confidence)) return false;
+  if (!isFiniteNumber(t.riskReward)) return false;
+  if (!t.entry || typeof t.entry !== 'object' || !isFiniteNumber(t.entry.index) || !isFiniteNumber(t.entry.price)) return false;
+  if (!t.stopLoss || typeof t.stopLoss !== 'object' || !isFiniteNumber(t.stopLoss.price)) return false;
+  if (!t.target1 || typeof t.target1 !== 'object' || !isFiniteNumber(t.target1.price)) return false;
+  for (const k of ['target2', 'target3', 'invalidation']) {
+    if (t[k] != null && (typeof t[k] !== 'object' || !isFiniteNumber(t[k].price))) return false;
+  }
+  for (const k of NARRATIVE_KEYS) {
+    if (typeof t[k] !== 'string') return false;
+  }
+  return true;
+}
+
+/* ---------------------------------------------------------------
+   premiumDiscount.* validation — every field is a required NUMBER
+   in Gemini's schema (no strings, no enums), so this is a flat
+   numeric-field check.
+--------------------------------------------------------------- */
+function validatePremiumDiscount(p) {
+  if (p === null) return true;
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+  return ['rangeHighIndex', 'rangeHighPrice', 'rangeLowIndex', 'rangeLowPrice', 'equilibriumPrice', 'confidence']
+    .every(k => isFiniteNumber(p[k]));
+}
 
 function jsonEnvelope(body, status) {
   return new Response(JSON.stringify(body), {
@@ -186,7 +279,25 @@ function buildPrompt(type, payload) {
         `no genuine pattern, return an empty array for it — never fabricate one. If the evidence for a trade ` +
         `is weak, mixed, or absent, return null for tradeLevels and set decision.finalDecision to "WAIT" or ` +
         `"NO_TRADE" — never force a trade. strength and confidence fields are 0-1 floats reflecting your own ` +
-        `self-assessed certainty.`,
+        `self-assessed certainty.\n\n` +
+        `If "decision" is non-null it MUST include ALL of these exact keys, with NO other spelling or synonym ` +
+        `accepted: finalDecision (EXACTLY one of the four literal strings "BUY", "SELL", "WAIT", "NO_TRADE" — ` +
+        `NEVER "LONG", "SHORT", "HOLD", or any other word), tradeGrade (exactly one of "A+","A","B","C","D"), ` +
+        `marketPhase (string), trapRisk (exactly one of "Very High","High","Moderate","Low" — never a ` +
+        `percentage), liquidityTarget (string), tradeQuality (string), confidence (0-1 float), reasoningSummary ` +
+        `(2-4 sentences), riskReward (float), trend (exactly one of "Bullish","Bearish","Sideways"), ` +
+        `structureSummary (string), lastStructureEvent (string), invalidationLevel (string), educationalNotes ` +
+        `(array of 2-4 short strings). A response missing any of these keys, or using a value outside the ` +
+        `exact allowed set for finalDecision/tradeGrade/trapRisk/trend, will be rejected — if you cannot ` +
+        `populate every field honestly, set "decision" to null instead of submitting a partial object.\n\n` +
+        `If "tradeLevels" is non-null it MUST include ALL of: direction ("bullish" or "bearish"), confidence ` +
+        `(0-1 float), riskReward (float), entry ({index, price}), stopLoss ({price}), target1 ({price}), and ` +
+        `observation/evidence/reasoning/tradingImplication (each a short string). target2, target3, and ` +
+        `invalidation are each either null or {price}. If you cannot populate entry/stopLoss/target1 and the ` +
+        `four narrative strings honestly, set "tradeLevels" to null instead of submitting a partial object.\n\n` +
+        `If "premiumDiscount" is non-null it MUST include ALL of: rangeHighIndex, rangeHighPrice, rangeLowIndex, ` +
+        `rangeLowPrice, equilibriumPrice, and confidence — every one a number. Set "premiumDiscount" to null ` +
+        `instead of submitting a partial object.`,
       user: `Timeframe: ${payload.timeframe || 'unspecified'}. Symbol: ${payload.symbol || 'unspecified'}. ` +
         `Candle array (oldest first, index 0 to ${Math.max(candles.length - 1, 0)}): ${JSON.stringify(candles)}`
     };
@@ -200,39 +311,84 @@ function buildPrompt(type, payload) {
    tradingSignal/marketContext) — mirrors extractAnalysis()'s exact
    behavior for Gemini: every expected key present, missing ones null,
    unexpected keys dropped. Never throws — returns null on anything
-   unusable, exactly like extractAnalysis() does.
+   unusable, exactly like extractAnalysis() does. Unlike Gemini (whose
+   responseSchema `enum` constraint makes an out-of-range verdict or
+   grade impossible), "verdict" and "tradeQualityGrade" are checked
+   against the same enums here and nulled out (not fabricated into a
+   valid value) if the model returned something outside the allowed
+   set — so a bad enum value degrades to "not available" instead of
+   silently reaching the UI as if it were legitimate.
 --------------------------------------------------------------- */
 function coerceFlatAnalysis(parsed) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const analysis = {};
   ANALYSIS_SCHEMA_KEYS.forEach(k => { analysis[k] = parsed[k] !== undefined ? parsed[k] : null; });
+  if (analysis.verdict !== null && !FLAT_VERDICT_ENUM.includes(analysis.verdict)) analysis.verdict = null;
+  if (analysis.tradeQualityGrade !== null && !FLAT_GRADE_ENUM.includes(analysis.tradeQualityGrade)) analysis.tradeQualityGrade = null;
   return analysis;
 }
 
 /* ---------------------------------------------------------------
-   Defensive coercion for chartStructure. Deliberately coarser than a
-   full field-by-field schema validation (which would essentially
-   reimplement Gemini's responseSchema mechanism by hand): it
-   guarantees each top-level key exists with the RIGHT CONTAINER TYPE
-   (array vs. object-or-null), which is what actually matters for
-   downstream code — annotation-model.js already treats each section
-   as independently optional/nullable and degrades a malformed section
-   to []/null on its own rather than crashing, so deeper per-field
-   validation here would be redundant work, not additional safety.
-   annotation-model.js is NOT modified by this file or this change.
+   Coercion + validation for chartStructure.
+
+   swings/structureEvents/orderBlocks/fvgs/liquidity are still only
+   container-type-checked (array-or-[]) — annotation-model.js already
+   treats each of those sections as independently optional and
+   degrades a malformed individual item to being skipped rather than
+   crashing, so deeper per-item validation there is genuinely
+   redundant, not a gap.
+
+   premiumDiscount / tradeLevels / decision are different: each is
+   read close to verbatim by downstream code (decision-panel.js reads
+   `decision` directly; the chart's trade-level lines read
+   `tradeLevels` directly) with no equivalent per-field degradation,
+   so THIS was the actual gap — the previous version of this function
+   only checked "is it an object or null", not whether that object
+   actually matched the required shape. That's why a response like
+   `{ decision: { finalDecision: "LONG", confidence: 0.55 } }` (an
+   enum violation plus 12 missing required keys) passed through
+   unchanged and reached the panel as if it were valid.
+
+   This function now throws a descriptive Error — caught by
+   handleOpenRouterAnalyze() and turned into an { ok:false, error }
+   response — the moment any of those three objects is present but
+   invalid, instead of silently passing the malformed object through
+   with an ok:true envelope. A non-null decision/tradeLevels/
+   premiumDiscount is validated in full (see validateDecision() /
+   validateTradeLevels() / validatePremiumDiscount() above); null is
+   always accepted for all three, since "no valid setup" is a
+   legitimate, honest outcome per the HONESTY RULES in buildPrompt().
 --------------------------------------------------------------- */
 function coerceChartStructure(parsed) {
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('response was not a JSON object.');
+  }
+
   const out = {};
-  CHART_STRUCTURE_TOP_LEVEL_KEYS.forEach(k => {
-    if (CHART_STRUCTURE_ARRAY_KEYS.includes(k)) {
-      out[k] = Array.isArray(parsed[k]) ? parsed[k] : [];
-    } else if (CHART_STRUCTURE_NULLABLE_OBJECT_KEYS.includes(k)) {
-      out[k] = (parsed[k] && typeof parsed[k] === 'object' && !Array.isArray(parsed[k])) ? parsed[k] : null;
-    } else {
-      out[k] = (typeof parsed[k] === 'string') ? parsed[k] : (parsed[k] != null ? String(parsed[k]) : '');
-    }
+  CHART_STRUCTURE_ARRAY_KEYS.forEach(k => {
+    out[k] = Array.isArray(parsed[k]) ? parsed[k] : [];
   });
+  out.version = (typeof parsed.version === 'string') ? parsed.version : '1.0';
+  out.timeframe = (typeof parsed.timeframe === 'string') ? parsed.timeframe : '';
+
+  const premiumDiscount = (parsed.premiumDiscount === undefined) ? null : parsed.premiumDiscount;
+  if (!validatePremiumDiscount(premiumDiscount)) {
+    throw new Error('"premiumDiscount" was present but did not match the required schema (rangeHighIndex, rangeHighPrice, rangeLowIndex, rangeLowPrice, equilibriumPrice, and confidence must all be numbers).');
+  }
+  out.premiumDiscount = premiumDiscount;
+
+  const tradeLevels = (parsed.tradeLevels === undefined) ? null : parsed.tradeLevels;
+  if (!validateTradeLevels(tradeLevels)) {
+    throw new Error('"tradeLevels" was present but did not match the required schema (direction, confidence, riskReward, entry, stopLoss, and target1 are required with the correct types).');
+  }
+  out.tradeLevels = tradeLevels;
+
+  const decision = (parsed.decision === undefined) ? null : parsed.decision;
+  if (!validateDecision(decision)) {
+    throw new Error('"decision" was present but did not match the required DannyTrade schema — either a required field (finalDecision, tradeGrade, marketPhase, trapRisk, liquidityTarget, tradeQuality, confidence, reasoningSummary, riskReward, trend, structureSummary, lastStructureEvent, invalidationLevel, educationalNotes) was missing, or finalDecision/tradeGrade/trapRisk/trend used a value outside the allowed set (e.g. "LONG" instead of "BUY"/"SELL"/"WAIT"/"NO_TRADE").');
+  }
+  out.decision = decision;
+
   return out;
 }
 
@@ -345,9 +501,25 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
     return jsonEnvelope({ ok: false, error: 'OpenRouter response did not contain valid JSON.' }, 502);
   }
 
-  const analysis = (type === 'chartStructure')
-    ? coerceChartStructure(rawParsed)
-    : coerceFlatAnalysis(rawParsed);
+  // coerceChartStructure() throws a descriptive Error for a present-
+  // but-invalid premiumDiscount/tradeLevels/decision object (see its
+  // own comment for why) instead of returning a partial result — this
+  // is the schema-error path required by the task: a malformed
+  // response becomes a clear { ok:false, error } here, never an
+  // { ok:true, analysis } with fields quietly missing. coerceFlatAnalysis()
+  // does not throw (its shape has no equivalently-unsafe nested object
+  // to protect), so it's called directly.
+  let analysis;
+  try {
+    analysis = (type === 'chartStructure')
+      ? coerceChartStructure(rawParsed)
+      : coerceFlatAnalysis(rawParsed);
+  } catch (err) {
+    return jsonEnvelope({
+      ok: false,
+      error: `OpenRouter response could not be normalized to the required DannyTrade analysis schema: ${err.message}`
+    }, 502);
+  }
 
   if (!analysis) {
     return jsonEnvelope({ ok: false, error: 'OpenRouter response did not contain a valid analysis.' }, 502);
