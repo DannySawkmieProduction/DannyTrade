@@ -46,8 +46,10 @@
     defs.forEach(def => {
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'legend-item';
+      item.className = 'legend-item overlay-toggle';
       item.setAttribute('data-overlay-key', def.key);
+      item.setAttribute('data-testid', `overlay-toggle-${def.key}`);
+      item.setAttribute('role', 'switch');
       item.title = def.dataAvailable
         ? `${def.label} — click to toggle`
         : `${def.label} — click to toggle (connects once its analysis engine is live)`;
@@ -57,29 +59,43 @@
       dot.style.background = def.color;
 
       const text = document.createElement('span');
+      text.className = 'overlay-toggle-label';
       text.textContent = def.label;
+
+      const stateEl = document.createElement('span');
+      stateEl.className = 'overlay-toggle-state';
+      stateEl.setAttribute('aria-hidden', 'true');
 
       item.appendChild(dot);
       item.appendChild(text);
+      item.appendChild(stateEl);
       item.addEventListener('click', () => overlayManager.toggle(def.key));
 
       container.appendChild(item);
-      itemEls.set(def.key, { el: item, dotEl: dot });
+      itemEls.set(def.key, { el: item, dotEl: dot, stateEl });
     });
 
     function applyVisualState(key, visible){
       const refs = itemEls.get(key);
       if(!refs) return;
       refs.el.classList.toggle('legend-item-off', !visible);
+      refs.el.classList.toggle('is-on', !!visible);
+      refs.el.classList.toggle('is-off', !visible);
       refs.el.setAttribute('aria-pressed', String(visible));
+      refs.el.setAttribute('aria-checked', String(visible));
+      if(refs.stateEl) refs.stateEl.textContent = visible ? 'ON' : 'OFF';
     }
 
     // Initial state — reflect whatever Overlay Manager already has.
     defs.forEach(def => applyVisualState(def.key, overlayManager.isVisible(def.key)));
 
-    // Stay in sync if a layer is toggled from anywhere else, via Overlay
-    // Manager's own event rather than this controller re-deriving state.
-    const unsubscribe = overlayManager.on('overlayVisibilityChanged', ({ key, visible }) => {
+    // Stay in sync if a layer is toggled from anywhere else (the Legend
+    // row, a keyboard shortcut, a programmatic call) via Overlay
+    // Manager's single visibility-change subscription rather than this
+    // controller re-deriving state — this is what keeps the Overlay
+    // Toggle Bar and the Legend row from ever showing conflicting ON/OFF
+    // states for the same layer.
+    const unsubscribe = overlayManager.onVisibilityChange(({ key, visible }) => {
       applyVisualState(key, visible);
     });
 

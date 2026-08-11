@@ -42,18 +42,25 @@
       return rendererLayer ? renderer.isLayerVisible(rendererLayer) : false;
     }
 
+    // show()/hide() intentionally emit NO event of their own: renderer
+    // .showLayer()/hideLayer() already emit the renderer's canonical
+    // 'layerVisibilityChanged' for EVERY visibility change, from ANY
+    // source (this manager, the Legend calling the renderer directly, a
+    // future keyboard shortcut, etc.). onChange() below subscribes to
+    // that one canonical event and maps the renderer layer back to an
+    // overlay key — so the Toggle Controller, the Legend, and the
+    // persistence store all stay in lock-step off a single source of
+    // truth instead of two parallel event names drifting apart.
     function show(key){
       const rendererLayer = LayerManager.getRendererLayer(key);
       if(!rendererLayer) return;
       renderer.showLayer(rendererLayer);
-      renderer.emit('overlayVisibilityChanged', { key, rendererLayer, visible: true });
     }
 
     function hide(key){
       const rendererLayer = LayerManager.getRendererLayer(key);
       if(!rendererLayer) return;
       renderer.hideLayer(rendererLayer);
-      renderer.emit('overlayVisibilityChanged', { key, rendererLayer, visible: false });
     }
 
     function toggle(key){
@@ -69,11 +76,18 @@
     }
 
     /** Subscribe to visibility changes from ANY source — this module's
-     *  own show/hide, or a future settings panel/keyboard shortcut
-     *  calling renderer.showLayer/hideLayer directly — same pattern
-     *  legend.js already relies on. Returns an unsubscribe function. */
+     *  own show/hide, the Legend calling renderer.showLayer/hideLayer
+     *  directly, or a future settings panel/keyboard shortcut. Maps the
+     *  renderer's canonical 'layerVisibilityChanged' (which carries a
+     *  renderer layer name) back to the overlay `key` its callers use,
+     *  and forwards `{ key, rendererLayer, visible }`. Returns an
+     *  unsubscribe function. This is what keeps the two toggle rows and
+     *  the persistence store synchronized off a single event. */
     function onChange(cb){
-      return renderer.on('overlayVisibilityChanged', cb);
+      return renderer.on('layerVisibilityChanged', ({ layer, visible }) => {
+        const key = LayerManager.getKeyForRendererLayer(layer);
+        if(key) cb({ key, rendererLayer: layer, visible });
+      });
     }
 
     return { isVisible, show, hide, toggle, getAllVisibility, onChange };

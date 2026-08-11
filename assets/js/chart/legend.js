@@ -66,8 +66,10 @@
     entries.forEach(entry => {
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'legend-item';
+      item.className = 'legend-item overlay-toggle';
       item.setAttribute('data-layer', entry.layer);
+      item.setAttribute('data-testid', `overlay-legend-${entry.layer}`);
+      item.setAttribute('role', 'switch');
       item.title = entry.sub
         ? `${entry.label} (${entry.sub.map(s => s.label).join(', ')}) — click to toggle`
         : `${entry.label} — click to toggle`;
@@ -77,10 +79,16 @@
       dot.style.background = entry.color;
 
       const text = document.createElement('span');
+      text.className = 'overlay-toggle-label';
       text.textContent = entry.label;
+
+      const stateEl = document.createElement('span');
+      stateEl.className = 'overlay-toggle-state';
+      stateEl.setAttribute('aria-hidden', 'true');
 
       item.appendChild(dot);
       item.appendChild(text);
+      item.appendChild(stateEl);
       item.addEventListener('click', () => {
         const visible = renderer.isLayerVisible(entry.layer);
         if(visible) renderer.hideLayer(entry.layer);
@@ -88,14 +96,18 @@
       });
 
       container.appendChild(item);
-      itemEls.set(entry.layer, { el: item, dotEl: dot });
+      itemEls.set(entry.layer, { el: item, dotEl: dot, stateEl });
     });
 
     function applyVisualState(layer, visible){
       const refs = itemEls.get(layer);
       if(!refs) return;
       refs.el.classList.toggle('legend-item-off', !visible);
+      refs.el.classList.toggle('is-on', !!visible);
+      refs.el.classList.toggle('is-off', !visible);
       refs.el.setAttribute('aria-pressed', String(visible));
+      refs.el.setAttribute('aria-checked', String(visible));
+      if(refs.stateEl) refs.stateEl.textContent = visible ? 'ON' : 'OFF';
     }
 
     // Initial state — reflect whatever the renderer already has.

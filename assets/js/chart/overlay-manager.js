@@ -53,6 +53,42 @@
     const cache = CacheFactory.create({ renderer });
     const rendererAdapter = RendererAdapterFactory.create({ renderer });
 
+    // Persistence (Overlay Visibility Fix): remember each overlay's
+    // ON/OFF independently across reloads, timeframe/symbol switches and
+    // market-data refreshes. Candlesticks are deliberately excluded per
+    // product decision — the price series is always ON. The store is a
+    // pure localStorage layer (see overlay-visibility-store.js); it is
+    // optional, so a missing/older bundle degrades to in-memory only.
+    const StoreFactory = window.DannyChart.OverlayVisibilityStore;
+    const store = (StoreFactory && typeof StoreFactory.create === 'function')
+      ? StoreFactory.create({ exclude: ['candlestick'] })
+      : null;
+
+    // 1) Apply any previously-persisted states to the freshly-built
+    //    layers BEFORE the Toggle Controller / Legend mount, so both
+    //    rows paint their correct initial ON/OFF state on first render.
+    //    Only layers explicitly saved as OFF (or flipped from their
+    //    default) are touched; everything else keeps its default.
+    if(store){
+      const saved = store.load();
+      LayerManager.getLayerDefs().forEach(def => {
+        if(def.key === 'candlestick') return;
+        const want = saved[def.key];
+        if(typeof want !== 'boolean') return;
+        const current = visibilityManager.isVisible(def.key);
+        if(want === current) return;
+        want ? visibilityManager.show(def.key) : visibilityManager.hide(def.key);
+      });
+
+      // 2) Persist every subsequent change, from EITHER toggle row or
+      //    any other source, off the single canonical event.
+      const unsubscribePersist = visibilityManager.onChange(({ key, visible }) => {
+        if(key && key !== 'candlestick') store.set(key, visible);
+      });
+      // Reused by destroy() below.
+      config.__unsubscribePersist = unsubscribePersist;
+    }
+
     let destroyed = false;
 
     function getLayerDefs(){ return LayerManager.getLayerDefs(); }
@@ -87,9 +123,18 @@
     function on(event, cb){ return renderer.on(event, cb); }
     function off(event, cb){ return renderer.off && renderer.off(event, cb); }
 
+    /** Subscribe to overlay visibility changes keyed by overlay button
+     *  key (not raw renderer layer). Fires for changes from ANY source —
+     *  either toggle row, a legend click, or a programmatic show/hide —
+     *  so consumers (Toggle Controller) stay in sync via one path. */
+    function onVisibilityChange(cb){ return visibilityManager.onChange(cb); }
+
     function destroy(){
       if(destroyed) return;
       destroyed = true;
+      if(typeof config.__unsubscribePersist === 'function'){
+        try{ config.__unsubscribePersist(); } catch(_e){ /* already gone */ }
+      }
       cache.destroy();
     }
 
@@ -98,7 +143,7 @@
       isVisible, toggle, show, hide, getAllVisibility,
       getLayerCount, getAllCounts,
       applyAnnotations,
-      on, off,
+      on, off, onVisibilityChange,
       destroy
     };
   }

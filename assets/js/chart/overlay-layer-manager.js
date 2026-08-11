@@ -60,5 +60,17 @@
     return def ? def.rendererLayer : null;
   }
 
-  window.DannyChart.OverlayLayerManager = { getLayerDefs, getLayerDef, getRendererLayer };
+  /** Reverse lookup: renderer layer name -> overlay button key. Needed
+   *  so a change originating from the renderer's own
+   *  'layerVisibilityChanged' event (e.g. a click on the Legend, which
+   *  calls renderer.showLayer/hideLayer directly) can be mapped back to
+   *  the overlay key the Toggle Controller / persistence store use. The
+   *  only pair that actually differs is 'candlestick' (key) ->
+   *  'candlesticks' (renderer layer); everything else is 1:1. */
+  function getKeyForRendererLayer(rendererLayer){
+    const def = buildRegistry().find(e => e.rendererLayer === rendererLayer);
+    return def ? def.key : null;
+  }
+
+  window.DannyChart.OverlayLayerManager = { getLayerDefs, getLayerDef, getRendererLayer, getKeyForRendererLayer };
 })();
