@@ -152,6 +152,51 @@
 .legend-dot{width:9px;height:9px;border-radius:3px;flex-shrink:0;}
 .legend-dot.round{border-radius:50%;}
 
+/* ---------- Overlay toggle buttons (unambiguous ON/OFF, touch-friendly) ----------
+   Shared by both toggle rows (#chartLegend via legend.js and
+   #overlayToggleBar via toggle-controller.js). Both rows are kept in
+   sync by the overlay subsystem; these styles make the ON vs OFF state
+   obvious without relying on opacity alone, and give each control a
+   comfortable touch target on mobile. */
+.overlay-toggle{
+  border:1px solid var(--border,rgba(255,255,255,0.12));
+  min-height:34px;padding:6px 10px;gap:8px;
+  -webkit-tap-highlight-color:transparent;user-select:none;
+  transition:background .15s,border-color .15s,color .15s,opacity .15s,box-shadow .15s;
+}
+.overlay-toggle .overlay-toggle-state{
+  margin-left:2px;font-size:9.5px;font-weight:700;letter-spacing:.06em;
+  line-height:1;padding:2px 5px;border-radius:999px;flex-shrink:0;
+  border:1px solid transparent;
+}
+/* ON — clearly active/pressed */
+.overlay-toggle.is-on{
+  color:var(--text,#E6E9F0);background:rgba(53,211,153,0.10);
+  border-color:rgba(53,211,153,0.45);opacity:1;
+  box-shadow:inset 0 0 0 1px rgba(53,211,153,0.12);
+}
+.overlay-toggle.is-on .overlay-toggle-state{
+  color:#0B0E14;background:#35D399;border-color:#35D399;
+}
+.overlay-toggle.is-on .legend-dot{box-shadow:0 0 0 2px rgba(53,211,153,0.18);}
+/* OFF — clearly inactive/unselected (not just faded) */
+.overlay-toggle.is-off{
+  color:var(--text-dim,#8D93A6);background:transparent;
+  border-color:var(--border-soft,rgba(255,255,255,0.08));opacity:0.72;
+}
+.overlay-toggle.is-off .overlay-toggle-label{text-decoration:line-through;text-decoration-thickness:1px;}
+.overlay-toggle.is-off .overlay-toggle-state{
+  color:var(--text-dim,#8D93A6);background:var(--bg-elev-2,rgba(255,255,255,0.05));
+  border-color:var(--border-soft,rgba(255,255,255,0.10));
+}
+.overlay-toggle.is-off .legend-dot{filter:grayscale(0.7);opacity:0.6;}
+.overlay-toggle:hover{background:var(--bg-elev-2);}
+.overlay-toggle:focus-visible{outline:2px solid #4FD1E8;outline-offset:2px;}
+@media (max-width:640px){
+  .chart-legend{gap:8px 10px;}
+  .overlay-toggle{min-height:40px;padding:8px 12px;font-size:12.5px;}
+}
+
 /* ---------- AI Decision Panel ---------- */
 .ai-decision-panel{
   background:var(--bg-elev);border:1px solid var(--border);border-radius:14px;
