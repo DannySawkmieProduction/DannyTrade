@@ -1,5 +1,5 @@
 /* =====================================================================
-   Amazing Grace Trading — AI Provider Layer (assets/js/ai-service.js)
+   DannyTrade — AI Provider Layer (assets/js/ai-service.js)
 
    This module is the ONLY thing that should ever change when a real AI
    provider is wired in. It is a small adapter/service layer that sits
@@ -296,13 +296,18 @@
 
   /* ---------------------------------------------------------------
      Live provider — talks to the Cloudflare Worker at /api/analyze,
-     which holds GEMINI_API_KEY server-side and calls Gemini. This is
-     the only provider Amazing Grace Trading ships; it implements every method
-     PROVIDER_INTERFACE lists above, each just posting { type, payload }
-     and unwrapping { ok, analysis } / { ok:false, error }.
+     which holds GEMINI_API_KEY (and, for OpenRouter, OPENROUTER_API_KEY)
+     server-side. This is the only PROVIDER OBJECT SHAPE DannyTrade
+     ships (satisfying PROVIDER_INTERFACE above); which AI BACKEND it
+     talks to is a separate axis, controlled by the `provider` field
+     posted in the request body — every method below still just posts
+     { type, payload, provider } and unwraps { ok, analysis } /
+     { ok:false, error }, identically regardless of which backend
+     actually ran.
   --------------------------------------------------------------- */
-  function createGeminiWorkerProvider(endpoint) {
+  function createWorkerAIProvider(endpoint, aiProviderName) {
     endpoint = endpoint || '/api/analyze';
+    aiProviderName = aiProviderName || 'gemini';
 
     async function call(type, payload) {
       let normalizedPayload;
@@ -314,10 +319,15 @@
 
       let res;
       try {
-        res = await fetch(endpoint, {
+        // Retries transient network failures only (see
+        // assets/js/chart/http-utils.js) — falls back to a plain
+        // fetch if HttpUtils somehow isn't loaded, so a script-order
+        // problem degrades gracefully rather than breaking analysis.
+        const doFetch = (window.DannyChart && window.DannyChart.HttpUtils && window.DannyChart.HttpUtils.fetchWithRetry) || fetch;
+        res = await doFetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type, payload: normalizedPayload })
+          body: JSON.stringify({ type, payload: normalizedPayload, provider: aiProviderName })
         });
       } catch (err) {
         throw new Error('Could not reach the AI provider Worker.');
@@ -341,13 +351,43 @@
       analyzeMarketContext(payload)  { return call('marketContext', payload); },
 
       /** Phase 2B — posts { type: 'chartStructure', payload } to the Worker's
-          /api/analyze route (see worker/index.js Step 2) and returns
-          body.analysis unmodified via call()'s existing unwrap logic. */
+          /api/analyze route and returns body.analysis unmodified via
+          call()'s existing unwrap logic. */
       analyzeChartStructure(payload) { return call('chartStructure', payload); }
     };
   }
 
-  configure(createGeminiWorkerProvider('/api/analyze'));
+  /* ---------------------------------------------------------------
+     AI provider (backend) switching, distinct from the PROVIDER
+     OBJECT configured via AIService.configure() above. This tracks
+     which AI BACKEND the one Live provider object talks to, for a
+     future AI Provider UI (assets/js/chart/ai-connections.js) to
+     drive. Switching is synchronous and has no network cost — it
+     swaps which value `call()`'s closure captures for the NEXT
+     request; a request already in flight keeps using whichever
+     provider it started with (its own `call()` invocation already
+     captured the old value), so switching never interrupts an
+     in-progress analysis.
+  --------------------------------------------------------------- */
+  const SUPPORTED_AI_PROVIDER_NAMES = ['gemini', 'openrouter'];
+  let activeAiProviderName = 'gemini';
+
+  function setProviderName(name) {
+    const resolved = SUPPORTED_AI_PROVIDER_NAMES.includes(name) ? name : 'gemini';
+    activeAiProviderName = resolved;
+    configure(createWorkerAIProvider('/api/analyze', resolved));
+    return resolved;
+  }
+
+  function getProviderName() {
+    return activeAiProviderName;
+  }
+
+  AIService.setProviderName = setProviderName;
+  AIService.getProviderName = getProviderName;
+  AIService.SUPPORTED_AI_PROVIDER_NAMES = SUPPORTED_AI_PROVIDER_NAMES.slice();
+
+  setProviderName('gemini'); // Gemini remains the default AI provider — unchanged external behavior.
 
   global.AIService = AIService;
 })(window);
