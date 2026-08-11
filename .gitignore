@@ -1,0 +1,30 @@
+# DannyTrade — recommended .gitignore
+# No .gitignore currently exists in this repo (confirmed by direct
+# search). This is a new, additive recommendation — nothing else about
+# the repo changes because of this file's presence.
+
+# Secrets / local environment — NEVER commit these
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+
+# Android signing credentials, if/when the APK build lives in this repo
+*.keystore
+*.jks
+keystore.properties
+
+# Wrangler local state
+.wrangler/
+.mf/
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Dependency directories, if any build tooling is ever added
+node_modules/
