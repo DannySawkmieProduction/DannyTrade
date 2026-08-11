@@ -268,10 +268,18 @@
 <script defer src="assets/js/chart/toggle-controller.js"></script>
 <script defer src="assets/js/chart/studio-chart-init.js"></script>
 <script defer src="assets/js/chart/http-utils.js"></script>
+<!-- ai-service.js MUST load before ai-connections.js / studio-bootstrap.js:
+     both reference window.AIService at execution time. Deferred scripts run
+     in document order before DOMContentLoaded, so if this script tag were
+     after them, window.AIService would not exist yet when studio-bootstrap.js's
+     boot() runs (boot() executes synchronously, not on DOMContentLoaded — see
+     the comment in studio-bootstrap.js), silently skipping resolveInitialProviderId()
+     and stranding the AI Provider UI on ai-service.js's hardcoded 'gemini' default
+     regardless of the Worker's reported defaultProvider. -->
+<script defer src="assets/js/ai-service.js"></script>
 <script defer src="assets/js/chart/ai-connections.js"></script>
 <script defer src="assets/js/chart/studio-bootstrap.js"></script>
 <script defer src="assets/js/chart/studio-diagnostics.js"></script>
-<script defer src="assets/js/ai-service.js"></script>
 <script defer src="assets/js/studio.js"></script>
 <script defer src="assets/js/app.js"></script>
 </body>
