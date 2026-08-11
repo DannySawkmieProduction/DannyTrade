@@ -10,80 +10,124 @@
    timeframe logic of its own; it only collects the real element
    references from studio.html and hands them to the existing
    orchestrator's public API.
+
+   =====================================================================
+   CHART TOGGLE / DRAWING BUG FIX — ROOT CAUSE
+   =====================================================================
+   The toggle -> overlay -> annotation -> renderer pipeline itself
+   (toggle-controller.js -> overlay-manager.js -> overlay-visibility-
+   manager.js -> chart-renderer.js's showLayer/hideLayer/setAnnotations)
+   was verified correct by feeding realistic Structured Analysis data
+   through the REAL annotation-model.js + chart-renderer.js in isolation:
+   100% of a representative analysis (7 market-structure events, 3
+   liquidity, 3 order blocks, 2 FVGs, premium/discount, trade levels)
+   converted into correctly layer-assigned, schema-valid annotations.
+   Toggling a layer with drawables in it DOES draw/hide correctly.
+
+   The actual break is one level up: getStructuredAnalysis() below calls
+   the live AI Worker at /api/analyze. On ANY failure — network error,
+   the Worker's GEMINI_API_KEY secret not configured, a non-"ok" status,
+   a thrown exception — this previously fell back to an all-empty
+   analysis object *silently*. That empty analysis is 100% valid input
+   to the (working) pipeline, so it correctly produces zero annotations
+   for every layer. The chart, toggles, and renderer are all doing
+   exactly what they were told; there is simply nothing to draw, and
+   nothing on screen told you why. That is indistinguishable from "the
+   toggle is broken" unless the failure is surfaced — which is the fix
+   below: a small on-chart banner + a shared status object, so a failed/
+   unconfigured AI call is visibly different from "toggle it and see
+   nothing." See docs comment above getStructuredAnalysis() for details.
+
+   LIVE NETWORK NOTE: this sandbox has no network egress, so whether
+   /api/analyze itself currently succeeds or fails in your deployed
+   Worker could not be tested live. This fix makes either outcome
+   visible on the chart instead of silently indistinguishable from a
+   broken toggle — check the banner (or Ctrl+Shift+D diagnostics, see
+   studio-diagnostics.js) after deploying to see which case you're in.
+
+   =====================================================================
+   DUAL AI PROVIDER (Gemini / OpenRouter) — RECONCILIATION NOTE
+   =====================================================================
+   Merged in from a separate OpenRouter integration package: boot() now
+   resolves and sets the initial AI provider (via ai-connections.js /
+   ai-service.js's setProviderName()) BEFORE orchestrator.initialize()
+   runs, since initialize() triggers the first getStructuredAnalysis()
+   call above, which needs the right provider already selected. It also
+   mounts the AI Provider switcher UI into #aiConnectionsPanel once the
+   chart is up. Neither addition changes getStructuredAnalysis() itself
+   or the banner/lastAnalysisStatus fix above — a failed OpenRouter call
+   surfaces through the exact same banner as a failed Gemini call,
+   since both go through the same window.AIService.analyzeChartStructure()
+   call site regardless of which provider is currently active.
 ===================================================================== */
 (function bootstrapStudioChart(){
 
-  // Temporary quota-protection mitigation (not the permanent Gemini fix —
-  // see PHASE notes / conversation history). auto-refresh-manager.js calls
-  // this function every ~15s via timeframe-manager.js's annotationsProvider,
-  // regardless of whether the previous call succeeded. Without this gate,
-  // a single Gemini 429 just repeats every tick forever. When a 429 is
-  // detected in the AI response message, further calls are skipped for a
-  // cooldown window — no network call, no repeated warning — and the
-  // existing "unavailable" analysis shape is returned unchanged, so the
-  // rest of the app (candles, timeframe switching, replay, rendering)
-  // behaves exactly as it already does on any AI failure. Once the
-  // cooldown elapses, the very next call — automatic or from a manual
-  // timeframe/symbol switch — tries Gemini again normally.
-  var QUOTA_PAUSE_MS = 5 * 60 * 1000; // 5 minutes
-  var quotaPausedUntil = 0;
+  /* -----------------------------------------------------------------
+     Shared analysis-status state + on-chart banner. Deliberately kept
+     in this file (not a new module) since it's a two-line consequence
+     of the existing getStructuredAnalysis() function, not a new
+     subsystem. Read by studio-diagnostics.js (optional, separate file)
+     for the fuller dev panel; this banner alone is enough for a normal
+     user to know "the chart has no analysis right now" vs. "I toggled
+     something and it's broken."
+  ----------------------------------------------------------------- */
+  window.DannyChart = window.DannyChart || {};
+  window.DannyChart.lastAnalysisStatus = { status: 'unknown', message: '', at: null };
 
-  // ---------------------------------------------------------------
-  // TEMPORARY DIAGNOSTIC — pipeline stage counts, console-only.
-  // Traces: raw AI analysis arrays -> buildAnnotations() breakdown ->
-  // actual renderer layer counts (via the renderer's existing public
-  // event bus, not a chart-renderer.js change). Remove the two blocks
-  // marked TEMPORARY below, plus this comment, once the root cause is
-  // confirmed and fixed.
-  // ---------------------------------------------------------------
-  var TYPE_TO_LAYER_DIAG = {
-    SWING_HIGH: 'marketStructure', SWING_LOW: 'marketStructure',
-    BOS: 'marketStructure', CHOCH: 'marketStructure', MSS: 'marketStructure',
-    ORDER_BLOCK: 'orderBlocks', FVG: 'fvg', LIQUIDITY: 'liquidity',
-    PREMIUM_DISCOUNT: 'premiumDiscount', TRADE_LEVEL: 'tradeLevels'
-  };
-
-  function logAnnotationBreakdown(annotations){
-    var byType = { SWING_HIGH:0, SWING_LOW:0, BOS:0, CHOCH:0, MSS:0, ORDER_BLOCK:0, FVG:0, LIQUIDITY:0, PREMIUM_DISCOUNT:0, TRADE_LEVEL:0 };
-    (annotations || []).forEach(function(a){
-      if(a && Object.prototype.hasOwnProperty.call(byType, a.type)) byType[a.type]++;
-    });
-    return byType;
+  var bannerEl = null;
+  function ensureBanner(){
+    if(bannerEl) return bannerEl;
+    var wrap = document.getElementById('lwChartWrap');
+    if(!wrap) return null;
+    bannerEl = document.createElement('div');
+    bannerEl.id = 'dtAnalysisStatusBanner';
+    bannerEl.setAttribute('role', 'status');
+    bannerEl.setAttribute('aria-live', 'polite');
+    bannerEl.style.cssText = [
+      'position:absolute', 'left:10px', 'top:10px', 'z-index:40',
+      'max-width:min(86%,420px)', 'padding:8px 12px',
+      'background:rgba(18,22,31,0.9)', 'border:1px solid rgba(255,138,60,0.4)',
+      'border-radius:8px', 'font-family:var(--font-mono, monospace)',
+      'font-size:11.5px', 'line-height:1.4', 'color:#FFA53C',
+      'backdrop-filter:blur(6px)', '-webkit-backdrop-filter:blur(6px)',
+      'display:none'
+    ].join(';');
+    wrap.appendChild(bannerEl);
+    return bannerEl;
   }
 
-  function attachRendererLayerTally(renderer){
-    if(!renderer || typeof renderer.on !== 'function' || renderer.__diagTallyAttached) return;
-    renderer.__diagTallyAttached = true;
-    var counts = {};
-    var flushTimer = null;
-    function recount(){
-      counts = { marketStructure:0, orderBlocks:0, fvg:0, liquidity:0, premiumDiscount:0, tradeLevels:0, volume:0, trend:0, supportResistance:0 };
-    }
-    function bump(evt, delta){
-      var layer = evt && evt.annotation ? TYPE_TO_LAYER_DIAG[evt.annotation.type] : null;
-      if(layer && counts[layer] !== undefined) counts[layer] += delta;
-    }
-    recount();
-    renderer.on('annotationRemoved', function(){ /* setAnnotations() clears all layers first — see flush below */ });
-    renderer.on('annotationAdded', function(evt){
-      bump(evt, 1);
-      if(flushTimer) clearTimeout(flushTimer);
-      flushTimer = setTimeout(function(){
-        console.log('[DIAG] Renderer layers (post-paint):', counts);
-        console.log('[DIAG] Renderer visibleLayers:', renderer.getState().visibleLayers);
-        recount();
-      }, 100);
-    });
+  function showAnalysisBanner(message){
+    var el = ensureBanner();
+    if(!el) return;
+    el.textContent = '⚠ ' + message;
+    el.style.display = 'block';
   }
-  // ---------------------------------------------------------------
-  // END TEMPORARY DIAGNOSTIC setup (usage is inline below)
-  // ---------------------------------------------------------------
+  function hideAnalysisBanner(){
+    if(bannerEl) bannerEl.style.display = 'none';
+  }
 
-  function boot(){
+  async function boot(){
     var DC = window.DannyChart;
     if(!DC || !DC.StudioChartInit){
       console.error('[StudioBootstrap] DannyChart.StudioChartInit is not available — check that all assets/js/chart/*.js files loaded before this script.');
       return;
+    }
+
+    // OpenRouter integration — resolve which AI provider should be
+    // active BEFORE the first chart init, since initialize() below
+    // triggers getStructuredAnalysis() (further down this file), which
+    // calls window.AIService.analyzeChartStructure() — that needs the
+    // right provider already configured, not configured after the
+    // fact. Falls back to leaving the default ('gemini') in place if
+    // AIConnections/AIService aren't available, so a script-order
+    // problem degrades gracefully rather than breaking boot.
+    if(DC.AIConnections && typeof DC.AIConnections.resolveInitialProviderId === 'function' && window.AIService && typeof window.AIService.setProviderName === 'function'){
+      try{
+        var initialAiProviderId = await DC.AIConnections.resolveInitialProviderId();
+        window.AIService.setProviderName(initialAiProviderId);
+      } catch(err){
+        console.warn('[StudioBootstrap] resolveInitialProviderId failed, defaulting to gemini:', err.message);
+      }
     }
 
     var orchestrator = DC.StudioChartInit.create({
@@ -118,67 +162,51 @@
       // DataAdapters fetch is needed. AIService.analyzeChartStructure()
       // is routed through dispatchStructured() (see ai-service.js), NOT
       // dispatch(), so the nested Structured Analysis shape reaches us
-      // unmodified. On any non-"ok" status or thrown error, this falls
+      // unmodified.
+      //
+      // FIX: on any non-"ok" status or thrown error, this still falls
       // back to the same empty-analysis shape studio-chart-init.js's own
-      // defaultAnalysisProvider() returns, so a failed AI call degrades
-      // gracefully (zero annotations, "Not available" panel) instead of
-      // crashing the chart. studio-chart-init.js's resolveAnnotations()
-      // also wraps this call in its own try/catch as a second safety net.
+      // defaultAnalysisProvider() returns (so the chart never crashes),
+      // but it now ALSO records why in window.DannyChart.lastAnalysisStatus
+      // and shows a visible on-chart banner — so an empty chart because
+      // the AI call failed/isn't configured no longer looks identical to
+      // "the toggle button is broken." On success, the banner is cleared
+      // and the status is recorded as 'ok' the same way.
       getStructuredAnalysis: async function(candles, timeframe, symbol){
-        var emptyAnalysis = {
+        var status = { status: 'unknown', message: '', at: Date.now() };
+        try{
+          var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
+          if(resp && resp.status === 'ok' && resp.data){
+            status.status = 'ok';
+            status.message = 'Analysis received.';
+            window.DannyChart.lastAnalysisStatus = status;
+            hideAnalysisBanner();
+            return resp.data;
+          }
+          if(resp && resp.status === 'not_connected'){
+            status.status = 'not_connected';
+            status.message = resp.message || 'AI Provider Not Connected';
+            console.warn('[StudioBootstrap] analyzeChartStructure: AI provider not connected.');
+          } else if(resp && resp.status === 'error'){
+            status.status = 'error';
+            status.message = resp.message || 'AI provider request failed.';
+            console.warn('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
+          } else {
+            status.status = 'error';
+            status.message = 'AI provider returned an unrecognized response.';
+          }
+        } catch(err){
+          status.status = 'error';
+          status.message = (err && err.message) ? err.message : 'AI provider request threw an exception.';
+          console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
+        }
+        window.DannyChart.lastAnalysisStatus = status;
+        showAnalysisBanner('Live analysis unavailable (' + status.message + ') — chart shows price only. Overlay toggles have nothing to draw until this resolves.');
+        return {
           version: '1.0', timeframe: timeframe,
           swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
           premiumDiscount: null, tradeLevels: null, decision: null
         };
-
-        // Quota cooldown active — skip the network call entirely. Analysis
-        // stays in the same "unavailable" state it's already in; this is
-        // not a fabricated success. Deliberately silent (no log) so a
-        // 15s-interval auto-refresh doesn't spam the console while paused.
-        if(Date.now() < quotaPausedUntil){
-          return emptyAnalysis;
-        }
-
-        try{
-          var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
-          if(resp && resp.status === 'ok' && resp.data){
-            // TEMPORARY DIAGNOSTIC — raw AI analysis + buildAnnotations() breakdown.
-            var a = resp.data;
-            console.log('[DIAG] AI analysis (raw):', {
-              swings: (a.swings || []).length,
-              structureEvents: (a.structureEvents || []).length,
-              orderBlocks: (a.orderBlocks || []).length,
-              fvgs: (a.fvgs || []).length,
-              liquidity: (a.liquidity || []).length,
-              premiumDiscount: !!a.premiumDiscount,
-              tradeLevels: !!a.tradeLevels,
-              decision: !!a.decision
-            });
-            if(window.DannyChart && window.DannyChart.AnnotationModel && typeof window.DannyChart.AnnotationModel.buildAnnotations === 'function'){
-              // Pure/side-effect-free per annotation-model.js's own docs — this is
-              // a diagnostic preview of what resolveAnnotations() will independently
-              // build again moments later with the same inputs; does not affect it.
-              var previewAnnotations = window.DannyChart.AnnotationModel.buildAnnotations(candles, a);
-              var breakdown = logAnnotationBreakdown(previewAnnotations);
-              console.log('[DIAG] After buildAnnotations — total:', previewAnnotations.length, 'by type:', breakdown);
-              if(previewAnnotations.length > 0){
-                console.log('[DIAG] Sample annotation (first):', previewAnnotations[0]);
-              }
-            }
-            // END TEMPORARY DIAGNOSTIC
-            return resp.data;
-          }
-          if(resp && resp.status === 'error'){
-            console.warn('[StudioBootstrap] analyzeChartStructure returned an error status:', resp.message);
-            if(resp.message && /\b429\b/.test(resp.message)){
-              quotaPausedUntil = Date.now() + QUOTA_PAUSE_MS;
-              console.warn('[StudioBootstrap] Gemini quota exceeded — pausing automatic analysis for ' + Math.round(QUOTA_PAUSE_MS/1000) + 's. Manual timeframe/symbol switches will resume trying once the pause elapses.');
-            }
-          }
-        } catch(err){
-          console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
-        }
-        return emptyAnalysis;
       }
     });
 
@@ -186,13 +214,15 @@
     // not required for the chart to function.
     window.DannyChart.studioInstance = orchestrator;
 
-    // TEMPORARY DIAGNOSTIC — attach once the renderer exists. getState()
-    // already exposes the live renderer reference (studio-chart-init.js
-    // was not modified for this).
+    // OpenRouter integration — mount the AI Provider UI once the
+    // chart itself is up.
+    var aiPanel = document.getElementById('aiConnectionsPanel');
+    if(aiPanel && DC.AIConnections && typeof DC.AIConnections.mount === 'function'){
+      DC.AIConnections.mount(aiPanel);
+    }
+
     orchestrator.initialize().then(function(ok){
       if(!ok) console.warn('[StudioBootstrap] Studio chart initialized with one or more failed modules — see prior console warnings for which.');
-      var st = orchestrator.getState();
-      if(st && st.renderer) attachRendererLayerTally(st.renderer);
     });
   }
 
