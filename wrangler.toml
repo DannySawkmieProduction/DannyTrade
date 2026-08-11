@@ -4,28 +4,64 @@ compatibility_date = "2026-07-01"
 keep_vars = true
 
 # Serves the existing static site (index.html, studio.html, style.css,
-# assets/js/*, etc.) unchanged. The Worker only intercepts /api/analyze;
-# every other request falls through to these assets.
+# assets/js/*, etc.) unchanged. The Worker only intercepts /api/analyze
+# (and /api/analyze/status, /api/fyers/*); every other request falls
+# through to these assets.
 [assets]
 directory = "./"
 binding = "ASSETS"
 
 # GEMINI_API_KEY is already stored as a secret (wrangler secret put
 # GEMINI_API_KEY) — do not add it here.
+#
+# OpenRouter integration — OPENROUTER_API_KEY must also be set as a
+# secret (wrangler secret put OPENROUTER_API_KEY) — do not add it
+# here either. OPENROUTER_MODEL below is the one place to change
+# which model OpenRouter routes to — no code change needed to switch it.
+#
+# "openrouter/free" is OpenRouter's own official $0-cost auto-router —
+# it randomly selects among currently-available :free models and filters
+# for ones that support structured JSON output, which is what this
+# integration needs. This is deliberately NOT a specific model like
+# "deepseek/...:free" — OpenRouter's free-model lineup rotates
+# constantly (models are added/pulled without notice), and a hardcoded
+# specific :free ID can silently start failing when its provider pulls
+# it. The auto-router keeps working across that rotation. Trade-off:
+# which underlying model answers can vary between requests — DannyTrade's
+# OpenRouter response coercion (worker/openrouter.js) already handles
+# variable output robustly regardless of which model answers, so this
+# is an acceptable trade for a free/testing setup. If you'd rather pin
+# one exact model for more predictable behavior, replace this with a
+# specific current :free ID from https://openrouter.ai/models?fmt=table&max_price=0 —
+# just verify it's still free before deploying, since free status can
+# change without notice.
 [vars]
+# NOT CHANGED from your explicit instruction in this conversation:
+# GEMINI_MODEL stays "gemini-3-flash-preview". Note for the record —
+# the wrangler.toml inside the uploaded ZIP actually contained
+# "gemini-3.6-flash" here, which contradicts the ZIP's own prompt
+# claiming "gemini-3-flash-preview" was the current file value. Since
+# you explicitly confirmed "gemini-3-flash-preview" moments earlier in
+# this same conversation, that's what's preserved below — flagging the
+# mismatch rather than silently picking one.
 GEMINI_MODEL = "gemini-3-flash-preview"
+OPENROUTER_MODEL = "openrouter/free"
+
+# Server-side default provider when a request doesn't specify one
+# explicitly. An explicit client choice (from the AI Provider UI)
+# always overrides this — this is only the fallback when nothing was
+# specified. Flip to "gemini" any time to change the default with no
+# code change. This does NOT cause silent fallback if the selected
+# provider's key is missing — that still returns a clear error.
+AI_PROVIDER = "openrouter"
 
 # Phase 2C, Step 2 persists the FYERS OAuth access_token (and its
-# expiry) across requests and Worker isolate recycles. Nothing reads
-# or writes this namespace yet — that starts in Step 3 (OAuth login/
-# callback routes). No refresh_token/PIN logic is stored here or
-# anywhere else in this project (Phase 2C Decision B: manual daily
-# re-login only, no auto-refresh).
+# expiry) across requests and Worker isolate recycles. No refresh_token/
+# PIN logic is stored here or anywhere else in this project (Phase 2C
+# Decision B: manual daily re-login only, no auto-refresh).
 #
-# SETUP REQUIRED (run once, outside this repo, before Step 3 is
-# deployed): `wrangler kv namespace create FYERS_TOKENS` prints a
-# namespace id. Replace the id below if you create a different
-# namespace.
+# Existing production namespace — id preserved unchanged from your
+# current wrangler.toml. Do not replace this id with a placeholder.
 [[kv_namespaces]]
 binding = "FYERS_TOKENS"
 id = "9bcd786979a94628826c9c35ff08fa01"
