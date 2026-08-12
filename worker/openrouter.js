@@ -428,30 +428,106 @@ function extractOpenRouterJson(openRouterJson) {
 }
 
 /* ---------------------------------------------------------------
+   OPENROUTER STABILIZATION — timeout + safe diagnostics.
+
+   OPENROUTER_TIMEOUT_MS bounds a single OpenRouter attempt (not the
+   whole retry loop — see worker/http-utils.js). 20 seconds was chosen
+   because: DannyTrade's chart-structure prompt asks the model to
+   reason over an entire candle array and return several structured
+   sections (swings, structureEvents, orderBlocks, fvgs, liquidity,
+   premiumDiscount, tradeLevels, decision) — genuinely more output
+   than a one-line chat reply, so a very short timeout would punish
+   honest, thorough answers. 20s is short enough that an interactive
+   chart UI doesn't look hung, and still leaves room for
+   fetchWithRetry's existing retries within a typical Cloudflare
+   Worker request budget.
+
+   buildDiagnostics()/logDiagnostics() collect ONLY the fields the task
+   explicitly allowed: configured model, actual model OpenRouter used
+   (when present in its response), HTTP status, latency in ms, whether
+   JSON parsing succeeded, whether chartStructure validation succeeded,
+   structural counts, and a short error category label. NEVER included:
+   OPENROUTER_API_KEY, GEMINI_API_KEY, FYERS secrets, the Authorization
+   header, or any other secret/env value — verified by inspection of
+   every field listed below. Diagnostics are (a) logged server-side via
+   console.log, visible only through `wrangler tail`/the Cloudflare
+   dashboard, and (b) attached under a `diagnostics` key alongside the
+   existing `ok`/`analysis`/`error` fields in THIS file's responses
+   only — Gemini's response shape in worker/index.js is untouched.
+--------------------------------------------------------------- */
+const OPENROUTER_TIMEOUT_MS = 20000;
+
+function buildDiagnostics(partial) {
+  return {
+    configuredModel: partial.configuredModel != null ? partial.configuredModel : null,
+    actualModel: partial.actualModel != null ? partial.actualModel : null,
+    httpStatus: partial.httpStatus != null ? partial.httpStatus : null,
+    latencyMs: partial.latencyMs != null ? partial.latencyMs : null,
+    jsonParsed: partial.jsonParsed != null ? partial.jsonParsed : null,
+    chartStructureValid: partial.chartStructureValid != null ? partial.chartStructureValid : null,
+    counts: partial.counts || null, // { structureEvents, orderBlocks, fvgs, liquidity, tradeLevels } — tradeLevels is 0 or 1 (single object or null), not an array
+    errorCategory: partial.errorCategory || 'none'
+  };
+}
+
+function logDiagnostics(diagnostics) {
+  // console.log only — never returned in a way that reaches the
+  // browser except through the explicit `diagnostics` envelope field
+  // built above, which is already scrubbed of secrets by construction
+  // (it only ever receives the specific fields listed in buildDiagnostics).
+  try { console.log('[OpenRouterProvider] diagnostics:', JSON.stringify(diagnostics)); } catch { /* logging must never break the request */ }
+}
+
+function chartStructureCounts(analysis) {
+  if (!analysis || typeof analysis !== 'object') return null;
+  return {
+    structureEvents: Array.isArray(analysis.structureEvents) ? analysis.structureEvents.length : 0,
+    orderBlocks: Array.isArray(analysis.orderBlocks) ? analysis.orderBlocks.length : 0,
+    fvgs: Array.isArray(analysis.fvgs) ? analysis.fvgs.length : 0,
+    liquidity: Array.isArray(analysis.liquidity) ? analysis.liquidity.length : 0,
+    tradeLevels: analysis.tradeLevels ? 1 : 0
+  };
+}
+
+/* ---------------------------------------------------------------
    handleOpenRouterAnalyze(type, payload, env) -> Promise<Response>
 
    Same contract worker/index.js's Gemini branch satisfies: returns a
    Response with { ok:true, analysis } or { ok:false, error } — the
    exact envelope ai-service.js's Live provider already expects, so
-   nothing downstream needs to know which provider ran.
+   nothing downstream needs to know which provider ran. A `diagnostics`
+   field is now also attached (see block above) — additive only; every
+   existing key ai-service.js reads is unchanged in name, meaning, and
+   status code.
 --------------------------------------------------------------- */
 export async function handleOpenRouterAnalyze(type, payload, env) {
+  const configuredModel = env.OPENROUTER_MODEL || null;
+
   if (!env.OPENROUTER_API_KEY) {
+    const diagnostics = buildDiagnostics({ configuredModel, errorCategory: 'config_missing' });
+    logDiagnostics(diagnostics);
     return jsonEnvelope({
       ok: false,
-      error: 'OPENROUTER_API_KEY is not configured on this Worker. Run: wrangler secret put OPENROUTER_API_KEY'
+      error: 'OPENROUTER_API_KEY is not configured on this Worker. Run: wrangler secret put OPENROUTER_API_KEY',
+      diagnostics
     }, 500);
   }
   if (!env.OPENROUTER_MODEL) {
+    const diagnostics = buildDiagnostics({ configuredModel: null, errorCategory: 'config_missing' });
+    logDiagnostics(diagnostics);
     return jsonEnvelope({
       ok: false,
-      error: 'OPENROUTER_MODEL is not configured on this Worker — set it in wrangler.toml [vars].'
+      error: 'OPENROUTER_MODEL is not configured on this Worker — set it in wrangler.toml [vars].',
+      diagnostics
     }, 500);
   }
   if (!SUPPORTED_TYPES.has(type)) {
+    const diagnostics = buildDiagnostics({ configuredModel, errorCategory: 'unsupported_type' });
+    logDiagnostics(diagnostics);
     return jsonEnvelope({
       ok: false,
-      error: `OpenRouter does not support analysis type "${type}" yet (image-based analysis is Gemini-only for now). Use provider: "gemini" for this request instead.`
+      error: `OpenRouter does not support analysis type "${type}" yet (image-based analysis is Gemini-only for now). Use provider: "gemini" for this request instead.`,
+      diagnostics
     }, 400);
   }
 
@@ -459,7 +535,9 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
   try {
     prompt = buildPrompt(type, payload || {});
   } catch (err) {
-    return jsonEnvelope({ ok: false, error: err.message || 'Failed to build OpenRouter request.' }, 400);
+    const diagnostics = buildDiagnostics({ configuredModel, errorCategory: 'prompt_build_failed' });
+    logDiagnostics(diagnostics);
+    return jsonEnvelope({ ok: false, error: err.message || 'Failed to build OpenRouter request.', diagnostics }, 400);
   }
 
   const requestBody = {
@@ -472,6 +550,7 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
     temperature: 0.3
   };
 
+  const requestStartedAt = Date.now();
   let openRouterRes;
   try {
     openRouterRes = await fetchWithRetry(OPENROUTER_API_URL, {
@@ -485,26 +564,63 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
         'X-Title': 'DannyTrade'
       },
       body: JSON.stringify(requestBody)
+    }, {
+      timeoutMs: OPENROUTER_TIMEOUT_MS,
+      // retries:0 is deliberate, specific to this call site — NOT a
+      // change to fetchWithRetry()'s default (still 2 for any caller,
+      // including Gemini, that doesn't override it). A timed-out
+      // attempt against a SINGLE PINNED model (this task moved off the
+      // random openrouter/free router) is unlikely to succeed if
+      // retried immediately, and the task explicitly asked for latency
+      // "low enough... for an interactive trading analysis UI" — with
+      // the prior default of retries:2, a timeout could still take up
+      // to ~3 * 20s (~60s) worst case, which fails that goal even
+      // though it was technically bounded. One 20s-capped attempt, no
+      // retry on timeout, is the smallest change that actually keeps
+      // worst-case latency interactive. A genuine transient network
+      // failure (not a timeout) still isn't retried here either, by
+      // the same reasoning — this is a deliberate per-call-site choice
+      // via the config argument, not a change to the shared function.
+      retries: 0
     });
-  } catch {
-    return jsonEnvelope({ ok: false, error: 'Could not reach the OpenRouter API.' }, 502);
+  } catch (err) {
+    const latencyMs = Date.now() - requestStartedAt;
+    const isTimeout = !!(err && err.name === 'AbortError');
+    const diagnostics = buildDiagnostics({ configuredModel, latencyMs, errorCategory: isTimeout ? 'timeout' : 'network' });
+    logDiagnostics(diagnostics);
+    return jsonEnvelope({
+      ok: false,
+      error: isTimeout
+        ? `OpenRouter API request timed out after ${OPENROUTER_TIMEOUT_MS}ms.`
+        : 'Could not reach the OpenRouter API.',
+      diagnostics
+    }, 502);
   }
+  const latencyMs = Date.now() - requestStartedAt;
 
   if (!openRouterRes.ok) {
     let errText = '';
     try { errText = await openRouterRes.text(); } catch { errText = '(no body)'; }
     if (openRouterRes.status === 401 || openRouterRes.status === 403) {
+      const diagnostics = buildDiagnostics({ configuredModel, httpStatus: openRouterRes.status, latencyMs, errorCategory: 'auth' });
+      logDiagnostics(diagnostics);
       return jsonEnvelope({
         ok: false,
-        error: `OpenRouter API rejected the request (${openRouterRes.status}) — check that OPENROUTER_API_KEY is valid. ${errText.slice(0, 200)}`
+        error: `OpenRouter API rejected the request (${openRouterRes.status}) — check that OPENROUTER_API_KEY is valid. ${errText.slice(0, 200)}`,
+        diagnostics
       }, 502);
     }
     if (openRouterRes.status === 429) {
-      return jsonEnvelope({ ok: false, error: 'OpenRouter API rate limit reached. Please try again shortly.' }, 502);
+      const diagnostics = buildDiagnostics({ configuredModel, httpStatus: openRouterRes.status, latencyMs, errorCategory: 'rate_limit' });
+      logDiagnostics(diagnostics);
+      return jsonEnvelope({ ok: false, error: 'OpenRouter API rate limit reached. Please try again shortly.', diagnostics }, 502);
     }
+    const diagnostics = buildDiagnostics({ configuredModel, httpStatus: openRouterRes.status, latencyMs, errorCategory: 'http_error' });
+    logDiagnostics(diagnostics);
     return jsonEnvelope({
       ok: false,
-      error: `OpenRouter API error (${openRouterRes.status}): ${errText.slice(0, 300)}`
+      error: `OpenRouter API error (${openRouterRes.status}): ${errText.slice(0, 300)}`,
+      diagnostics
     }, 502);
   }
 
@@ -512,12 +628,24 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
   try {
     openRouterJson = await openRouterRes.json();
   } catch {
-    return jsonEnvelope({ ok: false, error: 'OpenRouter API returned an unreadable response.' }, 502);
+    const diagnostics = buildDiagnostics({ configuredModel, httpStatus: openRouterRes.status, latencyMs, jsonParsed: false, errorCategory: 'unreadable_response' });
+    logDiagnostics(diagnostics);
+    return jsonEnvelope({ ok: false, error: 'OpenRouter API returned an unreadable response.', diagnostics }, 502);
   }
+
+  // The actual underlying model that answered — only meaningful for a
+  // multi-model router like the previous openrouter/free config, but
+  // captured regardless so diagnostics never silently miss it if the
+  // configured model is ever changed back to a router. Purely read
+  // from the response envelope; never sent anywhere but this file's
+  // own diagnostics.
+  const actualModel = (openRouterJson && typeof openRouterJson.model === 'string') ? openRouterJson.model : null;
 
   const rawParsed = extractOpenRouterJson(openRouterJson);
   if (!rawParsed) {
-    return jsonEnvelope({ ok: false, error: 'OpenRouter response did not contain valid JSON.' }, 502);
+    const diagnostics = buildDiagnostics({ configuredModel, actualModel, httpStatus: openRouterRes.status, latencyMs, jsonParsed: false, errorCategory: 'invalid_json' });
+    logDiagnostics(diagnostics);
+    return jsonEnvelope({ ok: false, error: 'OpenRouter response did not contain valid JSON.', diagnostics }, 502);
   }
 
   // coerceChartStructure() throws a descriptive Error for a present-
@@ -527,22 +655,42 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
   // response becomes a clear { ok:false, error } here, never an
   // { ok:true, analysis } with fields quietly missing. coerceFlatAnalysis()
   // does not throw (its shape has no equivalently-unsafe nested object
-  // to protect), so it's called directly.
+  // to protect), so it's called directly. UNCHANGED from before this
+  // task — see the two functions' own comments above.
   let analysis;
   try {
     analysis = (type === 'chartStructure')
       ? coerceChartStructure(rawParsed)
       : coerceFlatAnalysis(rawParsed);
   } catch (err) {
+    const diagnostics = buildDiagnostics({
+      configuredModel, actualModel, httpStatus: openRouterRes.status, latencyMs,
+      jsonParsed: true, chartStructureValid: false, errorCategory: 'schema_invalid'
+    });
+    logDiagnostics(diagnostics);
     return jsonEnvelope({
       ok: false,
-      error: `OpenRouter response could not be normalized to the required DannyTrade analysis schema: ${err.message}`
+      error: `OpenRouter response could not be normalized to the required DannyTrade analysis schema: ${err.message}`,
+      diagnostics
     }, 502);
   }
 
   if (!analysis) {
-    return jsonEnvelope({ ok: false, error: 'OpenRouter response did not contain a valid analysis.' }, 502);
+    const diagnostics = buildDiagnostics({
+      configuredModel, actualModel, httpStatus: openRouterRes.status, latencyMs,
+      jsonParsed: true, chartStructureValid: false, errorCategory: 'no_analysis'
+    });
+    logDiagnostics(diagnostics);
+    return jsonEnvelope({ ok: false, error: 'OpenRouter response did not contain a valid analysis.', diagnostics }, 502);
   }
 
-  return jsonEnvelope({ ok: true, analysis });
+  const diagnostics = buildDiagnostics({
+    configuredModel, actualModel, httpStatus: openRouterRes.status, latencyMs,
+    jsonParsed: true, chartStructureValid: true,
+    counts: (type === 'chartStructure') ? chartStructureCounts(analysis) : null,
+    errorCategory: 'none'
+  });
+  logDiagnostics(diagnostics);
+
+  return jsonEnvelope({ ok: true, analysis, diagnostics });
 }
