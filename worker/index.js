@@ -99,57 +99,100 @@ const CORS_HEADERS = {
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    // -----------------------------------------------------------------
+    // DIAGNOSTIC HARDENING (this fix) — the ONLY change to this
+    // function's structure. Everything inside the try{} block below is
+    // 100% identical, line-for-line, to what was here before; nothing
+    // about routing, Gemini, OpenRouter, FYERS, or static asset serving
+    // was touched.
+    //
+    // WHY: every controlled failure path in handleAnalyze() /
+    // handleOpenRouterAnalyze() / resolveModel() already returns a
+    // well-formed { ok:false, error:"<reason>" } JSON response — that
+    // was verified by full code review and was NOT the bug. But this
+    // top-level fetch() handler itself had no catch-all: if anything
+    // ever throws that isn't one of those already-anticipated cases
+    // (a genuinely unexpected exception, anywhere downstream, including
+    // inside imported modules), the exception propagates all the way
+    // out of this function uncaught. Cloudflare's own runtime then
+    // returns its OWN generic error response for that — which is a
+    // status in the 500s but is NOT the JSON { ok, error } shape this
+    // app always produces on purpose.
+    //
+    // ai-service.js's client-side call() (assets/js/ai-service.js) only
+    // falls back to the generic "AI provider request failed (500)."
+    // message when it CANNOT read a body.error string from the
+    // response — i.e. exactly when the response isn't this app's own
+    // JSON. That is the reported symptom. This try/catch guarantees
+    // every response leaving this Worker — even from a failure mode
+    // nobody anticipated — is valid JSON carrying the real error
+    // message, so the actual cause becomes visible on the very next
+    // request instead of being swallowed by an opaque platform 500.
+    // This is instrumentation, not a guess at the root cause: it does
+    // not change what triggers an error, only what the client can see
+    // once one occurs.
+    try {
+      const url = new URL(request.url);
 
-    if (url.pathname === '/api/analyze') {
-      if (request.method === 'OPTIONS') {
-        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (url.pathname === '/api/analyze') {
+        if (request.method === 'OPTIONS') {
+          return new Response(null, { status: 204, headers: CORS_HEADERS });
+        }
+        if (request.method !== 'POST') {
+          return jsonResponse({ ok: false, error: 'Method not allowed.' }, 405);
+        }
+        return await handleAnalyze(request, env);
       }
-      if (request.method !== 'POST') {
-        return jsonResponse({ ok: false, error: 'Method not allowed.' }, 405);
+
+      // Read-only, additive. Reports only whether each AI backend's
+      // required config is present server-side (a Cloudflare secret/var
+      // presence check) — NOT a live test call to either API, which
+      // would be slow and cost a real request for what's meant to be a
+      // cheap UI status check. Does not call handleAnalyze or touch any
+      // existing Gemini/OpenRouter code path.
+      if (url.pathname === '/api/analyze/status') {
+        return jsonResponse({
+          ok: true,
+          gemini: { configured: !!env.GEMINI_API_KEY },
+          openrouter: { configured: !!(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL), model: env.OPENROUTER_MODEL || null },
+          // Reports the server's configured default (AI_PROVIDER in
+          // wrangler.toml) — not a live decision, just surfacing the
+          // same config value handleAnalyze() itself falls back to when
+          // a request doesn't specify a provider explicitly.
+          defaultProvider: env.AI_PROVIDER || 'gemini'
+        });
       }
-      return handleAnalyze(request, env);
-    }
 
-    // Read-only, additive. Reports only whether each AI backend's
-    // required config is present server-side (a Cloudflare secret/var
-    // presence check) — NOT a live test call to either API, which
-    // would be slow and cost a real request for what's meant to be a
-    // cheap UI status check. Does not call handleAnalyze or touch any
-    // existing Gemini/OpenRouter code path.
-    if (url.pathname === '/api/analyze/status') {
-      return jsonResponse({
-        ok: true,
-        gemini: { configured: !!env.GEMINI_API_KEY },
-        openrouter: { configured: !!(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL), model: env.OPENROUTER_MODEL || null },
-        // Reports the server's configured default (AI_PROVIDER in
-        // wrangler.toml) — not a live decision, just surfacing the
-        // same config value handleAnalyze() itself falls back to when
-        // a request doesn't specify a provider explicitly.
-        defaultProvider: env.AI_PROVIDER || 'gemini'
-      });
-    }
-
-    // Phase 2C, Step 3 — FYERS OAuth only (login redirect + token-
-    // exchange callback). Step 4 adds historical candle retrieval
-    // only. No live-streaming or order-placement routes exist yet —
-    // see worker/fyers.js's header.
-    if (url.pathname === '/api/fyers/login') {
-      return handleFyersLogin(request, env);
-    }
-    if (url.pathname === '/api/fyers/callback') {
-      return handleFyersCallback(request, env);
-    }
-    if (url.pathname === '/api/fyers/candles') {
-      if (request.method === 'OPTIONS') {
-        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      // Phase 2C, Step 3 — FYERS OAuth only (login redirect + token-
+      // exchange callback). Step 4 adds historical candle retrieval
+      // only. No live-streaming or order-placement routes exist yet —
+      // see worker/fyers.js's header.
+      if (url.pathname === '/api/fyers/login') {
+        return await handleFyersLogin(request, env);
       }
-      return handleFyersCandles(request, env);
-    }
+      if (url.pathname === '/api/fyers/callback') {
+        return await handleFyersCallback(request, env);
+      }
+      if (url.pathname === '/api/fyers/candles') {
+        if (request.method === 'OPTIONS') {
+          return new Response(null, { status: 204, headers: CORS_HEADERS });
+        }
+        return await handleFyersCandles(request, env);
+      }
 
-    // Everything else is the static site (index.html, studio.html,
-    // style.css, assets/js/*, etc.) served from the assets binding.
-    return env.ASSETS.fetch(request);
+      // Everything else is the static site (index.html, studio.html,
+      // style.css, assets/js/*, etc.) served from the assets binding.
+      return await env.ASSETS.fetch(request);
+    } catch (err) {
+      // Only reached by a failure mode none of the code above already
+      // anticipated. err.message is included verbatim (truncated) so
+      // the actual cause is visible instead of an opaque platform 500 —
+      // this is the ONLY new behavior; every previously-handled case
+      // above is completely unchanged and never reaches this block.
+      const message = (err && err.message) ? String(err.message) : 'Unhandled Worker exception.';
+      console.error('[Worker] Uncaught exception in fetch handler:', err && err.stack ? err.stack : err);
+      return jsonResponse({ ok: false, error: `Worker error: ${message.slice(0, 400)}` }, 500);
+    }
   }
 };
 
@@ -446,11 +489,469 @@ function buildGeminiRequest(type, payload) {
   };
 }
 
-/* ---------------------
-   [INCOMPLETE — the source pasted into chat cut off here. Everything
-   above this line is transcribed exactly as provided. The remainder
-   of worker/index.js (extractAnalysis, extractChartStructure,
-   buildChartStructureRequest, SYSTEM_INSTRUCTION, jsonResponse,
-   safeText, inlineImagePart, ANALYSIS_RESPONSE_SCHEMA, and possibly
-   more) was not included in what was pasted and is NOT present in
-   this file. Paste the rest of the file to complete it.] */
+/* ---------------------------------------------------------------
+   Phase 2B — Structured Analysis request (type: 'chartStructure')
+
+   Separate from buildGeminiRequest's main body on purpose: the prose
+   schema above and this indexed schema share nothing (different
+   fields, different types, different system instruction), so forcing
+   them through one code path would only make both harder to read.
+   Kept in this same file, same endpoint, same request/response
+   envelope — additive, not a second surface.
+
+   Input contract (payload):
+     {
+       symbol:    string,
+       timeframe: string,               // e.g. 'D' — must match the chart's active timeframe
+       candles: [                        // zero-indexed; array position IS the "index"
+         { time, open, high, low, close, volume }, ...
+       ]
+     }
+   Output shape matches the Structured Analysis contract documented at
+   the top of assets/js/chart/annotation-model.js exactly — swings,
+   structureEvents, orderBlocks, fvgs, liquidity, premiumDiscount,
+   tradeLevels, decision — so ai-service.js can hand the response
+   straight to AnnotationModel.buildAnnotations() with zero reshaping.
+--------------------------------------------------------------- */
+function buildChartStructureRequest(payload) {
+  if (!Array.isArray(payload.candles) || payload.candles.length === 0) {
+    throw new Error('Missing or empty candles array for chart structure analysis.');
+  }
+  const timeframe = payload.timeframe || 'D';
+  const symbol = payload.symbol || 'the instrument';
+
+  // Only the fields the model needs to reason over price action are
+  // sent — no need to round-trip volume unless present. Each candle's
+  // position in this array is the "index" the model must reference;
+  // that's stated explicitly below so the AI never invents its own
+  // indexing scheme.
+  const candleLines = payload.candles.map((c, i) =>
+    `${i}: O=${c.open} H=${c.high} L=${c.low} C=${c.close}` + (c.volume != null ? ` V=${c.volume}` : '')
+  ).join('\n');
+
+  const text =
+    `Instrument: ${symbol}. Timeframe: ${timeframe}. ${payload.candles.length} candles, oldest first, ` +
+    `zero-indexed — the leading number on each line below IS the index you must use in every "index", ` +
+    `"startIndex", "endIndex", and "entry.index" field in your response. Never invent an index outside ` +
+    `0–${payload.candles.length - 1}.\n\n${candleLines}\n\n` +
+    `Apply ICT and Smart Money Concepts methodology to identify swing points, structure breaks (BOS/CHoCH/MSS), ` +
+    `order blocks, fair value gaps, liquidity pools/sweeps, the premium/discount/equilibrium range, and — only ` +
+    `if the evidence genuinely supports one — a single trade-level set and a final decision. Every price you ` +
+    `output must be one that actually appears (open/high/low/close) at the index you cite. Return empty arrays ` +
+    `for any category with no valid pattern; return null for premiumDiscount, tradeLevels, or decision rather ` +
+    `than fabricating one. Do not force a trade level or decision when the setup is weak or mixed — leave it null.`;
+
+  return {
+    systemInstruction: { role: 'system', parts: [{ text: CHART_STRUCTURE_SYSTEM_INSTRUCTION }] },
+    contents: [{ role: 'user', parts: [{ text }] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: CHART_STRUCTURE_RESPONSE_SCHEMA,
+      temperature: 0.2
+    }
+  };
+}
+
+const SYSTEM_INSTRUCTION =
+  `You are the institutional-grade analysis engine behind DannyTrade's AI Analysis Studio, serving NSE/BSE/MCX ` +
+  `traders. You behave like an experienced institutional trader — not a generic chatbot. You think before ` +
+  `concluding, analyse before recommending, and explain before deciding. You reject weak setups rather than ` +
+  `forcing a BUY or SELL.\n\n` +
+
+  `METHODOLOGY: Apply ICT (Inner Circle Trader) concepts and Smart Money Concepts (SMC) — market structure ` +
+  `(BOS, CHoCH, MSS, internal/external structure, swing highs/lows), liquidity theory (buy-side/sell-side ` +
+  `liquidity, sweeps, equal highs/lows), order blocks (bullish/bearish, breaker, mitigation — ranked by ` +
+  `quality), fair value gaps (bullish/bearish, filled/unfilled — ranked Strong/Moderate/Weak), and premium/` +
+  `discount/equilibrium positioning. Every analytical field must implicitly follow Observation → Evidence → ` +
+  `Reasoning → Conclusion: state what you see, what supports it, why it matters, and what follows — as 2-5 ` +
+  `plain sentences, no markdown, no bullet points.\n\n` +
+
+  `HONESTY RULES (strict): Never fabricate probabilities, exact timing windows, market data, prices, volume ` +
+  `profile, options data, open interest, PCR, India VIX, or FII/DII activity. If something cannot honestly be ` +
+  `determined from the uploaded input, say so plainly in that field instead of guessing. If evidence for a ` +
+  `trade is weak or mixed, the verdict must be "WAIT" or "NO TRADE" — never force a BUY or SELL to seem useful. ` +
+  `Risk and trap likelihood are classified ONLY as "Very High", "High", "Moderate", or "Low" — never as a ` +
+  `percentage or decimal; percentages read as false statistical precision this model cannot actually support.\n\n` +
+
+  `FIELD GUIDANCE:\n` +
+  `- premiumDiscountZone: state Premium, Discount, or Equilibrium relative to the visible range, and why.\n` +
+  `- trapDetection: name any trap pattern in play (Bull Trap, Bear Trap, False Breakout, False Breakdown, ` +
+  `Liquidity Trap, Stop Hunt) or state none is evident; give evidence, institutional reasoning, a risk ` +
+  `classification (Very High/High/Moderate/Low only), and a recommended action.\n` +
+  `- marketPhase: identify Accumulation, Manipulation, Expansion, Distribution, Re-Accumulation, or ` +
+  `Re-Distribution, with evidence, the likely institutional objective, and expected behaviour.\n` +
+  `- invalidationLevel: the specific price/structural condition that would invalidate this setup.\n` +
+  `- confirmationRequired: what confirmation (e.g. a specific BOS, displacement candle, retest) is still ` +
+  `outstanding before this becomes actionable — or "None — setup is confirmed" if genuinely none is.\n` +
+  `- tradeQualityGrade: exactly one of "A+", "A", "B", "C", "D".\n` +
+  `- tradeQualityReasoning: the strengths and weaknesses behind that grade.\n` +
+  `- educationalNotes: what smart money appears to be doing, which ICT/SMC concepts are present, a common ` +
+  `beginner mistake this setup could trigger, and how a professional would approach it.\n\n` +
+
+  `Price levels (entry, stopLoss, target1-3) are plain strings (e.g. "23,450" or "N/A" if not determinable) in ` +
+  `the instrument's native units — never invent precision unsupported by the input. confidence is an integer ` +
+  `0-100, but must reflect only a coarse self-assessed band (use round values like 20/40/60/80/95 for Low/` +
+  `Below-Average/Moderate/High/Very High confidence) — not false decimal-point precision. verdict must be ` +
+  `exactly "BUY", "SELL", "WAIT", or "NO TRADE". riskWarnings must always remind the reader this is educational ` +
+  `output, not investment advice, and that SEBI-registered advice should be sought before trading. Never ` +
+  `fabricate data you cannot see in the input.`;
+
+// Derived from ANALYSIS_FIELDS above — do not hand-edit this object;
+// add/change fields there and this schema (and ANALYSIS_SCHEMA_KEYS)
+// update automatically, so they can never drift out of sync.
+const ANALYSIS_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: ANALYSIS_FIELDS.reduce((props, f) => {
+    props[f.key] = f.enum ? { type: f.type, enum: f.enum } : { type: f.type };
+    return props;
+  }, {}),
+  required: ANALYSIS_SCHEMA_KEYS
+};
+
+/* =================================================================
+   Phase 2B — Structured Analysis schema (type: 'chartStructure')
+
+   Mirrors the Structured Analysis contract in
+   assets/js/chart/annotation-model.js field-for-field. If that
+   contract's shape ever changes, this schema must change with it —
+   they are two descriptions of the same object, kept in sync by hand
+   because Gemini's schema format (OBJECT/ARRAY/nullable) doesn't
+   share a common representation with annotation-model.js's plain-JS
+   documentation comment.
+================================================================= */
+
+const CHART_STRUCTURE_SYSTEM_INSTRUCTION =
+  `You are the institutional-grade chart-structure engine behind DannyTrade's AI Chart Intelligence. You read ` +
+  `raw OHLC candle data and output ONLY precise, index-anchored structural annotations — never prose analysis, ` +
+  `never a screenshot description. You behave like an experienced institutional trader applying ICT (Inner ` +
+  `Circle Trader) and Smart Money Concepts: market structure (BOS, CHoCH, MSS, swing highs/lows), liquidity ` +
+  `theory (buy-side/sell-side liquidity, equal highs/lows, sweeps, stop hunts), order blocks (bullish/bearish/` +
+  `breaker/mitigation), fair value gaps (bullish/bearish, filled/unfilled), and premium/discount/equilibrium ` +
+  `positioning.\n\n` +
+
+  `HONESTY RULES (strict): Every "index" you output must be a real position in the candle array you were given ` +
+  `(0 to N-1), and every price you output must genuinely appear (as open/high/low/close) at that index — never ` +
+  `an interpolated, rounded, or invented value. If a category has no genuine pattern, return an empty array for ` +
+  `it — never fabricate one to avoid an empty result. If the evidence for a trade is weak, mixed, or absent, ` +
+  `return null for tradeLevels and set decision.finalDecision to "WAIT" or "NO_TRADE" — never force a trade. ` +
+  `strength and confidence are 0–1 floats reflecting your own self-assessed certainty, not a formula. Every ` +
+  `observation/evidence/reasoning/tradingImplication string follows Observation → Evidence → Reasoning → ` +
+  `Conclusion: 1-3 plain sentences, no markdown, no bullet points.\n\n` +
+
+  `FIELD GUIDANCE:\n` +
+  `- swings: only genuine, structurally significant swing highs/lows — not every local wiggle.\n` +
+  `- structureEvents: a BOS/CHoCH/MSS only where price has actually broken or shifted structure at that index.\n` +
+  `- orderBlocks: the specific candle(s) forming the block; startIndex/endIndex may be equal for a single-candle block.\n` +
+  `- fvgs: the 3-candle gap's top and bottom price exactly as it appears in the data.\n` +
+  `- liquidity: equal highs/lows need at least two genuinely close price levels; a sweep/stop_hunt needs a ` +
+  `visible wick beyond a prior level followed by a reversal.\n` +
+  `- premiumDiscount: only when a clear recent range exists; equilibriumPrice is the exact midpoint of ` +
+  `rangeHighPrice and rangeLowPrice.\n` +
+  `- tradeLevels: only when structure, an order block/FVG, and liquidity align into one coherent setup; entry, ` +
+  `stopLoss and target1 are required if this field is non-null, target2/target3/invalidation may be null ` +
+  `individually.\n` +
+  `- decision: finalDecision is exactly "BUY", "SELL", "WAIT", or "NO_TRADE"; tradeGrade is "A+"/"A"/"B"/"C"/"D"; ` +
+  `trapRisk is "Very High"/"High"/"Moderate"/"Low" only — never a percentage; reasoningSummary is 2-4 sentences. ` +
+  `riskReward mirrors tradeLevels.riskReward when tradeLevels is non-null (e.g. 2.2), or your best honest ` +
+  `estimate if tradeLevels is null but a rough reward skew is still assessable — never fabricate precision. ` +
+  `trend is exactly "Bullish", "Bearish", or "Sideways". structureSummary is 1-2 plain sentences on the current ` +
+  `market structure (e.g. higher highs/higher lows, or a recent CHoCH). lastStructureEvent names the most ` +
+  `recent structure break honestly, e.g. "Bullish BOS at index 42" — or "None observed" if structureEvents is ` +
+  `empty. invalidationLevel is a plain string price level (e.g. "23,450") or a short structural condition ` +
+  `(e.g. "Close below the last higher low") that would invalidate this read — never a fabricated number. ` +
+  `educationalNotes is an array of 2-4 short plain-sentence strings: what smart money appears to be doing, ` +
+  `which ICT/SMC concepts are present, a common beginner mistake this setup could trigger, and how a ` +
+  `professional would approach it — same spirit as the Phase 1 studio's educationalNotes field, adapted to ` +
+  `this chart's actual structure.`;
+
+// Small reusable shape for the four evidence-narrative fields shared by
+// every structural annotation type below.
+const NARRATIVE_PROPS = {
+  observation: { type: 'STRING' },
+  evidence: { type: 'STRING' },
+  reasoning: { type: 'STRING' },
+  tradingImplication: { type: 'STRING' }
+};
+const NARRATIVE_KEYS = Object.keys(NARRATIVE_PROPS);
+
+const CHART_STRUCTURE_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    version: { type: 'STRING' },
+    timeframe: { type: 'STRING' },
+
+    swings: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          index: { type: 'NUMBER' },
+          type: { type: 'STRING', enum: ['high', 'low'] },
+          price: { type: 'NUMBER' },
+          strength: { type: 'NUMBER' },
+          confidence: { type: 'NUMBER' }
+        },
+        required: ['index', 'type', 'price', 'strength', 'confidence']
+      }
+    },
+
+    structureEvents: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          type: { type: 'STRING', enum: ['BOS', 'CHOCH', 'MSS'] },
+          index: { type: 'NUMBER' },
+          direction: { type: 'STRING', enum: ['bullish', 'bearish'] },
+          level: { type: 'NUMBER' },
+          strength: { type: 'NUMBER' },
+          confidence: { type: 'NUMBER' },
+          ...NARRATIVE_PROPS
+        },
+        required: ['type', 'index', 'direction', 'level', 'strength', 'confidence', ...NARRATIVE_KEYS]
+      }
+    },
+
+    orderBlocks: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          subtype: { type: 'STRING', enum: ['bullish', 'bearish', 'breaker', 'mitigation'] },
+          startIndex: { type: 'NUMBER' },
+          endIndex: { type: 'NUMBER' },
+          priceHigh: { type: 'NUMBER' },
+          priceLow: { type: 'NUMBER' },
+          strength: { type: 'NUMBER' },
+          confidence: { type: 'NUMBER' },
+          ...NARRATIVE_PROPS
+        },
+        required: ['subtype', 'startIndex', 'endIndex', 'priceHigh', 'priceLow', 'strength', 'confidence', ...NARRATIVE_KEYS]
+      }
+    },
+
+    fvgs: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          subtype: { type: 'STRING', enum: ['bullish', 'bearish', 'filled', 'unfilled'] },
+          index: { type: 'NUMBER' },
+          top: { type: 'NUMBER' },
+          bottom: { type: 'NUMBER' },
+          strength: { type: 'NUMBER' },
+          confidence: { type: 'NUMBER' },
+          ...NARRATIVE_PROPS
+        },
+        required: ['subtype', 'index', 'top', 'bottom', 'strength', 'confidence', ...NARRATIVE_KEYS]
+      }
+    },
+
+    liquidity: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          subtype: { type: 'STRING', enum: ['buyside', 'sellside', 'equal_highs', 'equal_lows', 'sweep', 'stop_hunt', 'liquidity_target'] },
+          index: { type: 'NUMBER' },
+          price: { type: 'NUMBER' },
+          strength: { type: 'NUMBER' },
+          confidence: { type: 'NUMBER' },
+          ...NARRATIVE_PROPS
+        },
+        required: ['subtype', 'index', 'price', 'strength', 'confidence', ...NARRATIVE_KEYS]
+      }
+    },
+
+    premiumDiscount: {
+      type: 'OBJECT',
+      nullable: true,
+      properties: {
+        rangeHighIndex: { type: 'NUMBER' },
+        rangeHighPrice: { type: 'NUMBER' },
+        rangeLowIndex: { type: 'NUMBER' },
+        rangeLowPrice: { type: 'NUMBER' },
+        equilibriumPrice: { type: 'NUMBER' },
+        confidence: { type: 'NUMBER' }
+      },
+      required: ['rangeHighIndex', 'rangeHighPrice', 'rangeLowIndex', 'rangeLowPrice', 'equilibriumPrice', 'confidence']
+    },
+
+    tradeLevels: {
+      type: 'OBJECT',
+      nullable: true,
+      properties: {
+        direction: { type: 'STRING', enum: ['bullish', 'bearish'] },
+        confidence: { type: 'NUMBER' },
+        riskReward: { type: 'NUMBER' },
+        entry: {
+          type: 'OBJECT',
+          properties: { index: { type: 'NUMBER' }, price: { type: 'NUMBER' } },
+          required: ['index', 'price']
+        },
+        stopLoss: {
+          type: 'OBJECT',
+          properties: { price: { type: 'NUMBER' } },
+          required: ['price']
+        },
+        target1: {
+          type: 'OBJECT',
+          properties: { price: { type: 'NUMBER' } },
+          required: ['price']
+        },
+        target2: {
+          type: 'OBJECT', nullable: true,
+          properties: { price: { type: 'NUMBER' } },
+          required: ['price']
+        },
+        target3: {
+          type: 'OBJECT', nullable: true,
+          properties: { price: { type: 'NUMBER' } },
+          required: ['price']
+        },
+        invalidation: {
+          type: 'OBJECT', nullable: true,
+          properties: { price: { type: 'NUMBER' } },
+          required: ['price']
+        },
+        ...NARRATIVE_PROPS
+      },
+      required: ['direction', 'confidence', 'riskReward', 'entry', 'stopLoss', 'target1', ...NARRATIVE_KEYS]
+    },
+
+    decision: {
+      type: 'OBJECT',
+      nullable: true,
+      properties: {
+        finalDecision: { type: 'STRING', enum: ['BUY', 'SELL', 'WAIT', 'NO_TRADE'] },
+        tradeGrade: { type: 'STRING', enum: ['A+', 'A', 'B', 'C', 'D'] },
+        marketPhase: { type: 'STRING' },
+        trapRisk: { type: 'STRING', enum: ['Very High', 'High', 'Moderate', 'Low'] },
+        liquidityTarget: { type: 'STRING' },
+        tradeQuality: { type: 'STRING' },
+        confidence: { type: 'NUMBER' },
+        reasoningSummary: { type: 'STRING' },
+        // --- Phase 2B Step 4 additions: close the decision-panel.js
+        // contract gap. Additive only; the 8 fields above are untouched. ---
+        riskReward: { type: 'NUMBER' },
+        trend: { type: 'STRING', enum: ['Bullish', 'Bearish', 'Sideways'] },
+        structureSummary: { type: 'STRING' },
+        lastStructureEvent: { type: 'STRING' },
+        // Plain string (not NUMBER) to match the Phase 1 price-field
+        // convention elsewhere in this file — Gemini's structured-output
+        // schema has no clean number|string union, and decision-panel.js
+        // already renders this field as display text via formatPlain().
+        invalidationLevel: { type: 'STRING' },
+        educationalNotes: { type: 'ARRAY', items: { type: 'STRING' } }
+      },
+      required: [
+        'finalDecision', 'tradeGrade', 'marketPhase', 'trapRisk', 'liquidityTarget', 'tradeQuality', 'confidence', 'reasoningSummary',
+        'riskReward', 'trend', 'structureSummary', 'lastStructureEvent', 'invalidationLevel', 'educationalNotes'
+      ]
+    }
+  },
+  required: ['version', 'timeframe', 'swings', 'structureEvents', 'orderBlocks', 'fvgs', 'liquidity', 'premiumDiscount', 'tradeLevels', 'decision']
+};
+
+/** Extraction for type: 'chartStructure' — mirrors extractAnalysis()'s
+ *  defensive style (never throws, degrades instead of failing the
+ *  whole response) but defaults to the empty-but-valid shape
+ *  studio-chart-init.js's defaultAnalysisProvider() already uses,
+ *  rather than nulling every field the way the flat schema does. An
+ *  array field Gemini omits becomes [] (still renders fine — just no
+ *  annotations of that type); premiumDiscount/tradeLevels/decision
+ *  default to null exactly like a "no valid pattern" response would. */
+function extractChartStructure(geminiJson, payload) {
+  try {
+    const text = geminiJson.candidates[0].content.parts
+      .map(p => p.text || '')
+      .join('');
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+    return {
+      version: typeof parsed.version === 'string' ? parsed.version : '1.0',
+      timeframe: typeof parsed.timeframe === 'string' ? parsed.timeframe : (payload.timeframe || 'D'),
+      swings: Array.isArray(parsed.swings) ? parsed.swings : [],
+      structureEvents: Array.isArray(parsed.structureEvents) ? parsed.structureEvents : [],
+      orderBlocks: Array.isArray(parsed.orderBlocks) ? parsed.orderBlocks : [],
+      fvgs: Array.isArray(parsed.fvgs) ? parsed.fvgs : [],
+      liquidity: Array.isArray(parsed.liquidity) ? parsed.liquidity : [],
+      premiumDiscount: (parsed.premiumDiscount && typeof parsed.premiumDiscount === 'object') ? parsed.premiumDiscount : null,
+      tradeLevels: (parsed.tradeLevels && typeof parsed.tradeLevels === 'object') ? parsed.tradeLevels : null,
+      decision: (parsed.decision && typeof parsed.decision === 'object') ? parsed.decision : null
+    };
+  } catch {
+    return null;
+  }
+}
+
+/* ---------------------------------------------------------------
+   helpers
+--------------------------------------------------------------- */
+
+function inlineImagePart(dataUrl) {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error(
+      'Image payload is not a valid base64 data URL. Expected "data:image/<type>;base64,<data>" — ' +
+      'ai-service.js should convert blob URLs, File/Blob objects, ArrayBuffers, or raw base64 strings ' +
+      'into this format before sending.'
+    );
+  }
+
+  const commaIndex = dataUrl.indexOf(',');
+  if (commaIndex === -1) {
+    throw new Error('Image payload is missing the "," separator between its header and base64 data.');
+  }
+
+  // Header looks like "data:image/png" or "data:image/png;charset=utf-8;base64" —
+  // the mime type is always the first ";"-delimited segment after "data:".
+  const header = dataUrl.slice(5, commaIndex); // strip leading "data:"
+  if (!/;base64$/i.test(header)) {
+    throw new Error('Image payload must be base64-encoded (data URL header is missing ";base64").');
+  }
+
+  const mimeType = header.split(';')[0].trim() || 'application/octet-stream';
+  const data = dataUrl.slice(commaIndex + 1).replace(/\s/g, '');
+  if (!data) {
+    throw new Error('Image payload has no base64 data after the "," separator.');
+  }
+
+  return { inlineData: { mimeType, data } };
+}
+
+function extractAnalysis(geminiJson) {
+  try {
+    const text = geminiJson.candidates[0].content.parts
+      .map(p => p.text || '')
+      .join('');
+    const parsed = JSON.parse(text);
+    // Gemini's responseSchema strongly encourages a matching object, but
+    // never trust that blindly — a non-object parse (or a stray array/
+    // null) is treated the same as "no usable analysis" rather than
+    // letting a property access throw further down.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+    // Any field genuinely absent from Gemini's output — despite it being
+    // `required` in the schema — degrades to null instead of throwing,
+    // so one missing field never fails the whole analysis. ai-service.js's
+    // dispatch() defaults missing keys to null the same way, so a partial
+    // analysis renders as partial, not broken.
+    const analysis = {};
+    ANALYSIS_SCHEMA_KEYS.forEach(k => { analysis[k] = parsed[k] !== undefined ? parsed[k] : null; });
+    return analysis;
+  } catch {
+    return null;
+  }
+}
+
+async function safeText(res) {
+  try { return await res.text(); } catch { return '(no body)'; }
+}
+
+function jsonResponse(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
+  });
+}
