@@ -199,10 +199,29 @@ function validatePremiumDiscount(p) {
     .every(k => isFiniteNumber(p[k]));
 }
 
+// CORS FIX: worker/index.js's own jsonResponse() has always included
+// Access-Control-Allow-Origin/-Methods/-Headers on every response; this
+// file's jsonEnvelope() did not, for every OpenRouter success AND
+// error response. On a same-origin deployment (frontend + Worker on
+// the same domain) a browser doesn't need those headers to read the
+// response, so this gap can go unnoticed in production. It becomes a
+// real failure the moment the two are ever cross-origin (a Pages
+// preview URL, local dev against a deployed Worker, a future custom
+// domain split) — the browser blocks the response entirely and
+// fetch() rejects, regardless of what valid JSON the Worker sent.
+// Matching index.js's own header set here removes that gap; it does
+// not change status codes, error text, or which responses are sent —
+// only which headers accompany them.
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type'
+};
+
 function jsonEnvelope(body, status) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json' }
+    headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
   });
 }
 
