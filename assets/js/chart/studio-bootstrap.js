@@ -74,6 +74,26 @@
   window.DannyChart = window.DannyChart || {};
   window.DannyChart.lastAnalysisStatus = { status: 'unknown', message: '', at: null };
 
+  /* Deterministic predicate: does an 'ok' Structured Analysis response
+     actually contain anything the chart can DRAW? A response can be
+     status:'ok' with a fully-populated `decision` (which the Decision
+     Panel renders as text — including prose like "Bullish BOS at index
+     42") yet have every structural array empty and premiumDiscount /
+     tradeLevels null. In that case buildAnnotations() correctly yields
+     zero drawables and the chart is blank — the exact reported symptom.
+     Exposed on window.DannyChart so it can be unit-tested in isolation. */
+  function hasDrawableStructure(d){
+    if(!d || typeof d !== 'object') return false;
+    var arrays = ['swings', 'structureEvents', 'orderBlocks', 'fvgs', 'liquidity'];
+    for(var i = 0; i < arrays.length; i++){
+      if(Array.isArray(d[arrays[i]]) && d[arrays[i]].length > 0) return true;
+    }
+    if(d.premiumDiscount && typeof d.premiumDiscount === 'object') return true;
+    if(d.tradeLevels && typeof d.tradeLevels === 'object') return true;
+    return false;
+  }
+  window.DannyChart.hasDrawableStructure = hasDrawableStructure;
+
   var bannerEl = null;
   function ensureBanner(){
     if(bannerEl) return bannerEl;
@@ -178,9 +198,21 @@
           var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
           if(resp && resp.status === 'ok' && resp.data){
             status.status = 'ok';
-            status.message = 'Analysis received.';
+            // Distinguish "ok WITH drawable structure" from "ok but the
+            // model returned only a text decision and empty structural
+            // arrays". The latter previously hid the banner and returned
+            // silently, leaving a blank chart with no explanation — now
+            // it's surfaced honestly so it's not mistaken for a broken
+            // toggle or a renderer bug. Either way resp.data is returned
+            // unchanged (never fabricate structures to fill the chart).
+            if(hasDrawableStructure(resp.data)){
+              status.message = 'Analysis received.';
+              hideAnalysisBanner();
+            } else {
+              status.message = 'Analysis received, but it contained no drawable chart structures (all structural arrays empty).';
+              showAnalysisBanner('AI returned a decision but no drawable chart structures — market structure, order blocks, FVGs, liquidity and premium/discount were all empty for this window, so there is nothing to draw. This is an AI/data result, not a chart or toggle bug.');
+            }
             window.DannyChart.lastAnalysisStatus = status;
-            hideAnalysisBanner();
             return resp.data;
           }
           if(resp && resp.status === 'not_connected'){
