@@ -19,22 +19,36 @@ binding = "ASSETS"
 # here either. OPENROUTER_MODEL below is the one place to change
 # which model OpenRouter routes to — no code change needed to switch it.
 #
-# "openrouter/free" is OpenRouter's own official $0-cost auto-router —
+# "openrouter/free" WAS OpenRouter's own official $0-cost auto-router —
 # it randomly selects among currently-available :free models and filters
-# for ones that support structured JSON output, which is what this
-# integration needs. This is deliberately NOT a specific model like
-# "deepseek/...:free" — OpenRouter's free-model lineup rotates
-# constantly (models are added/pulled without notice), and a hardcoded
-# specific :free ID can silently start failing when its provider pulls
-# it. The auto-router keeps working across that rotation. Trade-off:
-# which underlying model answers can vary between requests — DannyTrade's
-# OpenRouter response coercion (worker/openrouter.js) already handles
-# variable output robustly regardless of which model answers, so this
-# is an acceptable trade for a free/testing setup. If you'd rather pin
-# one exact model for more predictable behavior, replace this with a
-# specific current :free ID from https://openrouter.ai/models?fmt=table&max_price=0 —
-# just verify it's still free before deploying, since free status can
-# change without notice.
+# for ones that support structured JSON output. Kept here for history:
+# this random-router behavior was diagnosed (Phase 2 forensic report) as
+# the source of inconsistent latency and inconsistent schema-compliance
+# across requests, since a different underlying model could answer each
+# time. Superseded below by a pinned model — see PHASE 3 note.
+#
+# PHASE 3 STABILIZATION — pinned to a specific model instead of the
+# auto-router. "openai/gpt-oss-20b:free" was verified live against
+# OpenRouter's current model catalogue (openrouter.ai/openai/gpt-oss-20b:free)
+# before this change:
+#   - currently listed as free (price: Free)
+#   - explicitly documented as supporting function calling, tool use,
+#     AND structured outputs — not just generic chat
+#   - Mixture-of-Experts, 3.6B active parameters per token — specifically
+#     optimized by OpenAI for lower-latency inference, which matters for
+#     an interactive chart UI
+#   - 131K context window, comfortably larger than the candle-array
+#     payload this app sends
+#   - served by 12 different hosting providers on OpenRouter ("higher
+#     uptime"), so one overloaded/down provider is less likely to take
+#     the whole integration down than a thin single-provider :free
+#     listing would
+# Free-tier availability can still change without notice — if this ID
+# is ever delisted, replace it with a current :free entry from
+# https://openrouter.ai/models?fmt=table&max_price=0, verified live the
+# same way, and change ONLY this one line — no code change is required,
+# since worker/openrouter.js reads env.OPENROUTER_MODEL dynamically; the
+# model string is never hardcoded in application logic.
 [vars]
 # NOT CHANGED from your explicit instruction in this conversation:
 # GEMINI_MODEL stays "gemini-3-flash-preview". Note for the record —
@@ -45,7 +59,7 @@ binding = "ASSETS"
 # this same conversation, that's what's preserved below — flagging the
 # mismatch rather than silently picking one.
 GEMINI_MODEL = "gemini-3-flash-preview"
-OPENROUTER_MODEL = "openrouter/free"
+OPENROUTER_MODEL = "openai/gpt-oss-20b:free"
 
 # Server-side default provider when a request doesn't specify one
 # explicitly. An explicit client choice (from the AI Provider UI)
