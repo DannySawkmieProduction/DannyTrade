@@ -75,6 +75,19 @@
     var state = instance.getState();
     var overlayManager = state.overlayManager;
     var lastAnalysis = state.lastAnalysis;
+    // Renderer-level summary — read directly from chart-renderer.js's own
+    // getState() (never recomputed/estimated here), so "renderer drawable
+    // count" and "visible layer count" reflect exactly what the renderer
+    // itself is tracking, the same numbers logDiagnostics() in
+    // studio-chart-init.js already logs to console on every analysis.
+    var rendererState = state.renderer ? state.renderer.getState() : null;
+    var totalDrawables = rendererState ? rendererState.annotationCount : '—';
+    var visibleLayerCount = rendererState ? rendererState.visibleLayers.length : '—';
+    var lastError = DC.lastRenderError
+      ? (escapeHtml(DC.lastRenderError.layer || '') + (DC.lastRenderError.errorMessage ? ': ' + escapeHtml(DC.lastRenderError.errorMessage) : ''))
+      : 'none';
+    var providerName = (window.AIService && typeof window.AIService.getProviderName === 'function')
+      ? window.AIService.getProviderName() : 'unknown';
 
     var rows = '';
     if(overlayManager){
@@ -109,11 +122,13 @@
     panelEl.innerHTML =
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<b>DannyTrade Chart Diagnostics</b>' +
-        '<button id="dtDiagCloseBtn" style="background:none;border:1px solid #232838;color:#8D93A6;border-radius:6px;padding:2px 8px;cursor:pointer;font-family:inherit;font-size:11px">Close</button>' +
+        '<button id="dtDiagCloseBtn" style="background:none;border:1px solid #232838;color:#8D93A6;border-radius:6px;padding:4px 12px;cursor:pointer;font-family:inherit;font-size:12px;min-height:30px">Close</button>' +
       '</div>' +
-      '<div style="margin-top:6px;color:' + statusColor + '">Last analysis call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
+      '<div style="margin-top:6px;color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
+      '<div style="margin-top:4px;color:#8D93A6">Renderer drawables (total): ' + totalDrawables + ' &nbsp;|&nbsp; Visible layers: ' + visibleLayerCount + '</div>' +
+      '<div style="margin-top:4px;color:' + (DC.lastRenderError ? '#FF5C6C' : '#8D93A6') + '">Last error: ' + lastError + '</div>' +
       rows +
-      '<div style="margin-top:8px;color:#565C70">Ctrl+Shift+D to toggle. Dev-only — not shown by default.</div>';
+      '<div style="margin-top:8px;color:#565C70">Tap the Diag button (or Ctrl+Shift+D on desktop) to toggle. Dev-only — not shown by default.</div>';
 
     var closeBtn = document.getElementById('dtDiagCloseBtn');
     if(closeBtn) closeBtn.addEventListener('click', hide);
@@ -146,6 +161,27 @@
       toggle();
     }
   });
+
+  // Mobile entry point — studio.html adds a small "Diag" button
+  // (#mobileDiagBtn) next to the overlay toggle bar for devices with no
+  // keyboard (Android/iOS). Purely additive: the Ctrl+Shift+D shortcut
+  // above is untouched, this just gives it a second, touch-reachable
+  // trigger calling the exact same toggle() function. Wired on
+  // DOMContentLoaded since this script is `defer`red after studio.html's
+  // button markup, but querying at parse time would still be safe either
+  // way — this just guards against any future load-order change.
+  function wireMobileButton(){
+    var btn = document.getElementById('mobileDiagBtn');
+    if(btn && !btn.__dtDiagWired){
+      btn.__dtDiagWired = true;
+      btn.addEventListener('click', toggle);
+    }
+  }
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', wireMobileButton);
+  } else {
+    wireMobileButton();
+  }
 
   // Also exposed programmatically for convenience — e.g. from the
   // console: DannyChart.showDiagnostics() / hideDiagnostics().
