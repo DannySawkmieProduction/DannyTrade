@@ -314,8 +314,13 @@ console.log('\n[12] Classification: painted but outside canvas -> COORDINATES OU
   assert(html.indexOf('CLASSIFICATION 2: COORDINATES OUT OF VIEW') !== -1, 'Painted-but-off-canvas entries classify as COORDINATES OUT OF VIEW (2)');
 }
 
-console.log('\n[13] Classification: chart canvas z-index above overlay -> CSS COMPOSITING / Z-INDEX ISSUE (8)');
+console.log('\n[13] TEST A — real architecture (overlay z-index:auto, plot z-index:1) -> CLASSIFICATION 8 does NOT fire (not comparable)');
 {
+  // Reproduces the actual live DannyTrade architecture exactly: overlay
+  // z-index "auto" (never explicitly set in CSS), plot canvas z-index "1"
+  // (TradingView-assigned). #lwChartContainer establishes no stacking
+  // context of its own, so these two values are not proven comparable —
+  // "auto" must NOT be treated as a stand-in 0 for this specific check.
   const studioInstance = makeFakeStudioInstance();
   const __origState = studioInstance.getState();
   studioInstance.getState = () => Object.assign({}, __origState, {
@@ -329,14 +334,71 @@ console.log('\n[13] Classification: chart canvas z-index above overlay -> CSS CO
       getCanvasLayoutDiagnostics: () => ({
         dpr: 1,
         overlay: { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: 'auto', display: 'block', visibility: 'visible', opacity: '1' },
-        chartCanvases: [ { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '3' } ]
+        chartCanvases: [ { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '1' } ]
       })
     }
   });
   const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
   mobileDiagBtn.click();
   const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
-  assert(html.indexOf('CLASSIFICATION 8: CSS COMPOSITING / Z-INDEX ISSUE') !== -1, 'Chart canvas z-index (3) above overlay (auto=0) classifies as CSS COMPOSITING / Z-INDEX ISSUE (8)');
+  assert(html.indexOf('CLASSIFICATION 8') === -1, 'Overlay "auto" vs plot canvas "1" — not proven comparable — does NOT trigger CLASSIFICATION 8');
+  assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Falls through correctly to CLASSIFICATION 3 since the drawable is painted and in-view and nothing else is flagged');
+}
+
+console.log('\n[13b] TEST B — genuine same-context failure (both explicit numeric z-index, plot ABOVE overlay) -> CLASSIFICATION 8 DOES fire');
+{
+  // Both sides are explicit integers this time — a real, comparable case.
+  // Overlay explicitly "2", plot canvas explicitly "5": plot genuinely above.
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 1, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 360, canvasCssHeight: 240, canvasPhysicalWidth: 360, canvasPhysicalHeight: 240,
+        paintHistory: [],
+        entries: [ { id: 'a', type: 'FVG', layer: 'fvg', x: 100, y: 60, painted: true, insideViewport: true, reason: null } ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '2', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [ { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '5' } ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 8: CSS COMPOSITING / Z-INDEX ISSUE') !== -1, 'Both z-index values explicit (2 vs 5) and plot genuinely higher -> CLASSIFICATION 8 correctly still fires');
+  assert(html.indexOf('(explicit)') !== -1, 'Evidence text confirms both values were treated as explicit, comparable integers, not "auto" stand-ins');
+}
+
+console.log('\n[13c] TEST C — genuine same-context safe case (both explicit numeric z-index, overlay ABOVE plot) -> CLASSIFICATION 8 does NOT fire');
+{
+  // Both explicit integers again, but this time overlay is higher —
+  // the correct, intended configuration — must not fire.
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 1, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 360, canvasCssHeight: 240, canvasPhysicalWidth: 360, canvasPhysicalHeight: 240,
+        paintHistory: [],
+        entries: [ { id: 'a', type: 'FVG', layer: 'fvg', x: 100, y: 60, painted: true, insideViewport: true, reason: null } ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '5', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [ { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '2' } ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 8') === -1, 'Overlay explicitly higher (5) than plot canvas (2) — genuinely safe — does NOT trigger CLASSIFICATION 8');
+  assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Falls through correctly to CLASSIFICATION 3');
 }
 
 console.log('\n[14] FIX 1 — multi-canvas scenario (plot pane 830x412 + narrow axis-label canvas), overlay 830x412 -> NOT misaligned');
