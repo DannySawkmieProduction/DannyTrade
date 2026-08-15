@@ -310,6 +310,30 @@
       classBlock = '<div style="margin-top:10px;color:#8D93A6">Classification unavailable — no paint has occurred yet.</div>';
     }
 
+    // ---- SYNC TRACE (dev) — investigation-only, this turn ----
+    // Purely additive: reads chart-renderer.js's new getSyncTrace() and
+    // prints it verbatim. Does not compute, interpret, or alter anything
+    // — no classification logic touched, no existing section changed.
+    var syncTraceBlock = '';
+    var syncTrace = state.renderer && typeof state.renderer.getSyncTrace === 'function'
+      ? state.renderer.getSyncTrace() : null;
+    if(syncTrace && syncTrace.length){
+      syncTraceBlock += '<div style="margin-top:10px;padding-top:8px;border-top:1px dashed #565C70"><b style="color:#8D93A6">SYNC TRACE (dev)</b> <span style="color:#565C70">— last ' + syncTrace.length + ' syncOverlayToPlotCanvas() calls</span></div>';
+      syncTrace.forEach(function(s){
+        var branchColor = s.branch === 'plotRect' ? '#35D399' : '#FFA53C';
+        syncTraceBlock += '<div style="margin-top:5px;padding:5px 7px;border:1px solid #232838;border-radius:6px;font-size:10px">' +
+          '<div>SYNC #' + s.n + ' · ' + escapeHtml(s.reason) + ' &nbsp; gen:' + s.generation + ' &nbsp; branch: <span style="color:' + branchColor + '">' + s.branch + '</span></div>' +
+          '<div style="margin-top:2px;color:#8D93A6">container: ' + s.containerClientWidth + '×' + s.containerClientHeight +
+            ' &nbsp; offsetParent: ' + (s.offsetParentExists ? 'yes' : 'NO') + '/' + (s.offsetParentHasGBCR ? 'hasGBCR' : 'noGBCR') + '</div>' +
+          '<div style="margin-top:2px;color:#8D93A6">plotRect: ' + (s.plotRectFound ? (Math.round(s.plotRect.width) + '×' + Math.round(s.plotRect.height) + ' @ (' + Math.round(s.plotRect.left) + ',' + Math.round(s.plotRect.top) + ')') : 'null') + '</div>' +
+          '<div style="margin-top:2px;color:#8D93A6">final: ' + Math.round(s.finalCssWidth) + '×' + Math.round(s.finalCssHeight) + ' @ (' + Math.round(s.finalCssLeft) + ',' + Math.round(s.finalCssTop) + ')</div>' +
+          (s.candidates && s.candidates.length ? '<div style="margin-top:2px;color:#565C70">candidates: ' + s.candidates.map(function(c){ return Math.round(c.width) + '×' + Math.round(c.height); }).join(', ') + '</div>' : '<div style="margin-top:2px;color:#565C70">candidates: none found</div>') +
+          '</div>';
+      });
+    } else {
+      syncTraceBlock = '<div style="margin-top:10px;padding-top:8px;border-top:1px dashed #565C70;color:#8D93A6"><b>SYNC TRACE (dev)</b><br>No sync trace recorded yet.</div>';
+    }
+
     var rows = '';
     if(overlayManager){
       var counts = overlayManager.getAllCounts();
@@ -440,6 +464,7 @@
       '<div style="margin-top:4px;color:' + (DC.lastRenderError ? '#FF5C6C' : '#8D93A6') + '">Last error: ' + lastError + '</div>' +
       layoutBlock +
       classBlock +
+      syncTraceBlock +
       rows +
       mobileSummary +
       geomRows +

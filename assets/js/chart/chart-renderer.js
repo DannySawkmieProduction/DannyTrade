@@ -624,6 +624,32 @@
     // deferred callback can never overwrite a NEWER resize()'s already-
     // current geometry (e.g. two setCandles() calls in quick succession).
     let resizeGeneration = 0;
+    // Investigation-only instrumentation (this turn) — bounded trace of every
+    // syncOverlayToPlotCanvas() invocation, so a live device can show WHICH of
+    // the two remaining hypotheses (A: getPlotCanvasRect() genuinely still
+    // measures ~846 because Lightweight Charts hasn't split its canvases yet,
+    // vs B: syncOverlayToPlotCanvas() is silently taking its fallback branch)
+    // is actually happening, without guessing. Records ONLY what the existing
+    // logic already computes — adds no new computation, changes no branch,
+    // no positioning value, no timing. Capped at SYNC_TRACE_MAX entries so it
+    // cannot grow unbounded across a long session.
+    const syncTrace = [];
+    const SYNC_TRACE_MAX = 20;
+    let syncCallCount = 0;
+
+    /** Investigation-only — enumerates the SAME canvases getPlotCanvasRect()
+     *  scans (container.querySelectorAll('canvas')) but returns every
+     *  candidate's own geometry instead of just the winner, purely for the
+     *  sync trace below. Does not affect, call, or duplicate the actual
+     *  selection algorithm in getPlotCanvasRect() — that function and its
+     *  logic are untouched. */
+    function listCanvasCandidatesForTrace(){
+      if(!container.querySelectorAll) return [];
+      return Array.from(container.querySelectorAll('canvas')).map(function(el){
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height, area: r.width * r.height };
+      });
+    }
 
     /** Phase 6 fix — finds the chart library's own plotting-pane canvas
      *  among every <canvas> it created inside `container`. Lightweight
@@ -659,17 +685,30 @@
      *  Falls back to the container's own size only if no plot canvas can
      *  be found yet or the overlay has no positioned ancestor to measure
      *  offsets against — unchanged from before, never throws. */
-    function syncOverlayToPlotCanvas(){
+    function syncOverlayToPlotCanvas(reason){
+      syncCallCount += 1;
+      const myGenerationAtSync = resizeGeneration; // observational only — recorded for the trace, not used in any decision here
       const w = container.clientWidth, h = container.clientHeight;
       const dpr = window.devicePixelRatio || 1;
+      // Investigation-only — captured BEFORE the existing branch logic runs,
+      // purely to record what it's about to decide from; does not change
+      // the decision itself.
+      const candidatesForTrace = listCanvasCandidatesForTrace();
       const plotRect = getPlotCanvasRect();
+      const offsetParentExists = !!overlayCanvas.offsetParent;
+      const offsetParentHasGBCR = !!(overlayCanvas.offsetParent && overlayCanvas.offsetParent.getBoundingClientRect);
+      let offsetParentRectForTrace = null;
+
       let cssLeft = 0, cssTop = 0, cssWidth = w, cssHeight = h;
+      let branch = 'fallback';
       if(plotRect && overlayCanvas.offsetParent && overlayCanvas.offsetParent.getBoundingClientRect){
         const parentRect = overlayCanvas.offsetParent.getBoundingClientRect();
+        offsetParentRectForTrace = { left: parentRect.left, top: parentRect.top, width: parentRect.width, height: parentRect.height };
         cssLeft = plotRect.left - parentRect.left;
         cssTop = plotRect.top - parentRect.top;
         cssWidth = plotRect.width;
         cssHeight = plotRect.height;
+        branch = 'plotRect';
       }
 
       overlayCanvas.style.left = cssLeft + 'px';
@@ -687,6 +726,26 @@
       overlayCanvas.width = Math.round(cssWidth * dpr);
       overlayCanvas.height = Math.round(cssHeight * dpr);
       overlayCssWidth = cssWidth; overlayCssHeight = cssHeight;
+
+      // Investigation-only — record the trace entry AFTER applying, so
+      // "final*" fields reflect exactly what was actually assigned above.
+      syncTrace.push({
+        n: syncCallCount,
+        reason: reason || 'unspecified',
+        generation: myGenerationAtSync,
+        containerClientWidth: w,
+        containerClientHeight: h,
+        offsetParentExists,
+        offsetParentHasGBCR,
+        offsetParentRect: offsetParentRectForTrace,
+        plotRectFound: !!plotRect,
+        plotRect: plotRect ? { left: plotRect.left, top: plotRect.top, width: plotRect.width, height: plotRect.height } : null,
+        candidates: candidatesForTrace,
+        branch,
+        finalCssLeft: cssLeft, finalCssTop: cssTop, finalCssWidth: cssWidth, finalCssHeight: cssHeight,
+        at: Date.now()
+      });
+      if(syncTrace.length > SYNC_TRACE_MAX) syncTrace.shift();
     }
 
     /** Phase 6 fix — root cause: the immediate sync inside resize() measures
@@ -715,7 +774,7 @@
         if(destroyed || generation !== resizeGeneration) return; // superseded by a newer resize() — stale, skip
         requestAnimationFrame(function(){
           if(destroyed || generation !== resizeGeneration) return; // superseded — stale, skip
-          syncOverlayToPlotCanvas();
+          syncOverlayToPlotCanvas('post-layout');
           scheduleDraw(); // repaint so drawable geometry reflects the corrected overlay size immediately
         });
       });
@@ -734,7 +793,7 @@
 
       // Existing synchronous behavior — preserved exactly: measure and
       // align the overlay to the plot pane immediately, same as before.
-      syncOverlayToPlotCanvas();
+      syncOverlayToPlotCanvas('immediate');
 
       scheduleDraw();
       emitter.emit('resize', { width: w, height: h, state: getState() });
@@ -1019,6 +1078,13 @@
       // z-index/visibility/opacity) for the overlay canvas and any canvas
       // element(s) the chart library created. See getCanvasLayoutDiagnostics().
       getCanvasLayoutDiagnostics,
+      // Investigation-only (this turn) — bounded trace of every
+      // syncOverlayToPlotCanvas() invocation (immediate + post-layout), for
+      // distinguishing hypothesis A (Lightweight Charts hasn't split its
+      // canvases yet when measured) from B (the fallback branch is being
+      // taken). See syncOverlayToPlotCanvas() above. Oldest-first, capped
+      // at SYNC_TRACE_MAX entries.
+      getSyncTrace: () => syncTrace.slice(),
       on: emitter.on, off: emitter.off, once: emitter.once, emit: emitter.emit
     };
   }
