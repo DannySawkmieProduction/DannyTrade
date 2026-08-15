@@ -122,7 +122,15 @@ function makeFakeStudioInstance(){
     annotationCount: 18, // sum of all layer counts above
     visibleLayers: ['candlesticks', 'marketStructure', 'liquidity', 'orderBlocks', 'fvg', 'premiumDiscount', 'tradeLevels']
   };
-  const renderer = { getState: () => rendererState };
+  const drawableDiagnostics = {
+    generatedAt: Date.now(), dpr: 2, canvasCssWidth: 360, canvasCssHeight: 240,
+    canvasPhysicalWidth: 720, canvasPhysicalHeight: 480,
+    entries: [
+      { id: 'fvg1', type: 'FVG', subtype: 'bullish', layer: 'fvg', index: 3, startTime: 100, price1: 50, x: 120, y: 60, painted: true, insideViewport: true, reason: null },
+      { id: 'ob1', type: 'ORDER_BLOCK', subtype: 'bullish', layer: 'orderBlocks', index: 5, startTime: 110, price1: 55, x: null, y: null, painted: false, insideViewport: false, reason: "timeToX(startTime) returned null/non-finite — startTime not inside the chart's current visible time range" }
+    ]
+  };
+  const renderer = { getState: () => rendererState, getDrawableDiagnostics: () => drawableDiagnostics };
   const lastAnalysis = {
     swings: [1, 2, 3], structureEvents: [1, 2],
     liquidity: [1, 2], orderBlocks: [1, 2, 3],
@@ -186,6 +194,21 @@ console.log('\n[4] No studio instance yet — panel says so instead of showing s
   mobileDiagBtn.click();
   const panel = doc.body.children.find(c => c.id === 'dtChartDiagnostics');
   assert(panel.innerHTML.indexOf('Studio not initialized yet') !== -1, 'Panel honestly reports "not initialized" rather than fabricating numbers');
+}
+
+console.log('\n[5] Drawable Geometry section shows real per-drawable values, including WHY a drawable failed to paint');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const panel = doc.body.children.find(c => c.id === 'dtChartDiagnostics');
+  const html = panel.innerHTML;
+
+  assert(html.indexOf('Drawable Geometry') !== -1, 'Drawable Geometry section is present');
+  assert(html.indexOf('canvas 360×240px, dpr 2') !== -1, 'Canvas dimensions/dpr are read from getDrawableDiagnostics(), not hardcoded');
+  assert(html.indexOf('120') !== -1 && html.indexOf('60') !== -1, 'Painted drawable shows its real X/Y (120, 60)');
+  assert(html.indexOf('timeToX') !== -1, 'Failed drawable\'s reason (timeToX out of range) is surfaced in the row tooltip');
+  assert(html.indexOf('1 drawable(s) failed to paint') !== -1, 'Summary line counts the one failed-to-paint drawable');
 }
 
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
