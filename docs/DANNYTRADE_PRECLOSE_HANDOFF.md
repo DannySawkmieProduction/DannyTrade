@@ -234,3 +234,82 @@ This is decision-support only. No order placement, no auto-trading
 code exists anywhere in this phase or any prior phase. The DECISION
 is always shown with its REASONS, ENTRY CONDITION, INVALIDATION, and
 NO-TRADE CONDITION — never a bare CALL/PUT label with no explanation.
+
+---
+
+## Phase 2 addendum — live verification attempt (this session)
+
+**No live authenticated FYERS request was made.** This environment has
+no network access to any FYERS domain and no access to your deployed
+Cloudflare Worker or credentials — confirmed again this session, not
+assumed.
+
+### New conflicting evidence found and resolved without guessing
+
+A second, independent, dated (Feb 2025) real-usage source was found
+containing a literal URL constant:
+```
+FYERS_OPTION_CHAIN_API = "https://api.fyers.in/v3/data/options-chain"
+```
+This conflicts with the previously-implemented endpoint
+(`https://api-t1.fyers.in/data/options-chain-v3`) on both host and
+path. Neither source is the official rendered docs page — that 404'd
+again this session.
+
+**Resolution — a fallback, not a guess:** `worker/fyers.js`'s
+`handleFyersOptionChain()` now tries both candidate URLs in order:
+1. `https://api-t1.fyers.in/data/options-chain-v3`
+2. `https://api.fyers.in/v3/data/options-chain`
+
+It falls through to the second **only on an HTTP 404** (path doesn't
+exist) — never on 401/403/429/other statuses, since those mean the
+path exists and something else is wrong; falling through in that case
+would mask a real auth/rate-limit problem as a false "wrong endpoint."
+Every response now includes `fyers.endpointUsed`, so your **very
+first real deployment attempt** tells you definitively which
+candidate is correct — no further guessing needed, and no code change
+required afterward regardless of which one wins (both are already
+implemented).
+
+Verified via `tests/worker-optionchain-endpoint.test.js` (new, 17
+tests, mocking `fetch`/`env` — no real network): candidate-A success
+(no fallback attempted), 404→fallback→candidate-B success, 401 stops
+immediately (no fallback), 429 stops immediately, both-404 honest
+failure (never a fabricated success), and request-parameter
+passthrough correctness.
+
+### Test results (this session, final)
+
+| Suite | Result |
+|---|---|
+| `tests/worker-optionchain-endpoint.test.js` (new) | 17/17 |
+| Everything from the prior session | 467/467 (unchanged) |
+| **Total** | **484/484, 0 failed** |
+
+`node --check` clean on `worker/fyers.js` and the new test file.
+Protected-file audit re-run: zero touches to any protected file this
+session. Script-order/duplicate audit re-run on `studio.html`: clean,
+unchanged (not touched this session).
+
+### Deployment verdict
+
+**YELLOW — implementation ready, API/field verification still
+outstanding.**
+
+Not GREEN: no real authenticated Option Chain request has ever been
+made against either candidate endpoint in any session of this
+project — I have no means to do so in this environment.
+Not RED: nothing is known to be broken; the implementation is
+complete, tested against realistic mocked scenarios, resilient to
+either candidate endpoint being correct, and will report back exactly
+which one works the moment you deploy and open the Pre-Close panel
+for real.
+
+**To move to GREEN:** deploy, open the Pre-Close panel for NIFTY on a
+real device with an authenticated FYERS session, and check the
+response (or Worker logs) for `fyers.endpointUsed` and the actual
+field names present in `data.optionsChain[]` — particularly whether
+`greeksAvailable` comes back `true`. If any field name differs from
+`option-chain-provider.js`'s `FIELD_CANDIDATES` list, that list is the
+only place to update — confirmed in the architecture, not something
+that needs rediscovering.
