@@ -252,11 +252,22 @@
     // no-ops rather than breaking chart boot. The panel itself never
     // computes session state — it reads MarketSession.getSession() at
     // open() time via the current symbol from orchestrator.getState().
-    (function wireCasPanel(){
-      if(!DC.CasPanel || typeof DC.CasPanel.mount !== 'function') return;
-      var casBtn = document.getElementById('casEntryBtn');
+    // cas-panel.js itself is completely untouched by the multi-
+    // instrument upgrade — only this wiring block changed, to also mute
+    // the button for a non-CAS-eligible instrument (cleaner UX per the
+    // multi-instrument spec) instead of leaving it always-active.
+    var casBtn = document.getElementById('casEntryBtn');
+    var casPanel = null;
+    function updateCasButtonState(symbol){
       if(!casBtn) return;
-      var casPanel = DC.CasPanel.mount({
+      var MarketSession = window.DannyChart && window.DannyChart.MarketSession;
+      var eligible = !!(MarketSession && MarketSession.isCasEligible(symbol));
+      casBtn.style.opacity = eligible ? '1' : '0.45';
+      casBtn.title = eligible ? 'Closing Auction Session info' : 'CAS not applicable to this instrument';
+    }
+    (function wireCasPanel(){
+      if(!DC.CasPanel || typeof DC.CasPanel.mount !== 'function' || !casBtn) return;
+      casPanel = DC.CasPanel.mount({
         getProviderName: function(){
           return (window.AIService && typeof window.AIService.getProviderName === 'function')
             ? window.AIService.getProviderName() : null;
@@ -273,6 +284,33 @@
       });
     })();
 
+    // Multi-instrument upgrade — mount the instrument selector, wired
+    // to the toolbar's existing symbol label. Selecting an instrument
+    // calls orchestrator.loadSymbol(), the SAME existing pipeline a
+    // manual symbol change already used (timeframeManager.setSymbol()
+    // -> new candles/annotations/decision-panel/AI context, replacing
+    // the previous instrument's data — see timeframe-manager.js's own
+    // request-id superseding, unchanged here). Additive only; no-ops
+    // if the module or trigger element are missing.
+    (function wireInstrumentSelector(){
+      if(!DC.InstrumentSelector || typeof DC.InstrumentSelector.mount !== 'function') return;
+      var triggerEl = document.getElementById('chartSymbol');
+      if(!triggerEl) return;
+      DC.InstrumentSelector.mount({
+        triggerEl: triggerEl,
+        getCurrentId: function(){
+          var s = orchestrator.getState();
+          return s ? s.symbol : null;
+        },
+        onSelect: function(id){
+          if(!id) return;
+          orchestrator.loadSymbol(id);
+          updateCasButtonState(id);
+        }
+      });
+      updateCasButtonState('NIFTY'); // initial default symbol — see studio-chart-init's config.symbol default
+    })();
+
     // OpenRouter integration — mount the AI Provider UI once the
     // chart itself is up.
     var aiPanel = document.getElementById('aiConnectionsPanel');
@@ -282,6 +320,23 @@
 
     orchestrator.initialize().then(function(ok){
       if(!ok) console.warn('[StudioBootstrap] Studio chart initialized with one or more failed modules — see prior console warnings for which.');
+
+      // Multi-instrument upgrade — surface a genuine data-load failure
+      // (e.g. selecting an MCX commodity with no active contract
+      // configured yet — see fyers-service.js's toFyersSymbol()) using
+      // the SAME analysis banner mechanism already used for AI failures
+      // above, instead of leaving the chart silently blank with no
+      // explanation. Wired here (post-initialize) since the renderer
+      // doesn't exist until initialize() completes. 'timeframeError'
+      // already carries a clear message from timeframe-manager.js —
+      // this never invents its own wording.
+      var s = orchestrator.getState();
+      if(s && s.renderer && typeof s.renderer.on === 'function'){
+        s.renderer.on('timeframeError', function(payload){
+          var msg = (payload && payload.error) || 'Could not load data for this instrument.';
+          showAnalysisBanner(msg);
+        });
+      }
     });
   }
 

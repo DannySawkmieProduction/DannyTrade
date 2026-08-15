@@ -82,7 +82,13 @@
   const CLOSING_METHOD = Object.freeze({
     CAS: 'CAS',           // official close struck by the closing auction
     VWAP: 'VWAP',         // official close = last-30-minute VWAP (unchanged legacy method)
-    INDEX_VALUE: 'INDEX_VALUE' // indices: no auction/VWAP close concept — last computed index value
+    INDEX_VALUE: 'INDEX_VALUE', // indices: no auction/VWAP close concept — last computed index value
+    // Multi-instrument upgrade — additive: MCX commodity futures have
+    // neither a CAS auction nor an equity VWAP close; the closing
+    // price is simply the last traded price of the day on MCX. Kept as
+    // its own explicit label rather than reusing VWAP/INDEX_VALUE,
+    // which would misdescribe how the close is actually determined.
+    COMMODITY_LTP: 'COMMODITY_LTP'
   });
 
   const CAS_SUB_PHASE = Object.freeze({
@@ -103,12 +109,26 @@
      kind: 'INDEX'    — no CAS, no VWAP-close concept; CLOSING_METHOD.INDEX_VALUE
      kind: 'FNO_STOCK' — CAS-eligible (Category I)
      kind: 'STOCK'     — not CAS-eligible (Category II); VWAP close
+     kind: 'MCX_COMMODITY' — MCX commodity future; not CAS-eligible, not
+       an NSE/BSE equity-hours instrument at all — see the MCX session
+       branch in getSession() below. Never defaults here — must be
+       explicitly listed, same conservative rule as everything else in
+       this table.
+
+     Multi-instrument upgrade (additive) — SENSEX and the three MCX
+     commodities below were added to support DannyTrade's expanded
+     instrument selector; RELIANCE/HDFCBANK/NIFTY/BANKNIFTY entries
+     above are byte-for-byte unchanged.
   --------------------------------------------------------------- */
   const SYMBOL_CLASSIFICATION = {
     NIFTY:     { kind: 'INDEX' },
     BANKNIFTY: { kind: 'INDEX' },
     RELIANCE:  { kind: 'FNO_STOCK' },
-    HDFCBANK:  { kind: 'FNO_STOCK' }
+    HDFCBANK:  { kind: 'FNO_STOCK' },
+    SENSEX:      { kind: 'INDEX' },
+    GOLD_MINI:   { kind: 'MCX_COMMODITY' },
+    CRUDE_OIL:   { kind: 'MCX_COMMODITY' },
+    NATURAL_GAS: { kind: 'MCX_COMMODITY' }
   };
 
   // Conservative default for any symbol not in the table above: treat
@@ -127,6 +147,12 @@
 
   function isIndex(symbol){
     return classify(symbol).kind === 'INDEX';
+  }
+
+  // Multi-instrument upgrade — additive helper, same pattern as
+  // isCasEligible()/isIndex() above.
+  function isMcxCommodity(symbol){
+    return classify(symbol).kind === 'MCX_COMMODITY';
   }
 
   /* ---------------------------------------------------------------
@@ -161,6 +187,22 @@
   const MIN_NONCAS_CONTINUOUS_END = 15 * 60 + 30; // 15:30 — non-CAS stocks & indices, unchanged
   const MIN_POST_CLOSE_END = 16 * 60;        // 16:00 — end of post-close window (cash 15:50–16:00 folded in)
 
+  // Multi-instrument upgrade — additive: MCX (commodities) trading
+  // hours are entirely separate from NSE/BSE equity hours and must
+  // NOT reuse the equity boundaries above. Verified (not invented)
+  // against multiple current MCX/broker sources at implementation
+  // time: non-agri commodities (which Gold Mini, Crude Oil, and
+  // Natural Gas all are) trade 09:00–23:30 IST. NOTE: that evening
+  // close is SEASONAL — it reverts to 23:55 IST during India's winter
+  // (roughly early November to early March, when the US is off
+  // Daylight Saving Time) and back to 23:30 when US DST resumes
+  // (~second Sunday of March). This module models the 23:30 (DST)
+  // case, current as of implementation; the 23:55 reversion is a
+  // known, documented limitation — see LIMITATIONS at the top of this
+  // file — not silently wrong, just not date-driven yet.
+  const MIN_MCX_START = 9 * 60;              // 09:00
+  const MIN_MCX_END = 23 * 60 + 30;          // 23:30 (see seasonal note above)
+
   /**
    * The authoritative session read for one symbol at one instant.
    * @param {Date} [date] - defaults to now
@@ -185,6 +227,38 @@
     const { weekday, minutesOfDay } = kolkataParts(d);
     const casEligible = isCasEligible(symbol);
     const indexSymbol = isIndex(symbol);
+    const mcxSymbol = isMcxCommodity(symbol);
+
+    // Multi-instrument upgrade — additive: MCX commodities get their
+    // OWN, separate branch with their own hours (09:00–23:30, see
+    // MIN_MCX_START/MIN_MCX_END above) and their own simplified
+    // session model — they never fall through into the equity
+    // PRE_OPEN/CONTINUOUS/CAS/POST_CLOSE machinery below, so an MCX
+    // instrument is never incorrectly reported CLOSED just because
+    // NSE/BSE equity hours have ended. No CAS concept applies
+    // (casEligible is always false for MCX_COMMODITY — see
+    // isCasEligible()'s FNO_STOCK-only check above, unchanged).
+    if (mcxSymbol) {
+      const mcxSession = isWeekend(weekday)
+        ? SESSION.CLOSED
+        : (minutesOfDay < MIN_MCX_START || minutesOfDay >= MIN_MCX_END)
+          ? SESSION.CLOSED
+          : SESSION.CONTINUOUS;
+      return {
+        symbol: symbol || null,
+        session: mcxSession,
+        casEligible: false,
+        isIndex: false,
+        closingMethod: CLOSING_METHOD.COMMODITY_LTP,
+        continuousTradingEnd: '23:30',
+        auctionEnd: null,
+        casSubPhase: null,
+        officialClose: null,
+        officialCloseSource: 'NOT_AVAILABLE_FROM_CURRENT_DATA_SOURCE',
+        timezone: TIMEZONE,
+        asOf: d.toISOString()
+      };
+    }
 
     const closingMethod = indexSymbol
       ? CLOSING_METHOD.INDEX_VALUE
@@ -271,6 +345,7 @@
     CAS_SUB_PHASE,
     isCasEligible,
     isIndex,
+    isMcxCommodity,
     getSession,
     isMarketOpen
   };
