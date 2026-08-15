@@ -65,6 +65,31 @@
     return isNaN(n) ? 0 : n;
   }
 
+  /** FIX 1 — mirrors chart-renderer.js's getPlotCanvasRect() selection
+   *  logic exactly: among every <canvas> the chart library created, the
+   *  real plotting-pane canvas is reliably the LARGEST-AREA one —
+   *  TradingView's price-scale and time-scale axis-label canvases are
+   *  narrow strips by construction (proven against live measurements:
+   *  an ~830×412 plot pane vs. much smaller axis-label strips). Prior to
+   *  this, classifyRendering() compared the overlay against EVERY canvas
+   *  in layoutDiag.chartCanvases via .some() — including those narrow
+   *  strips — which produced a false CLASSIFICATION 6 even when the
+   *  overlay was correctly aligned to the real plot pane. This selects
+   *  the SAME one canvas chart-renderer.js's own alignment fix aligns
+   *  the overlay to, so the classifier and the actual alignment logic
+   *  agree on what "the chart canvas" means. Diagnostics-only — reads
+   *  layoutDiag.chartCanvases (already-measured data), computes nothing
+   *  chart-renderer.js doesn't already measure. */
+  function selectPlotCanvas(chartCanvases){
+    if(!chartCanvases || !chartCanvases.length) return null;
+    var best = null, bestArea = -1;
+    chartCanvases.forEach(function(c){
+      var area = c.rect.width * c.rect.height;
+      if(area > bestArea){ bestArea = area; best = c; }
+    });
+    return best;
+  }
+
   /** Phase 6 — evidence-based classification, computed entirely from
    *  values already measured by chart-renderer.js's own instrumentation
    *  (drawDiag from getDrawableDiagnostics(), layoutDiag from
@@ -146,29 +171,32 @@
 
     var chartCanvases = layoutDiag.chartCanvases || [];
     if(chartCanvases.length){
-      var misaligned = chartCanvases.some(function(c){
-        return Math.abs(c.rect.width - ov.rect.width) > 2 || Math.abs(c.rect.height - ov.rect.height) > 2 ||
-               Math.abs(c.rect.left - ov.rect.left) > 2 || Math.abs(c.rect.top - ov.rect.top) > 2;
-      });
+      // FIX 1 — compare against ONE selected canvas (the largest-area
+      // plot pane, via selectPlotCanvas() above), not every canvas the
+      // library created. See selectPlotCanvas()'s comment for why.
+      var plotCanvas = selectPlotCanvas(chartCanvases);
+      var misaligned = plotCanvas && (
+        Math.abs(plotCanvas.rect.width - ov.rect.width) > 2 || Math.abs(plotCanvas.rect.height - ov.rect.height) > 2 ||
+        Math.abs(plotCanvas.rect.left - ov.rect.left) > 2 || Math.abs(plotCanvas.rect.top - ov.rect.top) > 2
+      );
       if(misaligned){
-        var mm = chartCanvases[0];
         return {
           code: 6, label: 'OVERLAY CANVAS MISALIGNED',
           evidence: [
             'Overlay rect: left=' + Math.round(ov.rect.left) + ' top=' + Math.round(ov.rect.top) + ' w=' + Math.round(ov.rect.width) + ' h=' + Math.round(ov.rect.height) + '.',
-            'Chart canvas rect: left=' + Math.round(mm.rect.left) + ' top=' + Math.round(mm.rect.top) + ' w=' + Math.round(mm.rect.width) + ' h=' + Math.round(mm.rect.height) + '.'
+            'Plot-pane canvas rect (largest-area of ' + chartCanvases.length + ' canvas(es) found — the same one chart-renderer.js aligns to): left=' + Math.round(plotCanvas.rect.left) + ' top=' + Math.round(plotCanvas.rect.top) + ' w=' + Math.round(plotCanvas.rect.width) + ' h=' + Math.round(plotCanvas.rect.height) + '.'
           ]
         };
       }
 
       var overlayZ = zIndexNum(ov.zIndex);
-      var maxChartZ = Math.max.apply(null, chartCanvases.map(function(c){ return zIndexNum(c.zIndex); }));
-      if(maxChartZ > overlayZ){
+      var plotZ = plotCanvas ? zIndexNum(plotCanvas.zIndex) : 0;
+      if(plotZ > overlayZ){
         return {
           code: 8, label: 'CSS COMPOSITING / Z-INDEX ISSUE',
           evidence: [
             'Overlay canvas computed z-index: ' + ov.zIndex + ' (treated as ' + overlayZ + ').',
-            'Chart-internal canvas computed z-index: ' + maxChartZ + ' — higher than the overlay, so the chart\'s own canvas paints on top of the annotation overlay.'
+            'Plot-pane canvas computed z-index: ' + plotCanvas.zIndex + ' (treated as ' + plotZ + ') — higher than the overlay, so the chart\'s own canvas paints on top of the annotation overlay.'
           ]
         };
       }
@@ -368,11 +396,23 @@
       geomRows += '<div style="margin-top:2px;color:#565C70;font-size:9.5px">Swipe sideways on the table if columns are cut off. Tap/hold a row for its full reason text.</div>';
       var failCount = drawDiag.entries.filter(function(e){ return !e.painted; }).length;
       var offViewCount = drawDiag.entries.filter(function(e){ return e.painted && !e.insideViewport; }).length;
-      if(failCount || offViewCount){
-        geomRows += '<div style="margin-top:4px;color:#FFA53C">' +
-          (failCount ? failCount + ' drawable(s) failed to paint (see row tooltip for reason). ' : '') +
-          (offViewCount ? offViewCount + ' drawable(s) painted but landed outside the visible canvas area.' : '') +
-          '</div>';
+      if(failCount){
+        geomRows += '<div style="margin-top:4px;color:#FFA53C">' + failCount + ' drawable(s) failed to paint (see row tooltip for reason).</div>';
+      }
+      if(offViewCount){
+        // FIX 2 — informational, not alarming. A drawable can correctly
+        // resolve a real, valid coordinate that simply falls outside the
+        // CURRENTLY panned/zoomed view: timeToCoordinate()/priceToCoordinate()
+        // return the true extrapolated position (e.g. a negative X) rather
+        // than null when a candle/price is off-screen but still within the
+        // chart's data range (see chart-renderer.js — unchanged), and canvas
+        // clipping silently discards the off-screen portion. That is expected
+        // behavior, not a rendering defect, so this line is deliberately
+        // neutral-colored instead of the orange/red used for actual failures
+        // above. The underlying data (painted:true, insideViewport:false) is
+        // unchanged — only this summary's wording/color differs.
+        geomRows += '<div style="margin-top:4px;color:#8D93A6">' + offViewCount +
+          ' drawable(s) currently outside the visible plot area — most likely because the chart is panned/zoomed away from that candle right now, not a rendering failure. A valid coordinate was computed; it is simply off-screen at the moment.</div>';
       }
     } else if(drawDiag){
       geomRows = '<div style="margin-top:12px;color:#8D93A6"><b>Full Geometry</b> — last paint recorded 0 drawables.</div>';
