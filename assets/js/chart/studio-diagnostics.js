@@ -152,6 +152,40 @@
     }
 
     if(inView.length === 0){
+      // CLASSIFICATION 8 — re-derived per investigation: numeric z-index
+      // comparison alone (even "both explicit") cannot prove two elements
+      // share a stacking context (getCanvasLayoutDiagnostics() has no
+      // ancestor-chain data to establish that), so it must never be an
+      // INDEPENDENT trigger. It is only ever considered HERE, as a
+      // possible EXPLANATION for evidence of failure that already exists
+      // independently of any z-index number: every painted drawable
+      // landed outside the canvas (inView.length === 0, painted.length > 0
+      // — i.e. coordinates resolved fine, drawing was attempted, but
+      // nothing is inside the visible area). If that genuine-failure
+      // evidence exists AND both z-index values are explicit integers
+      // with the plot canvas higher, CLASSIFICATION 8 offers a more
+      // specific diagnosis than the generic CLASSIFICATION 2 below.
+      // Without that failure evidence, z-index numbers alone — however
+      // "unfavorable" — can never reach this branch at all, because
+      // painted:true + insideViewport:true drawables mean inView.length
+      // is non-zero and execution never enters this block. This is what
+      // makes the CASE A / CASE B false positives structurally
+      // impossible now, not just unlikely under the current data.
+      var plotCanvasForFailure = (layoutDiag && layoutDiag.chartCanvases && layoutDiag.chartCanvases.length)
+        ? selectPlotCanvas(layoutDiag.chartCanvases) : null;
+      if(layoutDiag && plotCanvasForFailure &&
+         isExplicitZIndex(layoutDiag.overlay.zIndex) && isExplicitZIndex(plotCanvasForFailure.zIndex) &&
+         zIndexNum(plotCanvasForFailure.zIndex) > zIndexNum(layoutDiag.overlay.zIndex)){
+        return {
+          code: 8, label: 'CSS COMPOSITING / Z-INDEX ISSUE',
+          evidence: [
+            painted.length + ' drawable(s) resolved valid coordinates (paint was attempted), but NONE landed inside the current canvas (' +
+              (drawDiag.canvasCssWidth || '?') + '×' + (drawDiag.canvasCssHeight || '?') + 'px) — genuine rendering-failure evidence, not inferred from z-index alone.',
+            'Overlay canvas computed z-index: ' + layoutDiag.overlay.zIndex + ' (explicit).',
+            'Plot-pane canvas computed z-index: ' + plotCanvasForFailure.zIndex + ' (explicit) — higher than the overlay, and both are explicit, comparable integers, offering a plausible stacking explanation for the failure above.'
+          ]
+        };
+      }
       return {
         code: 2, label: 'COORDINATES OUT OF VIEW',
         evidence: [
@@ -163,9 +197,12 @@
     }
 
     // From here on: at least one drawable resolved valid coordinates AND
-    // landed inside the canvas — the drawing pipeline itself executed
-    // correctly. Any remaining invisibility must be downstream of it
-    // (CSS/canvas layout), so check the real DOM facts next.
+    // landed inside the canvas — this is itself direct evidence against a
+    // compositing failure (see the CLASSIFICATION 8 comment above), so it
+    // is never reconsidered past this point, regardless of any z-index
+    // value. Any remaining invisibility must be downstream of it
+    // (CSS/canvas layout other than stacking — display/visibility/opacity,
+    // or geometric misalignment), so check the real DOM facts next.
     if(!layoutDiag){
       return {
         code: 9, label: 'OTHER',
@@ -204,45 +241,8 @@
           ]
         };
       }
-
-      // CLASSIFICATION 8 — evidence-based, not a bare numeric comparison.
-      // Proven by investigation: #lwChartContainer (the plot canvas's
-      // ancestor) establishes no CSS stacking context of its own (no
-      // z-index set alongside its position), so a z-indexed descendant's
-      // stacking position is resolved against whatever ANCESTOR stacking
-      // context actually contains it — not provably the same one
-      // #annotationOverlay's "auto" participates in. A bare
-      // "plotZ(number) > overlayZ(auto-treated-as-0)" comparison was
-      // therefore comparing two values with no proven common paint-order
-      // meaning, and produced a false CLASSIFICATION 8 even while
-      // annotations were demonstrably rendering correctly on screen.
-      //
-      // The comparison is now only trusted when BOTH sides are an
-      // EXPLICIT integer z-index (never "auto" treated as a stand-in
-      // value on either side) — the one case where two definite numbers
-      // give a real, comparable stacking order. Any other combination
-      // (either side "auto") is reported as not comparable and does NOT
-      // fire CLASSIFICATION 8 — this doesn't prove painting is correct on
-      // its own, it just means this specific check can't determine
-      // compositing failure from z-index alone here, consistent with
-      // "do not hard-code that 8 can never happen" — a genuinely
-      // explicit-vs-explicit mismatch still fires it below.
-      if(isExplicitZIndex(ov.zIndex) && isExplicitZIndex(plotCanvas.zIndex)){
-        var overlayZ = zIndexNum(ov.zIndex);
-        var plotZ = zIndexNum(plotCanvas.zIndex);
-        if(plotZ > overlayZ){
-          return {
-            code: 8, label: 'CSS COMPOSITING / Z-INDEX ISSUE',
-            evidence: [
-              'Overlay canvas computed z-index: ' + ov.zIndex + ' (explicit).',
-              'Plot-pane canvas computed z-index: ' + plotCanvas.zIndex + ' (explicit) — higher than the overlay, and both are explicit, comparable integer z-index values, so the chart\'s own canvas paints on top of the annotation overlay.'
-            ]
-          };
-        }
-      }
-      // else: at least one side is "auto" (or otherwise non-numeric) —
-      // not proven comparable, so this check does not fire. Falls
-      // through to CLASSIFICATION 3 below if nothing else flagged.
+      // CLASSIFICATION 8 is intentionally NOT checked here anymore — see
+      // the comment in the inView.length === 0 branch above for why.
     }
 
     return {
