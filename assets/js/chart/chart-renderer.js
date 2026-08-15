@@ -555,9 +555,9 @@
       const diagnostics = [];
       const dc = {
         ctx,
-        rightEdgeX: container.clientWidth - 4,
-        canvasWidth: container.clientWidth,
-        canvasHeight: container.clientHeight,
+        rightEdgeX: overlayCssWidth - 4,
+        canvasWidth: overlayCssWidth,
+        canvasHeight: overlayCssHeight,
         diagnostics,
         layerName: null,
         timeToX: t => timeScale.timeToCoordinate(t),
@@ -584,8 +584,8 @@
       lastPaintDiagnostics = {
         generatedAt: Date.now(),
         dpr,
-        canvasCssWidth: container.clientWidth,
-        canvasCssHeight: container.clientHeight,
+        canvasCssWidth: overlayCssWidth,
+        canvasCssHeight: overlayCssHeight,
         canvasPhysicalWidth: overlayCanvas.width,
         canvasPhysicalHeight: overlayCanvas.height,
         paintFrameCallCount, resizeCallCount,
@@ -612,15 +612,79 @@
     let resizeCallCount = 0;         // Phase 6 — total resize() invocations this session
     const paintHistory = [];         // Phase 6 — last 8 paints: {at, entryCount, paintedCount}, newest last
     const PAINT_HISTORY_MAX = 8;
+    // Phase 6 fix — the overlay's OWN CSS box, aligned to the chart's real
+    // plot-pane canvas (not the outer container). Set by resize() below;
+    // paintFrame() reads these instead of container.clientWidth/clientHeight
+    // so drawable geometry (dc.canvasWidth/canvasHeight/rightEdgeX) always
+    // matches what the overlay canvas actually occupies on screen.
+    let overlayCssWidth = 0, overlayCssHeight = 0;
+
+    /** Phase 6 fix — finds the chart library's own plotting-pane canvas
+     *  among every <canvas> it created inside `container`. Lightweight
+     *  Charts renders the price-scale and time-scale axis labels as their
+     *  own separate canvas elements alongside the main series pane; those
+     *  are narrow strips by construction, so the plotting pane is reliably
+     *  the largest-area canvas among them — verified against live
+     *  measurements (a ~830×412 plot pane vs. much smaller axis-label
+     *  strips). Pure read via getBoundingClientRect() — never touches the
+     *  library's DOM. Returns null if the library hasn't created any
+     *  canvas yet (e.g. mid-initialization) or in a non-DOM environment. */
+    function getPlotCanvasRect(){
+      if(!container.querySelectorAll) return null;
+      const canvases = Array.from(container.querySelectorAll('canvas'));
+      if(!canvases.length) return null;
+      let best = null, bestArea = -1;
+      canvases.forEach(function(el){
+        const r = el.getBoundingClientRect();
+        const area = r.width * r.height;
+        if(area > bestArea){ bestArea = area; best = r; }
+      });
+      return best;
+    }
 
     function resize(){
       if(!chart) return;
       resizeCallCount += 1;
       const w = container.clientWidth, h = container.clientHeight;
+      // Unchanged: the library itself still lays out against the FULL
+      // container — it decides its own price/time axis gutter sizes from
+      // this. We only change what we do with overlayCanvas afterward.
       chart.resize(w,h);
       const dpr = window.devicePixelRatio || 1;
-      overlayCanvas.width = w*dpr; overlayCanvas.height = h*dpr;
-      overlayCanvas.style.width = w+'px'; overlayCanvas.style.height = h+'px';
+
+      // Phase 6 fix — align the overlay to the chart's actual plotting-pane
+      // rect (post-resize, so it reflects the library's just-recomputed
+      // layout), not to the outer container. Falls back to the old
+      // container-sized behavior only if the plot canvas can't be found yet
+      // (e.g. before the library has rendered anything) or the overlay has
+      // no positioned ancestor to measure offsets against — so this never
+      // throws or leaves the canvas unsized.
+      const plotRect = getPlotCanvasRect();
+      let cssLeft = 0, cssTop = 0, cssWidth = w, cssHeight = h;
+      if(plotRect && overlayCanvas.offsetParent && overlayCanvas.offsetParent.getBoundingClientRect){
+        const parentRect = overlayCanvas.offsetParent.getBoundingClientRect();
+        cssLeft = plotRect.left - parentRect.left;
+        cssTop = plotRect.top - parentRect.top;
+        cssWidth = plotRect.width;
+        cssHeight = plotRect.height;
+      }
+
+      overlayCanvas.style.left = cssLeft + 'px';
+      overlayCanvas.style.top = cssTop + 'px';
+      overlayCanvas.style.width = cssWidth + 'px';
+      overlayCanvas.style.height = cssHeight + 'px';
+      // Removes the over-constraint from the stylesheet's `inset:0` (which
+      // also sets right/bottom) now that left+width and top+height are
+      // being set explicitly — left+width (or top+height) plus an explicit
+      // right/bottom is an over-constrained box; clearing right/bottom
+      // avoids relying on browsers' over-constraint resolution.
+      overlayCanvas.style.right = 'auto';
+      overlayCanvas.style.bottom = 'auto';
+
+      overlayCanvas.width = Math.round(cssWidth * dpr);
+      overlayCanvas.height = Math.round(cssHeight * dpr);
+      overlayCssWidth = cssWidth; overlayCssHeight = cssHeight;
+
       scheduleDraw();
       emitter.emit('resize', { width: w, height: h, state: getState() });
     }
