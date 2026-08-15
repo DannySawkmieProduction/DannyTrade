@@ -345,10 +345,15 @@ console.log('\n[13] TEST A — real architecture (overlay z-index:auto, plot z-i
   assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Falls through correctly to CLASSIFICATION 3 since the drawable is painted and in-view and nothing else is flagged');
 }
 
-console.log('\n[13b] TEST B — genuine same-context failure (both explicit numeric z-index, plot ABOVE overlay) -> CLASSIFICATION 8 DOES fire');
+console.log('\n[13b] TEST B — numeric z-index alone is insufficient (both explicit, plot "higher", but drawables painted+in-view) -> CLASSIFICATION 8 does NOT fire');
 {
-  // Both sides are explicit integers this time — a real, comparable case.
-  // Overlay explicitly "2", plot canvas explicitly "5": plot genuinely above.
+  // Proves the CORE new rule: even with both z-index values explicit AND
+  // numerically "unfavorable" (plot=5 > overlay=2), z-index is NEVER an
+  // independent trigger — CLASSIFICATION 8 requires genuine failure
+  // evidence (inView.length===0) as a PREREQUISITE, which this scenario
+  // doesn't have (the drawable is painted and in-view). This is the
+  // opposite expectation from the previous turn's version of this test —
+  // that was exactly the still-too-permissive rule this turn replaces.
   const studioInstance = makeFakeStudioInstance();
   const __origState = studioInstance.getState();
   studioInstance.getState = () => Object.assign({}, __origState, {
@@ -369,11 +374,11 @@ console.log('\n[13b] TEST B — genuine same-context failure (both explicit nume
   const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
   mobileDiagBtn.click();
   const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
-  assert(html.indexOf('CLASSIFICATION 8: CSS COMPOSITING / Z-INDEX ISSUE') !== -1, 'Both z-index values explicit (2 vs 5) and plot genuinely higher -> CLASSIFICATION 8 correctly still fires');
-  assert(html.indexOf('(explicit)') !== -1, 'Evidence text confirms both values were treated as explicit, comparable integers, not "auto" stand-ins');
+  assert(html.indexOf('CLASSIFICATION 8') === -1, 'Explicit z-index values alone (2 vs 5), with a painted+in-view drawable, do NOT trigger CLASSIFICATION 8 — numeric comparison alone cannot create the alarm');
+  assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Falls through correctly to CLASSIFICATION 3');
 }
 
-console.log('\n[13c] TEST C — genuine same-context safe case (both explicit numeric z-index, overlay ABOVE plot) -> CLASSIFICATION 8 does NOT fire');
+console.log('\n[13c] TEST C — genuine safe case (both explicit numeric z-index, overlay ABOVE plot, painted+in-view) -> CLASSIFICATION 8 does NOT fire');
 {
   // Both explicit integers again, but this time overlay is higher —
   // the correct, intended configuration — must not fire.
@@ -399,6 +404,73 @@ console.log('\n[13c] TEST C — genuine same-context safe case (both explicit nu
   const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
   assert(html.indexOf('CLASSIFICATION 8') === -1, 'Overlay explicitly higher (5) than plot canvas (2) — genuinely safe — does NOT trigger CLASSIFICATION 8');
   assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Falls through correctly to CLASSIFICATION 3');
+}
+
+console.log('\n[13d] TEST C — genuine compositing failure (drawables painted but NONE in-view + explicit stacking evidence) -> CLASSIFICATION 8 DOES fire');
+{
+  // The one real evidence combination CLASSIFICATION 8 should still be
+  // able to detect: coordinates resolved fine (painted:true — this rules
+  // out a coordinate/geometry problem, which would be CLASSIFICATION 1),
+  // but NONE of them land inside the canvas (inView.length === 0 — real,
+  // independent failure evidence, not inferred from z-index), AND both
+  // z-index values are explicit with the plot genuinely higher — a
+  // plausible stacking explanation for why nothing is landing on-canvas.
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 2, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 360, canvasCssHeight: 240, canvasPhysicalWidth: 360, canvasPhysicalHeight: 240,
+        paintHistory: [],
+        entries: [
+          { id: 'a', type: 'FVG', layer: 'fvg', x: 5000, y: 60, painted: true, insideViewport: false, reason: null },
+          { id: 'b', type: 'ORDER_BLOCK', layer: 'orderBlocks', x: 6000, y: 80, painted: true, insideViewport: false, reason: null }
+        ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '2', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [ { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '5' } ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 8: CSS COMPOSITING / Z-INDEX ISSUE') !== -1, 'Zero drawables in-view (genuine failure evidence) + explicit z-index disparity (2 vs 5) -> CLASSIFICATION 8 correctly fires');
+  assert(html.indexOf('genuine rendering-failure evidence, not inferred from z-index alone') !== -1, 'Evidence text leads with the independent failure evidence, not the z-index numbers alone');
+}
+
+console.log('\n[13e] TEST D — paint/rendering failure WITHOUT stacking evidence -> CLASSIFICATION 8 does NOT fire, falls back to CLASSIFICATION 2');
+{
+  // Same failure evidence as TEST C (nothing lands in-view), but this
+  // time there is no credible stacking explanation (overlay z-index is
+  // "auto", not explicit) — must NOT be labeled a compositing issue;
+  // the existing, more general COORDINATES OUT OF VIEW diagnostic (2)
+  // should handle it instead.
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 1, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 360, canvasCssHeight: 240, canvasPhysicalWidth: 360, canvasPhysicalHeight: 240,
+        paintHistory: [],
+        entries: [ { id: 'a', type: 'FVG', layer: 'fvg', x: 5000, y: 60, painted: true, insideViewport: false, reason: null } ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: 'auto', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [ { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '5' } ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 8') === -1, 'No stacking evidence (overlay z-index is "auto") -> CLASSIFICATION 8 does NOT fire despite the same failure evidence as TEST C');
+  assert(html.indexOf('CLASSIFICATION 2: COORDINATES OUT OF VIEW') !== -1, 'Falls back to the existing, appropriate CLASSIFICATION 2 instead of mislabeling it as compositing');
 }
 
 console.log('\n[14] FIX 1 — multi-canvas scenario (plot pane 830x412 + narrow axis-label canvas), overlay 830x412 -> NOT misaligned');
