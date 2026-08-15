@@ -178,7 +178,11 @@
   // reflected in dataAvailability.optionGreeks, which the decision
   // engine uses to apply a confidence penalty, not a block).
   // ===================================================================
-  function buildOptionEvidence(optionChain, previousSnapshot, bullish, bearish, marketAnalysis){
+  function byGroupCount(items, group){
+    return items.filter(e => (e.group || 'underlying') === group).length;
+  }
+
+  function buildOptionEvidence(optionChain, previousSnapshot, bullish, bearish, marketAnalysis, underlyingState){
     marketAnalysis.options = optionChain && optionChain.available
       ? {
           expiry: optionChain.expiry, strikeCount: optionChain.strikes.length,
@@ -190,10 +194,21 @@
 
     if(!optionChain || !optionChain.available) return;
 
+    // Phase 3 — PCR read IN CONTEXT of the underlying state (spec §10),
+    // never a standalone threshold claim. Only becomes evidence when it
+    // is SUPPORTIVE of the already-established underlying direction —
+    // a CONTRADICTORY reading is recorded informationally
+    // (marketAnalysis.pcrContext) but deliberately NOT pushed to
+    // bullish/bearish itself (the group-agreement rule in the decision
+    // engine already handles disagreement; duplicating that logic here
+    // via a fabricated "PCR says otherwise" evidence item would double
+    // count the same disagreement two different ways).
     const pcr = optionChain.aggregate.pcr;
-    if(typeof pcr === 'number'){
-      if(pcr > 1.2) bullish.push(ev('optionsPCR', 'bullish', `PCR ${pcr.toFixed(2)} indicates heavier put OI (support-leaning)`, { pcr }, 'options'));
-      else if(pcr < 0.8) bearish.push(ev('optionsPCR', 'bearish', `PCR ${pcr.toFixed(2)} indicates heavier call OI (resistance-leaning)`, { pcr }, 'options'));
+    const pcrContext = classifyPcrContext(pcr, underlyingState);
+    marketAnalysis.pcrContext = pcrContext;
+    if(pcrContext === 'PCR_SUPPORTIVE'){
+      const dir = underlyingState === 'BULLISH' ? 'bullish' : 'bearish';
+      (dir === 'bullish' ? bullish : bearish).push(ev('optionsPCR', dir, `PCR ${pcr.toFixed(2)} is supportive of the ${underlyingState.toLowerCase()} underlying read`, { pcr }, 'options'));
     }
 
     if(previousSnapshot && typeof previousSnapshot.callOi === 'number' && typeof previousSnapshot.putOi === 'number'){
@@ -219,6 +234,137 @@
       if(d < bestDist){ bestDist = d; best = s.strike; }
     });
     return best;
+  }
+
+  // ===================================================================
+  // Phase 3 additions — underlying-state classification, contextual PCR,
+  // per-strike buildup/unwinding (OI+premium quadrant), short-covering
+  // trigger detection, and liquidity-trap detection. Every function
+  // below reads ONLY fields already produced by the existing engines
+  // (market-structure-engine's structureEvents, liquidity-engine's
+  // sweeps, and real OI/LTP deltas across two real snapshots) — none
+  // of them re-implement or duplicate an existing engine.
+  // ===================================================================
+
+  /** BULLISH/BEARISH/NEUTRAL/CONFLICTED — a plain vote count over the
+   *  UNDERLYING group only (never options). CONFLICTED means both
+   *  bullish and bearish underlying evidence exist simultaneously
+   *  (e.g. bullish trend but a bearish liquidity sweep) — distinct
+   *  from NEUTRAL (no evidence either way). */
+  function classifyUnderlyingState(underlyingBullishCount, underlyingBearishCount){
+    if(underlyingBullishCount > 0 && underlyingBearishCount > 0) return 'CONFLICTED';
+    if(underlyingBullishCount > 0) return 'BULLISH';
+    if(underlyingBearishCount > 0) return 'BEARISH';
+    return 'NEUTRAL';
+  }
+
+  /** PCR read IN CONTEXT of the underlying state, per spec section 10 —
+   *  never a standalone bullish/bearish claim, and never allowed to
+   *  override price structure. Returns a label only; the caller
+   *  decides whether/how to use it as evidence. */
+  function classifyPcrContext(pcr, underlyingState){
+    if(typeof pcr !== 'number') return null;
+    const pcrLeansBullish = pcr > 1.2, pcrLeansBearish = pcr < 0.8;
+    if(!pcrLeansBullish && !pcrLeansBearish) return 'PCR_NEUTRAL';
+    if(underlyingState === 'BULLISH' && pcrLeansBullish) return 'PCR_SUPPORTIVE';
+    if(underlyingState === 'BEARISH' && pcrLeansBearish) return 'PCR_SUPPORTIVE';
+    if(underlyingState === 'BULLISH' && pcrLeansBearish) return 'PCR_CONTRADICTORY';
+    if(underlyingState === 'BEARISH' && pcrLeansBullish) return 'PCR_CONTRADICTORY';
+    return 'PCR_NEUTRAL'; // underlying NEUTRAL/CONFLICTED — PCR alone doesn't get to decide
+  }
+
+  /** Four-quadrant OI+premium classification for ONE option side (CE or
+   *  PE) at ONE strike, using two REAL successive readings. Returns
+   *  null (not "long buildup" defaulted) whenever either reading is
+   *  missing — never inferred from a single snapshot. Labels match the
+   *  spec's own required wording exactly. */
+  function classifyStrikePositioning(current, previous){
+    if(!current || !previous || typeof current.oi !== 'number' || typeof previous.oi !== 'number'
+       || typeof current.ltp !== 'number' || typeof previous.ltp !== 'number') return null;
+    const oiUp = current.oi > previous.oi, oiDown = current.oi < previous.oi;
+    const ltpUp = current.ltp > previous.ltp, ltpDown = current.ltp < previous.ltp;
+    if(oiUp && ltpUp) return 'LIKELY_LONG_BUILDUP';
+    if(oiUp && ltpDown) return 'LIKELY_SHORT_BUILDUP';
+    if(oiDown && ltpUp) return 'LIKELY_SHORT_COVERING';
+    if(oiDown && ltpDown) return 'LIKELY_LONG_UNWINDING';
+    return null; // OI or LTP unchanged — not enough directional signal to label
+  }
+
+  /** Liquidity-trap detection: a real, index-ordered liquidity sweep
+   *  followed by a real, index-ordered structure event in the OPPOSITE
+   *  direction. Both facts come straight from liquidity-engine.js and
+   *  market-structure-engine.js's own outputs — nothing here decides
+   *  what a "trap" is beyond that documented sequence. Returns null
+   *  when the data doesn't show this specific sequence — never assumed. */
+  function detectTrap(msData, liqData){
+    const sweeps = (liqData && Array.isArray(liqData.sweeps)) ? liqData.sweeps : [];
+    const events = (msData && msData.external && Array.isArray(msData.external.structureEvents)) ? msData.external.structureEvents : [];
+    if(!sweeps.length || !events.length) return null;
+    const lastSweep = sweeps[sweeps.length - 1];
+    // A structure event that occurred AFTER the sweep, in the opposite direction.
+    const reversal = events.filter(e => e.index > lastSweep.sweepIndex)
+      .sort((a, b) => a.index - b.index)[0];
+    if(!reversal) return null;
+    if(lastSweep.direction === 'buySide' && reversal.direction === 'bearish'){
+      return { type: 'BULL_TRAP', detail: { sweepIndex: lastSweep.sweepIndex, reversalIndex: reversal.index, reversalType: reversal.type } };
+    }
+    if(lastSweep.direction === 'sellSide' && reversal.direction === 'bullish'){
+      return { type: 'BEAR_TRAP', detail: { sweepIndex: lastSweep.sweepIndex, reversalIndex: reversal.index, reversalType: reversal.type } };
+    }
+    return null;
+  }
+
+  /** Short-covering / positioning-vs-trigger detection, per spec
+   *  section 6. Looks at the strike with the LARGEST OI on each side
+   *  among the strikes both current and previous snapshots cover, and
+   *  classifies it via classifyStrikePositioning() above. If that
+   *  classification is LIKELY_SHORT_COVERING, checks whether the
+   *  underlying group ALSO shows momentum in the matching direction
+   *  (a real, already-computed fact — momentum evidence's presence in
+   *  the underlying bullish/bearish arrays) — if so, labels it
+   *  'POSITIONING_AND_TRIGGER' (strong); if not, 'POSITIONING_ONLY'
+   *  (weak, informational). */
+  function detectShortCovering(strikes, previousStrikesMap, underlyingBullish, underlyingBearish){
+    if(!Array.isArray(strikes) || !previousStrikesMap) return { call: null, put: null };
+    const hasMomentum = (dir) => (dir === 'bullish' ? underlyingBullish : underlyingBearish).some(e => e.source === 'momentum');
+
+    function bestSide(sideKey){
+      let best = null, bestOi = -1;
+      strikes.forEach(s => {
+        const side = s[sideKey];
+        if(side && typeof side.oi === 'number' && side.oi > bestOi && previousStrikesMap[s.strike] && previousStrikesMap[s.strike][sideKey]){
+          bestOi = side.oi; best = { strike: s.strike, current: side, previous: previousStrikesMap[s.strike][sideKey] };
+        }
+      });
+      return best;
+    }
+
+    const ceBest = bestSide('ce'), peBest = bestSide('pe');
+    let call = null, put = null;
+    if(ceBest){
+      const label = classifyStrikePositioning(ceBest.current, ceBest.previous);
+      if(label === 'LIKELY_SHORT_COVERING'){
+        call = { strike: ceBest.strike, state: 'POTENTIAL_CALL_SHORT_COVERING', trigger: hasMomentum('bullish') ? 'POSITIONING_AND_TRIGGER' : 'POSITIONING_ONLY' };
+      }
+    }
+    if(peBest){
+      const label = classifyStrikePositioning(peBest.current, peBest.previous);
+      if(label === 'LIKELY_SHORT_COVERING'){
+        put = { strike: peBest.strike, state: 'POTENTIAL_PUT_SHORT_COVERING', trigger: hasMomentum('bearish') ? 'POSITIONING_AND_TRIGGER' : 'POSITIONING_ONLY' };
+      }
+    }
+    return { call, put };
+  }
+
+  /** LIVE/RECENT/STALE/UNAVAILABLE — a plain, deterministic freshness
+   *  label from a real age-in-seconds figure. Thresholds are the same
+   *  ones already used for the STALE_DATA risk flag (staleSeconds),
+   *  not a new, separate notion of "stale". */
+  function dataQualityLabel(ageSeconds, staleSeconds){
+    if(ageSeconds == null) return 'UNAVAILABLE';
+    if(ageSeconds <= 120) return 'LIVE';
+    if(ageSeconds <= staleSeconds) return 'RECENT';
+    return 'STALE';
   }
 
   /**
@@ -258,10 +404,26 @@
       buildTrendAndMomentumEvidence(safeData(analysisContext.trend), bullish, bearish, conflicting, marketAnalysis);
       buildVolumeAndSrInfo(analysisContext.volume, analysisContext.supportResistance, marketAnalysis);
 
+      // Phase 3 — liquidity-trap detection. A trap is evidence AGAINST
+      // the direction that was trapped: a BULL_TRAP (failed breakout
+      // above a swept high) is bearish evidence; a BEAR_TRAP is
+      // bullish evidence. Both are real, index-ordered facts from the
+      // existing market-structure/liquidity engines — see detectTrap().
+      const trap = detectTrap(safeData(analysisContext.marketStructure), safeData(analysisContext.liquidity));
+      marketAnalysis.trap = trap ? trap.type : null;
+      if(trap && trap.type === 'BULL_TRAP') bearish.push(ev('trap', 'bearish', 'BULL TRAP — liquidity high swept, then a bearish structure reversal followed', trap.detail));
+      if(trap && trap.type === 'BEAR_TRAP') bullish.push(ev('trap', 'bullish', 'BEAR TRAP — liquidity low swept, then a bullish structure reversal followed', trap.detail));
+
       if(analysisContext.diagnostics && Array.isArray(analysisContext.diagnostics.errors) && analysisContext.diagnostics.errors.length){
         riskFlags.push({ code: 'ENGINE_ERRORS', message: analysisContext.diagnostics.errors.length + ' analysis engine(s) reported an error this run.' });
       }
     }
+
+    // Phase 3 — underlying state classification, computed from the
+    // UNDERLYING-group evidence gathered above only (never options).
+    const underlyingBullishCount = byGroupCount(bullish, 'underlying');
+    const underlyingBearishCount = byGroupCount(bearish, 'underlying');
+    marketAnalysis.underlyingState = classifyUnderlyingState(underlyingBullishCount, underlyingBearishCount);
 
     // Option-chain availability — the mandatory blocker only when the
     // fetch genuinely failed or returned no usable data (Phase 2: no
@@ -272,12 +434,27 @@
     } else {
       const spotPrice = (candles.length && typeof candles[candles.length - 1].close === 'number') ? candles[candles.length - 1].close : null;
       marketAnalysis.atmStrike = computeAtmStrike(optionChainResult.strikes, spotPrice);
-      buildOptionEvidence(optionChainResult, params.previousOptionSnapshot || null, bullish, bearish, marketAnalysis);
+      buildOptionEvidence(optionChainResult, params.previousOptionSnapshot || null, bullish, bearish, marketAnalysis, marketAnalysis.underlyingState);
       dataAvailability.optionGreeks = !!optionChainResult.greeksAvailable;
       if(!optionChainResult.greeksAvailable){
         riskFlags.push({ code: 'GREEKS_UNAVAILABLE', message: 'IV/Greeks were not present in this option-chain response.', severity: 'confidence-penalty' });
       }
+
+      // Phase 3 — short-covering / positioning-vs-trigger detection.
+      // Only meaningful with a real previous per-strike snapshot.
+      const prevStrikes = params.previousOptionSnapshot && params.previousOptionSnapshot.strikes;
+      const shortCovering = detectShortCovering(optionChainResult.strikes, prevStrikes, bullish, bearish);
+      marketAnalysis.shortCovering = shortCovering;
+      if(shortCovering.call){
+        const strength = shortCovering.call.trigger === 'POSITIONING_AND_TRIGGER' ? 'bullish' : null; // POSITIONING_ONLY is informational, not counted as directional evidence
+        if(strength) bullish.push(ev('shortCovering', 'bullish', `${shortCovering.call.state} at strike ${shortCovering.call.strike} — confirmed by underlying bullish momentum (${shortCovering.call.trigger})`, shortCovering.call, 'options'));
+      }
+      if(shortCovering.put){
+        const strength = shortCovering.put.trigger === 'POSITIONING_AND_TRIGGER' ? 'bearish' : null;
+        if(strength) bearish.push(ev('shortCovering', 'bearish', `${shortCovering.put.state} at strike ${shortCovering.put.strike} — confirmed by underlying bearish momentum (${shortCovering.put.trigger})`, shortCovering.put, 'options'));
+      }
     }
+
 
     // Candle freshness — never call candle data "live"; only ever "as
     // of" the last fetched candle's own timestamp.
@@ -318,9 +495,17 @@
 
     return {
       bullish, bearish, conflicting, riskFlags, dataAvailability, marketAnalysis,
-      meta: { candleAgeSeconds, generatedAt: now.toISOString() }
+      meta: { candleAgeSeconds, generatedAt: now.toISOString(), candleDataQuality: dataQualityLabel(candleAgeSeconds, staleSeconds) }
     };
   }
 
-  window.DannyChart.PrecloseEvidenceModel = { buildEvidence, DEFAULT_STALE_SECONDS, DEFAULT_PRECLOSE_WINDOW_MINUTES };
+  window.DannyChart.PrecloseEvidenceModel = {
+    buildEvidence, DEFAULT_STALE_SECONDS, DEFAULT_PRECLOSE_WINDOW_MINUTES,
+    // Phase 3 — exported individually so preclose-panel.js can render
+    // the strike map's per-strike buildup labels and data-quality
+    // status without buildEvidence() needing to bundle every strike's
+    // classification into its return value.
+    classifyUnderlyingState, classifyPcrContext, classifyStrikePositioning,
+    detectTrap, detectShortCovering, dataQualityLabel
+  };
 })();
