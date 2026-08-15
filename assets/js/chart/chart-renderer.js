@@ -613,11 +613,17 @@
     const paintHistory = [];         // Phase 6 — last 8 paints: {at, entryCount, paintedCount}, newest last
     const PAINT_HISTORY_MAX = 8;
     // Phase 6 fix — the overlay's OWN CSS box, aligned to the chart's real
-    // plot-pane canvas (not the outer container). Set by resize() below;
-    // paintFrame() reads these instead of container.clientWidth/clientHeight
+    // plot-pane canvas (not the outer container). Set by syncOverlayToPlotCanvas()
+    // below; paintFrame() reads these instead of container.clientWidth/clientHeight
     // so drawable geometry (dc.canvasWidth/canvasHeight/rightEdgeX) always
     // matches what the overlay canvas actually occupies on screen.
     let overlayCssWidth = 0, overlayCssHeight = 0;
+    // Phase 6 fix — bumped every time resize() runs. A post-layout re-sync
+    // (see scheduleOverlayPostLayoutSync() below) captures this value when
+    // scheduled and checks it before applying, so an OLDER resize()'s
+    // deferred callback can never overwrite a NEWER resize()'s already-
+    // current geometry (e.g. two setCandles() calls in quick succession).
+    let resizeGeneration = 0;
 
     /** Phase 6 fix — finds the chart library's own plotting-pane canvas
      *  among every <canvas> it created inside `container`. Lightweight
@@ -642,23 +648,20 @@
       return best;
     }
 
-    function resize(){
-      if(!chart) return;
-      resizeCallCount += 1;
+    /** Phase 6 fix — the actual "measure the plot pane + position/size the
+     *  overlay + update its backing store" operation, extracted so both
+     *  the immediate sync inside resize() and the deferred post-layout
+     *  re-sync (scheduleOverlayPostLayoutSync() below) share ONE
+     *  implementation rather than duplicating it. Re-measures
+     *  getPlotCanvasRect() fresh every call — never reuses a stale rect —
+     *  so calling this again after the chart's own layout has changed
+     *  (e.g. its price-scale gutter width) picks up the new geometry.
+     *  Falls back to the container's own size only if no plot canvas can
+     *  be found yet or the overlay has no positioned ancestor to measure
+     *  offsets against — unchanged from before, never throws. */
+    function syncOverlayToPlotCanvas(){
       const w = container.clientWidth, h = container.clientHeight;
-      // Unchanged: the library itself still lays out against the FULL
-      // container — it decides its own price/time axis gutter sizes from
-      // this. We only change what we do with overlayCanvas afterward.
-      chart.resize(w,h);
       const dpr = window.devicePixelRatio || 1;
-
-      // Phase 6 fix — align the overlay to the chart's actual plotting-pane
-      // rect (post-resize, so it reflects the library's just-recomputed
-      // layout), not to the outer container. Falls back to the old
-      // container-sized behavior only if the plot canvas can't be found yet
-      // (e.g. before the library has rendered anything) or the overlay has
-      // no positioned ancestor to measure offsets against — so this never
-      // throws or leaves the canvas unsized.
       const plotRect = getPlotCanvasRect();
       let cssLeft = 0, cssTop = 0, cssWidth = w, cssHeight = h;
       if(plotRect && overlayCanvas.offsetParent && overlayCanvas.offsetParent.getBoundingClientRect){
@@ -684,9 +687,65 @@
       overlayCanvas.width = Math.round(cssWidth * dpr);
       overlayCanvas.height = Math.round(cssHeight * dpr);
       overlayCssWidth = cssWidth; overlayCssHeight = cssHeight;
+    }
+
+    /** Phase 6 fix — root cause: the immediate sync inside resize() measures
+     *  the plot pane synchronously, but TradingView's price-scale gutter
+     *  width can still change shortly after (e.g. chart.timeScale().fitContent(),
+     *  called right after resize() in setCandles(), changes the visible
+     *  price range and therefore the price-label digit width; the library
+     *  may also settle its own internal canvas sizes on a later frame).
+     *  Nothing previously re-checked the overlay after that point, so it
+     *  could stay aligned to an already-stale, too-wide measurement
+     *  (observed live: overlay stuck at 846px while the plot pane had
+     *  already settled to 830px).
+     *
+     *  This schedules a second, independent re-measurement — via TWO
+     *  nested requestAnimationFrame callbacks, the smallest deterministic
+     *  "wait until after this frame's layout/paint has fully settled"
+     *  mechanism available, rather than an arbitrary timeout — that calls
+     *  the SAME syncOverlayToPlotCanvas() helper again once the browser
+     *  (and, by then, the library) has had a further two frames to finish
+     *  laying out. The `generation` guard (captured at schedule time,
+     *  compared against the live resizeGeneration counter before applying)
+     *  ensures a resize() call superseded by a newer one before its
+     *  deferred callback fires never overwrites the newer geometry. */
+    function scheduleOverlayPostLayoutSync(generation){
+      requestAnimationFrame(function(){
+        if(destroyed || generation !== resizeGeneration) return; // superseded by a newer resize() — stale, skip
+        requestAnimationFrame(function(){
+          if(destroyed || generation !== resizeGeneration) return; // superseded — stale, skip
+          syncOverlayToPlotCanvas();
+          scheduleDraw(); // repaint so drawable geometry reflects the corrected overlay size immediately
+        });
+      });
+    }
+
+    function resize(){
+      if(!chart) return;
+      resizeCallCount += 1;
+      resizeGeneration += 1;
+      const myGeneration = resizeGeneration;
+      const w = container.clientWidth, h = container.clientHeight;
+      // Unchanged: the library itself still lays out against the FULL
+      // container — it decides its own price/time axis gutter sizes from
+      // this. We only change what we do with overlayCanvas afterward.
+      chart.resize(w,h);
+
+      // Existing synchronous behavior — preserved exactly: measure and
+      // align the overlay to the plot pane immediately, same as before.
+      syncOverlayToPlotCanvas();
 
       scheduleDraw();
       emitter.emit('resize', { width: w, height: h, state: getState() });
+
+      // Phase 6 fix — safety-net re-sync in case the library's layout
+      // (e.g. its price-scale gutter width) is still settling. Runs after
+      // this function returns — so it naturally lands after setCandles()'s
+      // own chart.timeScale().fitContent() call, which executes
+      // synchronously right after resize() returns, same effective
+      // ordering as fitContent() -> requestAnimationFrame -> re-sync.
+      scheduleOverlayPostLayoutSync(myGeneration);
     }
 
     /** Phase 6 — read-only DOM/CSS layout facts about the overlay canvas
