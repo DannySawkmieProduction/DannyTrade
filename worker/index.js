@@ -345,6 +345,19 @@ async function handleAnalyze(request, env) {
     return jsonResponse({ ok: false, error: err.message || 'Failed to build request.' }, 400);
   }
 
+  // CAS — single injection point for market-session context, applied
+  // identically regardless of `type`. Deliberately NOT inside
+  // buildGeminiRequest()/buildChartStructureRequest(): both already
+  // return the same { contents: [{ role:'user', parts }] } shape, so
+  // appending one more text part here covers every branch without a
+  // single per-type CAS conditional anywhere in this file. No-op if
+  // ai-service.js didn't attach marketSession (e.g. no symbol/instrument
+  // on the request) — every existing request shape is unaffected.
+  const sessionNote = buildMarketSessionNote(payload && payload.marketSession);
+  if (sessionNote && geminiRequest && geminiRequest.contents && geminiRequest.contents[0]) {
+    geminiRequest.contents[0].parts.push({ text: sessionNote });
+  }
+
   let model;
   try {
     model = await resolveModel(env);
@@ -550,6 +563,71 @@ function buildChartStructureRequest(payload) {
       temperature: 0.2
     }
   };
+}
+
+/* ---------------------------------------------------------------
+   CAS — market-session context, described in prose for the model.
+   This is the ONLY place session/CAS wording is added to a Gemini
+   request; there is no per-`type` or per-provider CAS branching
+   anywhere else in this file. Deliberately provider-independent in
+   substance (worker/openrouter.js carries an equivalent, separately
+   maintained copy — see that file's own header for why duplication
+   over importing is this project's existing pattern for provider
+   modules).
+
+   HONESTY: this only ever describes TIMING (which session the symbol
+   is in, and which closing methodology applies) — it never invents
+   auction figures. `marketSession.officialClose` is always null
+   (see market-session.js), and this note says so explicitly whenever
+   the session is CAS or POST_CLOSE for a CAS-eligible symbol, so the
+   model doesn't guess an equilibrium price, imbalance, or auction
+   volume to fill the gap.
+--------------------------------------------------------------- */
+function buildMarketSessionNote(marketSession) {
+  if (!marketSession || typeof marketSession !== 'object' || !marketSession.session) return null;
+
+  const lines = [];
+  lines.push(
+    `MARKET SESSION CONTEXT (from DannyTrade's session engine, Asia/Kolkata time — this is factual ` +
+    `timing/session metadata, not part of the price data you're analyzing): ${marketSession.symbol || 'This instrument'} ` +
+    `is currently in the "${marketSession.session}" session.`
+  );
+
+  if (marketSession.isIndex) {
+    lines.push(
+      `This is an index, not an F&O-underlying cash security — the SEBI Closing Auction Session (CAS) does ` +
+      `not apply to it. Do not describe index price action as being in a closing auction.`
+    );
+  } else if (marketSession.casEligible) {
+    lines.push(
+      `This stock has active F&O contracts, so it is CAS-eligible: continuous trading runs 09:15–` +
+      `${marketSession.continuousTradingEnd} IST, followed by the Closing Auction Session (order collection, ` +
+      `then a system-driven random freeze, then matching) until ${marketSession.auctionEnd} IST, which strikes ` +
+      `the official closing price.`
+    );
+    if (marketSession.session === 'CAS') {
+      lines.push(
+        `The data you are looking at reflects continuous trading UP TO the point CAS began — do not interpret ` +
+        `the CAS period itself as ordinary continuous price discovery, and do not invent an equilibrium price, ` +
+        `auction imbalance, auction volume, or indicative price for it. That data is not available from ` +
+        `DannyTrade's current data source.`
+      );
+    } else if (marketSession.session === 'POST_CLOSE') {
+      lines.push(
+        `The Closing Auction Session for this symbol has concluded for the day. The auction-derived official ` +
+        `closing price is NOT available from DannyTrade's current data source — do not state or estimate an ` +
+        `official closing price; refer only to the last continuous-trading price actually present in the data.`
+      );
+    }
+  } else {
+    lines.push(
+      `This stock has no active F&O contracts, so it is not CAS-eligible: it trades continuously until 15:30 ` +
+      `IST and its official closing price is the existing volume-weighted average of the last 30 minutes ` +
+      `(15:00–15:30), unchanged by the CAS regulation.`
+    );
+  }
+
+  return lines.join(' ');
 }
 
 const SYSTEM_INSTRUCTION =

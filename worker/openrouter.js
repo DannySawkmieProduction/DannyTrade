@@ -226,6 +226,69 @@ function jsonEnvelope(body, status) {
 }
 
 /* ---------------------------------------------------------------
+   CAS — market-session context, described in prose for the model.
+   Deliberately duplicated from worker/index.js's own
+   buildMarketSessionNote() rather than imported — same rationale as
+   this file's header comment for ANALYSIS_SCHEMA_KEYS above: this
+   file stays fully self-contained so worker/index.js's Gemini code
+   never needs to export anything to support this provider. If
+   worker/index.js's version of this function ever changes, update
+   this copy to match by hand (flagged here explicitly, same as the
+   existing ANALYSIS_SCHEMA_KEYS duplication note).
+
+   HONESTY: describes TIMING/session only — marketSession.officialClose
+   is always null (see market-session.js), and this note says so
+   explicitly during CAS/POST_CLOSE so the model doesn't invent an
+   equilibrium price, imbalance, or auction volume to fill the gap.
+--------------------------------------------------------------- */
+function buildMarketSessionNote(marketSession) {
+  if (!marketSession || typeof marketSession !== 'object' || !marketSession.session) return null;
+
+  const lines = [];
+  lines.push(
+    `MARKET SESSION CONTEXT (from DannyTrade's session engine, Asia/Kolkata time — this is factual ` +
+    `timing/session metadata, not part of the price data you're analyzing): ${marketSession.symbol || 'This instrument'} ` +
+    `is currently in the "${marketSession.session}" session.`
+  );
+
+  if (marketSession.isIndex) {
+    lines.push(
+      `This is an index, not an F&O-underlying cash security — the SEBI Closing Auction Session (CAS) does ` +
+      `not apply to it. Do not describe index price action as being in a closing auction.`
+    );
+  } else if (marketSession.casEligible) {
+    lines.push(
+      `This stock has active F&O contracts, so it is CAS-eligible: continuous trading runs 09:15–` +
+      `${marketSession.continuousTradingEnd} IST, followed by the Closing Auction Session (order collection, ` +
+      `then a system-driven random freeze, then matching) until ${marketSession.auctionEnd} IST, which strikes ` +
+      `the official closing price.`
+    );
+    if (marketSession.session === 'CAS') {
+      lines.push(
+        `The data you are looking at reflects continuous trading UP TO the point CAS began — do not interpret ` +
+        `the CAS period itself as ordinary continuous price discovery, and do not invent an equilibrium price, ` +
+        `auction imbalance, auction volume, or indicative price for it. That data is not available from ` +
+        `DannyTrade's current data source.`
+      );
+    } else if (marketSession.session === 'POST_CLOSE') {
+      lines.push(
+        `The Closing Auction Session for this symbol has concluded for the day. The auction-derived official ` +
+        `closing price is NOT available from DannyTrade's current data source — do not state or estimate an ` +
+        `official closing price; refer only to the last continuous-trading price actually present in the data.`
+      );
+    }
+  } else {
+    lines.push(
+      `This stock has no active F&O contracts, so it is not CAS-eligible: it trades continuously until 15:30 ` +
+      `IST and its official closing price is the existing volume-weighted average of the last 30 minutes ` +
+      `(15:00–15:30), unchanged by the CAS regulation.`
+    );
+  }
+
+  return lines.join(' ');
+}
+
+/* ---------------------------------------------------------------
    Builds the {system, user} prompt text for a given type. Mirrors
    the SUBSTANCE of worker/index.js's SYSTEM_INSTRUCTION and
    CHART_STRUCTURE_SYSTEM_INSTRUCTION (ICT/Smart Money methodology,
@@ -538,6 +601,16 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
     const diagnostics = buildDiagnostics({ configuredModel, errorCategory: 'prompt_build_failed' });
     logDiagnostics(diagnostics);
     return jsonEnvelope({ ok: false, error: err.message || 'Failed to build OpenRouter request.', diagnostics }, 400);
+  }
+
+  // CAS — single injection point, mirrors worker/index.js's own
+  // single call-site injection for Gemini. Appended to prompt.user so
+  // it rides along with every `type` buildPrompt() supports, with no
+  // per-type branching here either. No-op when ai-service.js didn't
+  // attach marketSession (no symbol/instrument on the request).
+  const sessionNote = buildMarketSessionNote(payload && payload.marketSession);
+  if (sessionNote && prompt && typeof prompt.user === 'string') {
+    prompt = Object.assign({}, prompt, { user: `${prompt.user}\n\n${sessionNote}` });
   }
 
   const requestBody = {
