@@ -59,8 +59,8 @@
   const DEFAULT_STALE_SECONDS = 15 * 60;      // candle considered stale if older than 15 minutes
   const DEFAULT_PRECLOSE_WINDOW_MINUTES = 45; // "final 30–45 minutes" per the spec — uses the wider end
 
-  function ev(source, direction, signal, detail){
-    return { source, direction, signal, detail: detail || null };
+  function ev(source, direction, signal, detail, group){
+    return { source, direction, signal, detail: detail || null, group: group || 'underlying' };
   }
 
   function safeData(engineResult){
@@ -158,6 +158,69 @@
       : { levelCount: 0, insufficientData: true };
   }
 
+  // ===================================================================
+  // Pre-Close Phase 2 — OPTIONS evidence group. Only two signals are
+  // treated as directional here, both grounded in real, provider-
+  // returned aggregate OI (never per-strike inference, never Greeks):
+  //   - PCR (putOi/callOi, real division of real aggregate OI):
+  //     PCR > 1.2 -> bullish (documented convention: heavy put writing
+  //     read as support), PCR < 0.8 -> bearish (heavy call writing
+  //     read as resistance), between -> no directional claim.
+  //   - Call/Put OI change vs the PREVIOUS poll (supplied by the
+  //     caller — this file has no memory of its own): total call OI
+  //     increasing -> bearish (fresh call writing), decreasing ->
+  //     bullish (call unwinding); total put OI increasing -> bullish,
+  //     decreasing -> bearish. Only computed when a real previous
+  //     snapshot with real aggregate OI values is actually supplied —
+  //     never invented, never assumed from a single reading.
+  // Greeks/IV are surfaced in marketAnalysis.options for display only
+  // — no direction is claimed from them (their absence is instead
+  // reflected in dataAvailability.optionGreeks, which the decision
+  // engine uses to apply a confidence penalty, not a block).
+  // ===================================================================
+  function buildOptionEvidence(optionChain, previousSnapshot, bullish, bearish, marketAnalysis){
+    marketAnalysis.options = optionChain && optionChain.available
+      ? {
+          expiry: optionChain.expiry, strikeCount: optionChain.strikes.length,
+          callOi: optionChain.aggregate.callOi, putOi: optionChain.aggregate.putOi,
+          pcr: optionChain.aggregate.pcr, indiaVix: optionChain.indiaVix,
+          greeksAvailable: optionChain.greeksAvailable
+        }
+      : { available: false };
+
+    if(!optionChain || !optionChain.available) return;
+
+    const pcr = optionChain.aggregate.pcr;
+    if(typeof pcr === 'number'){
+      if(pcr > 1.2) bullish.push(ev('optionsPCR', 'bullish', `PCR ${pcr.toFixed(2)} indicates heavier put OI (support-leaning)`, { pcr }, 'options'));
+      else if(pcr < 0.8) bearish.push(ev('optionsPCR', 'bearish', `PCR ${pcr.toFixed(2)} indicates heavier call OI (resistance-leaning)`, { pcr }, 'options'));
+    }
+
+    if(previousSnapshot && typeof previousSnapshot.callOi === 'number' && typeof previousSnapshot.putOi === 'number'){
+      const callOi = optionChain.aggregate.callOi, putOi = optionChain.aggregate.putOi;
+      if(typeof callOi === 'number'){
+        const callDelta = callOi - previousSnapshot.callOi;
+        if(callDelta > 0) bearish.push(ev('optionsOiChange', 'bearish', `Call OI increased by ${callDelta} since last check (fresh call writing)`, { callDelta }, 'options'));
+        else if(callDelta < 0) bullish.push(ev('optionsOiChange', 'bullish', `Call OI decreased by ${Math.abs(callDelta)} since last check (call unwinding)`, { callDelta }, 'options'));
+      }
+      if(typeof putOi === 'number'){
+        const putDelta = putOi - previousSnapshot.putOi;
+        if(putDelta > 0) bullish.push(ev('optionsOiChange', 'bullish', `Put OI increased by ${putDelta} since last check (fresh put writing)`, { putDelta }, 'options'));
+        else if(putDelta < 0) bearish.push(ev('optionsOiChange', 'bearish', `Put OI decreased by ${Math.abs(putDelta)} since last check (put unwinding)`, { putDelta }, 'options'));
+      }
+    }
+  }
+
+  function computeAtmStrike(strikes, spotPrice){
+    if(!Array.isArray(strikes) || !strikes.length || typeof spotPrice !== 'number') return null;
+    let best = null, bestDist = Infinity;
+    strikes.forEach(function(s){
+      const d = Math.abs(s.strike - spotPrice);
+      if(d < bestDist){ bestDist = d; best = s.strike; }
+    });
+    return best;
+  }
+
   /**
    * @param {object} analysisContext - real return of
    *   window.DannyChart.Analysis.AnalysisEngine.analyze(candles, opts)
@@ -200,10 +263,20 @@
       }
     }
 
-    // Option-chain availability — always false today; the ONE place
-    // this evidence model asserts the mandatory blocker.
+    // Option-chain availability — the mandatory blocker only when the
+    // fetch genuinely failed or returned no usable data (Phase 2: no
+    // longer unconditional — a genuine successful response does NOT
+    // set this flag).
     if(!optionChainResult || !optionChainResult.available){
       riskFlags.push({ code: 'OPTION_DATA_UNAVAILABLE', message: (optionChainResult && optionChainResult.reason) || 'Option-chain data unavailable.' });
+    } else {
+      const spotPrice = (candles.length && typeof candles[candles.length - 1].close === 'number') ? candles[candles.length - 1].close : null;
+      marketAnalysis.atmStrike = computeAtmStrike(optionChainResult.strikes, spotPrice);
+      buildOptionEvidence(optionChainResult, params.previousOptionSnapshot || null, bullish, bearish, marketAnalysis);
+      dataAvailability.optionGreeks = !!optionChainResult.greeksAvailable;
+      if(!optionChainResult.greeksAvailable){
+        riskFlags.push({ code: 'GREEKS_UNAVAILABLE', message: 'IV/Greeks were not present in this option-chain response.', severity: 'confidence-penalty' });
+      }
     }
 
     // Candle freshness — never call candle data "live"; only ever "as
