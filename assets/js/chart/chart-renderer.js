@@ -185,6 +185,14 @@
     return styleDef.color || '#D4AF6A';
   }
 
+  /** Phase 6 diagnostic helper — used only by the drawable-geometry
+   *  instrumentation below (recordDiag) to answer "is this coordinate
+   *  actually on screen", never by any drawing code path itself. */
+  function isInsideViewport(x, y, dc){
+    return Number.isFinite(x) && Number.isFinite(y) &&
+      x >= 0 && x <= dc.canvasWidth && y >= 0 && y <= dc.canvasHeight;
+  }
+
   function hexToRgba(hex, a){
     const n = parseInt(hex.replace('#',''), 16);
     return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
@@ -245,12 +253,34 @@
     let removed = false;
 
     function paint(dc){
-      if(!visible || removed) return;
+      // --- Phase 6 diagnostic instrumentation ------------------------
+      // Additive only: recordDiag() pushes a snapshot onto dc.diagnostics
+      // (an array paintFrame() creates fresh each frame) and never reads
+      // from or alters ctx, x/y values used for drawing, or control
+      // flow — every existing early-return/branch below is unchanged.
+      // Guarded on Array.isArray(dc.diagnostics) so a `dc` without it
+      // (e.g. a test's minimal stub) behaves exactly as before.
+      function recordDiag(patch){
+        if(!dc || !Array.isArray(dc.diagnostics)) return;
+        dc.diagnostics.push(Object.assign({
+          id: ann.id, type: ann.type, subtype: ann.subtype,
+          layer: dc.layerName || null,
+          index: (ann.metadata && (ann.metadata.index !== undefined ? ann.metadata.index
+                 : ann.metadata.startIndex !== undefined ? ann.metadata.startIndex : null)) ?? null,
+          startTime: ann.startTime, price1: ann.price1,
+          x: null, y: null, painted: false, insideViewport: false, reason: null
+        }, patch));
+      }
+
+      if(!visible || removed){ recordDiag({ reason: !visible ? 'drawable/layer hidden' : 'removed' }); return; }
       const styleDef = STYLES[ann.type];
-      if(!styleDef) return;
+      if(!styleDef){ recordDiag({ reason: 'no STYLES entry for annotation type "' + ann.type + '"' }); return; }
 
       const x1 = dc.timeToX(ann.startTime);
-      if(x1 === null) return;
+      if(x1 === null || !Number.isFinite(x1)){
+        recordDiag({ x: x1, reason: 'timeToX(startTime) returned null/non-finite — startTime not inside the chart\'s current visible time range' });
+        return;
+      }
       const x2raw = (ann.endTime !== null && ann.endTime !== undefined) ? dc.timeToX(ann.endTime) : null;
       const shape = ann.type === 'PREMIUM_DISCOUNT'
         ? (ann.subtype === 'equilibrium' ? 'line-right' : 'rect')
@@ -261,7 +291,10 @@
 
       if(shape === 'rect'){
         const y1 = dc.priceToY(ann.price1), y2 = dc.priceToY(ann.price2);
-        if(y1 === null || y2 === null) return;
+        if(y1 === null || y2 === null || !Number.isFinite(y1) || !Number.isFinite(y2)){
+          recordDiag({ x: x1, y: y1, reason: 'priceToY(price1/price2) returned null/non-finite — price outside the chart\'s current visible price range' });
+          return;
+        }
         const x2 = x2raw !== null ? x2raw : dc.rightEdgeX;
         const rx = Math.min(x1,x2), rw = Math.abs(x2-x1);
         const ry = Math.min(y1,y2), rh = Math.max(Math.abs(y2-y1), 2);
@@ -270,10 +303,14 @@
         ctx.setLineDash([3,3]); ctx.strokeRect(rx,ry,rw,rh); ctx.setLineDash([]);
         dc.queueLabel(ann.label, rx+6, ry+14, color, 'left');
         dc.registerHit(ann, rx, ry, rw, rh);
+        recordDiag({ x: rx, y: ry, painted: true, insideViewport: isInsideViewport(rx, ry, dc) || isInsideViewport(rx+rw, ry+rh, dc) });
       }
       else if(shape === 'line-right' || shape === 'line-h'){
         const y = dc.priceToY(ann.price1);
-        if(y === null) return;
+        if(y === null || !Number.isFinite(y)){
+          recordDiag({ x: x1, y: y, reason: 'priceToY(price1) returned null/non-finite — price outside the chart\'s current visible price range' });
+          return;
+        }
         const x2 = (shape === 'line-h' && x2raw !== null) ? x2raw : dc.rightEdgeX;
         ctx.globalAlpha = alpha; ctx.strokeStyle = color;
         ctx.lineWidth = ann.type === 'TRADE_LEVEL' ? 1.6 : 1.4;
@@ -281,26 +318,38 @@
         ctx.beginPath(); ctx.moveTo(x1,y); ctx.lineTo(x2,y); ctx.stroke(); ctx.setLineDash([]);
         dc.queueLabel(ann.label, x2-6, y-8, color, 'right');
         dc.registerHit(ann, Math.min(x1,x2)-4, y-8, Math.abs(x2-x1)+8, 16);
+        recordDiag({ x: x1, y: y, painted: true, insideViewport: isInsideViewport(x1, y, dc) || isInsideViewport(x2, y, dc) });
       }
       else if(shape === 'liquidity'){
         const y = dc.priceToY(ann.price1);
-        if(y === null) return;
+        if(y === null || !Number.isFinite(y)){
+          recordDiag({ x: x1, y: y, reason: 'priceToY(price1) returned null/non-finite — price outside the chart\'s current visible price range' });
+          return;
+        }
         const x2 = x1 + 46;
         ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = 1.2;
         ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(x1,y); ctx.lineTo(x2,y); ctx.stroke(); ctx.setLineDash([]);
         ctx.beginPath(); ctx.arc(x2,y,3,0,Math.PI*2); ctx.fillStyle = color; ctx.fill();
         dc.queueLabel(ann.label, x2+6, y-6, color, 'left');
         dc.registerHit(ann, x1-4, y-10, 60, 20);
+        recordDiag({ x: x1, y: y, painted: true, insideViewport: isInsideViewport(x1, y, dc) || isInsideViewport(x2, y, dc) });
       }
       else if(shape === 'marker'){
         const y = dc.priceToY(ann.price1);
-        if(y === null) return;
+        if(y === null || !Number.isFinite(y)){
+          recordDiag({ x: x1, y: y, reason: 'priceToY(price1) returned null/non-finite — price outside the chart\'s current visible price range' });
+          return;
+        }
         ctx.globalAlpha = alpha; ctx.fillStyle = color;
         ctx.beginPath();
         if(ann.type === 'SWING_HIGH'){ ctx.moveTo(x1,y-7); ctx.lineTo(x1-5,y+2); ctx.lineTo(x1+5,y+2); }
         else { ctx.moveTo(x1,y+7); ctx.lineTo(x1-5,y-2); ctx.lineTo(x1+5,y-2); }
         ctx.closePath(); ctx.fill();
         dc.registerHit(ann, x1-8, y-10, 16, 20);
+        recordDiag({ x: x1, y: y, painted: true, insideViewport: isInsideViewport(x1, y, dc) });
+      }
+      else {
+        recordDiag({ x: x1, reason: 'unrecognized shape "' + shape + '" for annotation type "' + ann.type + '"' });
       }
       ctx.globalAlpha = 1;
     }
@@ -498,21 +547,42 @@
       const timeScale = chart.timeScale();
       const hitRegions = [];
       const labelQueue = [];
+      // Phase 6 instrumentation — a fresh array every frame; recordDiag()
+      // inside each Drawable's paint() (chart-renderer.js) pushes one
+      // entry per drawable actually iterated this frame. Read via
+      // getDrawableDiagnostics() below; never influences what's drawn.
+      const diagnostics = [];
       const dc = {
         ctx,
         rightEdgeX: container.clientWidth - 4,
+        canvasWidth: container.clientWidth,
+        canvasHeight: container.clientHeight,
+        diagnostics,
+        layerName: null,
         timeToX: t => timeScale.timeToCoordinate(t),
         priceToY: p => series.priceToCoordinate(p),
         queueLabel: (text,x,y,color,align) => { if(text) labelQueue.push({text,x,y,color,align}); },
         registerHit: (ann,x,y,w,h) => hitRegions.push({ ann, x, y, w, h })
       };
 
-      LAYER_ORDER.filter(n => n !== 'labels').forEach(name => layers.get(name).paint(dc));
+      LAYER_ORDER.filter(n => n !== 'labels').forEach(name => {
+        dc.layerName = name; // tags every recordDiag() entry this layer's drawables produce
+        layers.get(name).paint(dc);
+      });
 
       // Layer 7: labels painted last, always on top of every zone/line.
       labelQueue.forEach(({text,x,y,color,align}) => drawLabel(text,x,y,color,align));
 
       lastHitRegions = hitRegions;
+      lastPaintDiagnostics = {
+        generatedAt: Date.now(),
+        dpr,
+        canvasCssWidth: container.clientWidth,
+        canvasCssHeight: container.clientHeight,
+        canvasPhysicalWidth: overlayCanvas.width,
+        canvasPhysicalHeight: overlayCanvas.height,
+        entries: diagnostics
+      };
     }
 
     function drawLabel(text, x, y, color, align){
@@ -528,6 +598,7 @@
     }
 
     let lastHitRegions = [];
+    let lastPaintDiagnostics = null; // Phase 6 — see paintFrame()/getDrawableDiagnostics()
 
     function resize(){
       if(!chart) return;
@@ -764,6 +835,10 @@
       setTheme, resize, destroy,
       getState,
       setTimeframeLabel, setReplayActive,
+      // Phase 6 — read-only snapshot of the most recent paintFrame()'s
+      // per-drawable geometry (see paintFrame() above). null until the
+      // first frame has painted.
+      getDrawableDiagnostics: () => lastPaintDiagnostics,
       on: emitter.on, off: emitter.off, once: emitter.once, emit: emitter.emit
     };
   }

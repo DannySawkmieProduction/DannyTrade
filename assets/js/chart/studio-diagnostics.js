@@ -14,8 +14,9 @@
    is never a permanent/intrusive production UI element.
 
    HOW TO OPEN: press Ctrl+Shift+D (Cmd+Shift+D on Mac) anywhere on
-   studio.html. Press it again, or the panel's own "Close" button, to
-   hide it. It reports, per overlay layer:
+   studio.html, or tap the "Diag" button next to the overlay toggle bar
+   (mobile-reachable — no keyboard needed). Press again, or the panel's
+   own "Close" button, to hide it. It reports, per overlay layer:
      Analysis   — how many raw analysis objects the last Structured
                   Analysis response contained for that section
      Annotations— how many Annotation objects buildAnnotations()
@@ -25,7 +26,18 @@
                   Drawables exist but paint() is a no-op for them — see
                   chart-renderer.js's Layer.paint())
    plus the last AI analysis call's status (ok / error / not_connected)
-   from window.DannyChart.lastAnalysisStatus (see studio-bootstrap.js).
+   from window.DannyChart.lastAnalysisStatus (see studio-bootstrap.js),
+   and a renderer-level summary (total drawables, visible layer count,
+   AI provider name, last render error).
+
+   Phase 6 — Drawable Geometry section: one row per drawable from the
+   renderer's own getDrawableDiagnostics() (chart-renderer.js), refreshed
+   every paint. Shows exactly what the last paint pass computed — index,
+   resolved candle timestamp, price, calculated X/Y, whether that X/Y is
+   inside the visible canvas, and whether the drawable actually painted
+   (vs. silently returning early because timeToX/priceToY couldn't
+   resolve a coordinate). Nothing in this section is estimated — it is
+   chart-renderer.js's own geometry, read back after the fact.
 ===================================================================== */
 (function initStudioDiagnostics(){
   'use strict';
@@ -117,6 +129,50 @@
       rows = '<div style="color:#8D93A6;margin-top:6px">Overlay Manager not available.</div>';
     }
 
+    // Phase 6 — per-drawable geometry, read straight from chart-renderer.js's
+    // getDrawableDiagnostics() (populated every paint by the SAME code that
+    // draws the chart — see chart-renderer.js's recordDiag()). Every value
+    // below is exactly what the last paint pass computed; nothing here is
+    // estimated or fabricated. null until at least one frame has painted.
+    var geomRows = '';
+    var drawDiag = state.renderer && typeof state.renderer.getDrawableDiagnostics === 'function'
+      ? state.renderer.getDrawableDiagnostics() : null;
+    if(drawDiag && drawDiag.entries && drawDiag.entries.length){
+      geomRows += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Drawable Geometry</b> ' +
+        '<span style="color:#565C70">(canvas ' + drawDiag.canvasCssWidth + '×' + drawDiag.canvasCssHeight +
+        'px, dpr ' + drawDiag.dpr + ')</span></div>';
+      geomRows += '<table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:10px">';
+      geomRows += '<tr style="color:#8D93A6"><td>Layer</td><td>Type</td><td>Idx</td><td>t</td><td>Price</td><td>X</td><td>Y</td><td>In-view</td><td>Painted</td></tr>';
+      drawDiag.entries.forEach(function(e){
+        var inView = e.painted ? (e.insideViewport ? 'yes' : 'NO') : '—';
+        var paintedColor = e.painted ? '#35D399' : '#FF5C6C';
+        geomRows += '<tr title="' + escapeHtml(e.reason || '') + '">' +
+          '<td>' + escapeHtml(e.layer || '—') + '</td>' +
+          '<td>' + escapeHtml(e.type || '—') + '</td>' +
+          '<td>' + (e.index != null ? e.index : '—') + '</td>' +
+          '<td>' + (e.startTime != null ? e.startTime : '—') + '</td>' +
+          '<td>' + (e.price1 != null ? e.price1 : '—') + '</td>' +
+          '<td>' + (e.x != null ? Math.round(e.x) : '—') + '</td>' +
+          '<td>' + (e.y != null ? Math.round(e.y) : '—') + '</td>' +
+          '<td style="color:' + (e.insideViewport ? '#35D399' : '#FFA53C') + '">' + inView + '</td>' +
+          '<td style="color:' + paintedColor + '">' + (e.painted ? 'yes' : 'NO') + '</td>' +
+          '</tr>';
+      });
+      geomRows += '</table>';
+      var failCount = drawDiag.entries.filter(function(e){ return !e.painted; }).length;
+      var offViewCount = drawDiag.entries.filter(function(e){ return e.painted && !e.insideViewport; }).length;
+      if(failCount || offViewCount){
+        geomRows += '<div style="margin-top:4px;color:#FFA53C">' +
+          (failCount ? failCount + ' drawable(s) failed to paint (see row tooltip for reason). ' : '') +
+          (offViewCount ? offViewCount + ' drawable(s) painted but landed outside the visible canvas area.' : '') +
+          '</div>';
+      }
+    } else if(drawDiag){
+      geomRows = '<div style="margin-top:10px;color:#8D93A6">Last paint pass recorded 0 drawables (nothing currently visible/toggled ON, or no annotations loaded yet).</div>';
+    } else {
+      geomRows = '<div style="margin-top:10px;color:#8D93A6">Drawable geometry not available yet (renderer has not painted a frame).</div>';
+    }
+
     var statusColor = status.status === 'ok' ? '#35D399' : (status.status === 'unknown' ? '#8D93A6' : '#FFA53C');
 
     panelEl.innerHTML =
@@ -128,6 +184,7 @@
       '<div style="margin-top:4px;color:#8D93A6">Renderer drawables (total): ' + totalDrawables + ' &nbsp;|&nbsp; Visible layers: ' + visibleLayerCount + '</div>' +
       '<div style="margin-top:4px;color:' + (DC.lastRenderError ? '#FF5C6C' : '#8D93A6') + '">Last error: ' + lastError + '</div>' +
       rows +
+      geomRows +
       '<div style="margin-top:8px;color:#565C70">Tap the Diag button (or Ctrl+Shift+D on desktop) to toggle. Dev-only — not shown by default.</div>';
 
     var closeBtn = document.getElementById('dtDiagCloseBtn');
