@@ -339,5 +339,149 @@ console.log('\n[13] Classification: chart canvas z-index above overlay -> CSS CO
   assert(html.indexOf('CLASSIFICATION 8: CSS COMPOSITING / Z-INDEX ISSUE') !== -1, 'Chart canvas z-index (3) above overlay (auto=0) classifies as CSS COMPOSITING / Z-INDEX ISSUE (8)');
 }
 
+console.log('\n[14] FIX 1 — multi-canvas scenario (plot pane 830x412 + narrow axis-label canvas), overlay 830x412 -> NOT misaligned');
+{
+  // Reproduces the real live scenario: TradingView created the actual
+  // plot-pane canvas (830x412, largest area) PLUS a narrow price-scale
+  // axis-label canvas (72x412) alongside it. The overlay is correctly
+  // aligned to the plot pane. Before FIX 1, classifyRendering() compared
+  // the overlay against EVERY entry via .some() and would flag the
+  // narrow axis canvas as a "mismatch" even though the real plot pane
+  // matches — producing a false CLASSIFICATION 6. This proves that no
+  // longer happens.
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 1, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 830, canvasCssHeight: 412, canvasPhysicalWidth: 830, canvasPhysicalHeight: 412,
+        paintHistory: [],
+        entries: [ { id: 'a', type: 'FVG', layer: 'fvg', x: 100, y: 60, painted: true, insideViewport: true, reason: null } ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 39, top: 948, width: 830, height: 412 }, zIndex: 'auto', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [
+          { rect: { left: 39, top: 948, width: 830, height: 412 }, zIndex: 'auto' },  // the real plot pane (largest area)
+          { rect: { left: 869, top: 948, width: 72, height: 412 }, zIndex: 'auto' }, // narrow price-scale axis-label canvas
+          { rect: { left: 39, top: 1360, width: 830, height: 28 }, zIndex: 'auto' }  // narrow time-scale axis-label canvas
+        ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 6') === -1, 'CLASSIFICATION 6 (OVERLAY CANVAS MISALIGNED) does NOT fire despite two narrow axis-label canvases being present alongside the matching plot pane');
+  assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Classifier correctly compares only the largest-area (plot-pane) canvas and reaches DRAW CALL EXECUTED (3)');
+}
+
+console.log('\n[15] FIX 1 — a genuinely misaligned PLOT PANE (not an axis canvas) still correctly triggers CLASSIFICATION 6');
+{
+  // Guards against FIX 1 being too permissive: if the actual largest-area
+  // canvas (the plot pane) itself doesn't match the overlay, this must
+  // still fire — only the narrow axis-label canvases should be ignored.
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 1, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 902, canvasCssHeight: 440, canvasPhysicalWidth: 902, canvasPhysicalHeight: 440,
+        paintHistory: [],
+        entries: [ { id: 'a', type: 'FVG', layer: 'fvg', x: 100, y: 60, painted: true, insideViewport: true, reason: null } ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 0, top: 0, width: 902, height: 440 }, zIndex: 'auto', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [
+          { rect: { left: 0, top: 0, width: 830, height: 412 }, zIndex: '1' }, // real plot pane — genuinely smaller than the overlay
+          { rect: { left: 830, top: 0, width: 72, height: 412 }, zIndex: 'auto' } // narrow axis-label canvas
+        ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 6: OVERLAY CANVAS MISALIGNED') !== -1, 'A real mismatch against the actual largest-area plot pane still correctly fires CLASSIFICATION 6');
+  assert(html.indexOf('the same one chart-renderer.js aligns to') !== -1, 'Evidence text confirms it compared against the plot-pane canvas selected the same way chart-renderer.js selects it');
+}
+
+console.log('\n[16] FIX 2 — off-screen drawable (X=-16, the confirmed live SWING_HIGH) gets informational wording, not an alarm, and data is preserved unchanged');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 2, visibleLayers: ['candlesticks', 'marketStructure'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 830, canvasCssHeight: 412, canvasPhysicalWidth: 830, canvasPhysicalHeight: 412,
+        paintHistory: [],
+        entries: [
+          // The exact confirmed live example: real timestamp, valid extrapolated
+          // negative X from timeToCoordinate(), painted successfully, simply
+          // outside the currently panned/zoomed view.
+          { id: 'swing14', type: 'SWING_HIGH', layer: 'marketStructure', index: 14, startTime: 1785996000, price1: 24677.05, x: -16, y: 72, painted: true, insideViewport: false, reason: null },
+          { id: 'swing56', type: 'SWING_LOW', layer: 'marketStructure', index: 56, startTime: 1786334400, price1: 24511.1, x: 178, y: 192, painted: true, insideViewport: true, reason: null }
+        ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 39, top: 948, width: 830, height: 412 }, zIndex: 'auto', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [ { rect: { left: 39, top: 948, width: 830, height: 412 }, zIndex: 'auto' } ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+
+  // Data preserved exactly — nothing about the underlying diagnostic
+  // values changed, only presentation of the summary line.
+  assert(/X: -16/.test(html), 'Raw X=-16 value is still shown unchanged (Mobile Summary card)');
+  assert(html.indexOf('In-view: <span style="color:#FFA53C">NO') !== -1 || html.indexOf('>NO<') !== -1, 'insideViewport is still reported as NO — not silently marked in-view');
+
+  // The old alarming wording must be gone entirely.
+  assert(html.indexOf('landed outside the visible canvas area') === -1, 'Old alarming phrasing ("...landed outside the visible canvas area") no longer appears anywhere');
+
+  // The new informational wording must be present, worded as informational
+  // (pan/zoom explanation, explicitly says "not a rendering failure"), and
+  // colored neutrally rather than orange/red.
+  assert(html.indexOf('currently outside the visible plot area') !== -1, 'New informational wording is present');
+  assert(html.indexOf('not a rendering failure') !== -1, 'Wording explicitly clarifies this is not a rendering failure');
+  assert(html.indexOf('color:#8D93A6">1 drawable(s) currently outside') !== -1, 'The off-view advisory line uses the neutral gray (#8D93A6), not the alarm orange (#FFA53C) used for actual paint failures');
+
+  // Classification codes must be unaffected by this wording change — with
+  // one drawable in-view and painted, this should still resolve to 3.
+  assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Classification code is unaffected by the wording change — still correctly reaches 3 since at least one drawable is in-view');
+}
+
+console.log('\n[17] FIX 2 — a genuine paint FAILURE (not just off-screen) still keeps its alarming wording/color');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 2, visibleLayers: ['marketStructure'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 830, canvasCssHeight: 412, canvasPhysicalWidth: 830, canvasPhysicalHeight: 412,
+        paintHistory: [],
+        entries: [
+          { id: 'ok', type: 'SWING_LOW', layer: 'marketStructure', x: 178, y: 192, painted: true, insideViewport: true, reason: null },
+          { id: 'bad', type: 'FVG', layer: 'fvg', x: null, y: null, painted: false, insideViewport: false, reason: 'priceToY(price1/price2) returned null/non-finite — price outside the chart\'s current visible price range' }
+        ]
+      }),
+      getCanvasLayoutDiagnostics: () => null
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('drawable(s) failed to paint') !== -1, 'A genuine paint failure still gets the failure-specific line');
+  assert(html.indexOf('color:#FFA53C">1 drawable(s) failed to paint') !== -1, 'Genuine paint failures still use the alarm orange color, unaffected by FIX 2');
+}
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 process.exit(failed > 0 ? 1 : 0);
