@@ -52,6 +52,19 @@
      // Educational Notes section
      educationalNotes: string[]
    }
+
+   =====================================================================
+   CAS Phase 1 addition (additive only — everything above is unchanged)
+   =====================================================================
+   A small session/CAS indicator, driven by assets/js/chart/market-
+   session.js, NOT by the Structured Analysis object. It renders only
+   for a CAS-eligible symbol, and only while relevant (during the CAS
+   auction itself, or immediately after it concludes) — indices and
+   non-CAS stocks never show it, and it stays hidden the rest of the
+   trading day so it never competes for space with the decision fields
+   above. It never displays a closing price DannyTrade did not actually
+   receive — see renderSessionIndicator() below for why that price is
+   always "not available" today.
 ===================================================================== */
 
 (function initDecisionPanel(){
@@ -91,6 +104,16 @@
     head.className = 'ai-decision-head';
     head.innerHTML = `<h3>AI Decision Panel</h3><span class="ai-decision-badge" data-field="badge">Loading</span>`;
     container.appendChild(head);
+
+    // CAS Phase 1 — hidden by default; renderSessionIndicator() below
+    // is the only thing that ever shows or fills it, and only for a
+    // CAS-eligible symbol during/just after its auction. See the CAS
+    // header note above this function for the full behavior.
+    const sessionBlock = document.createElement('div');
+    sessionBlock.className = 'ai-decision-session';
+    sessionBlock.setAttribute('data-field', 'sessionIndicator');
+    sessionBlock.style.display = 'none';
+    container.appendChild(sessionBlock);
 
     const finalBlock = document.createElement('div');
     finalBlock.className = 'ai-decision-final';
@@ -177,6 +200,7 @@
     const fieldEls = buildDom(container);
     let lastValues = {}; // fieldName -> last rendered value, for incremental diffing
     let lastAnalysis = null;
+    let lastSymbol = null; // CAS Phase 1 — set whenever update()'s context carries one; see renderSessionIndicator()
 
     function setText(field, text){
       const el = fieldEls.get(field);
@@ -235,6 +259,56 @@
       return String(s).replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
     }
 
+    /* -----------------------------------------------------------------
+       CAS Phase 1 — session/CAS indicator. Symbol-driven, not analysis-
+       driven, so it renders independently of whatever the AI returned
+       (or whether an AI is connected at all). Re-runs on a short timer
+       so the badge transitions CONTINUOUS -> CAS -> POST_CLOSE live as
+       the clock passes those boundaries, without waiting for a new
+       analysis to arrive.
+    ----------------------------------------------------------------- */
+    function renderSessionIndicator(){
+      const el = fieldEls.get('sessionIndicator');
+      if(!el) return;
+
+      const MarketSession = window.DannyChart && window.DannyChart.MarketSession;
+      if(!lastSymbol || !MarketSession || typeof MarketSession.getSession !== 'function'){
+        el.style.display = 'none';
+        return;
+      }
+
+      const info = MarketSession.getSession(new Date(), lastSymbol);
+
+      // Only show for a CAS-eligible symbol, and only while it's
+      // actually relevant — the auction itself, or just after it, so
+      // the panel doesn't carry a CAS badge all day. Indices and
+      // non-CAS stocks (info.casEligible === false) never show this.
+      if(!info.casEligible || (info.session !== 'CAS' && info.session !== 'POST_CLOSE')){
+        el.style.display = 'none';
+        return;
+      }
+
+      el.style.display = '';
+      el.classList.toggle('cas-active', info.session === 'CAS');
+      el.classList.toggle('cas-complete', info.session === 'POST_CLOSE');
+
+      if(info.session === 'CAS'){
+        el.innerHTML =
+          `<span class="cas-tag">CAS</span>` +
+          `<span class="cas-time">${info.continuousTradingEnd}\u2013${info.auctionEnd}</span>` +
+          `<span class="cas-label">Closing Auction</span>`;
+      } else {
+        // POST_CLOSE: never invent a closing price DannyTrade did not
+        // actually receive. FYERS supplies plain OHLC only — no
+        // distinct CAS-auction closing price — so this always reads
+        // "not available" today. See market-session.js's
+        // officialCloseSource for the future-ready hook.
+        el.innerHTML =
+          `<span class="cas-tag cas-tag-complete">CAS CLOSE</span>` +
+          `<span class="cas-label">Not available from current data source</span>`;
+      }
+    }
+
     /**
      * Renders a Structured Analysis object (see the schema documented
      * at the top of this file and in annotation-model.js). Only the
@@ -251,6 +325,14 @@
     function update(analysis, context = {}){
       const decision = (analysis && analysis.decision) || {};
       lastAnalysis = analysis || null;
+
+      // CAS Phase 1 — additive only. context.symbol is optional and,
+      // when present, drives ONLY the session indicator above; it has
+      // no effect on any decision field below.
+      if(context.symbol){
+        lastSymbol = context.symbol;
+      }
+      renderSessionIndicator();
 
       let badge = 'Live';
       if(context.replayState && context.replayState.playing) badge = 'Replaying';
@@ -296,6 +378,12 @@
     function reset(){
       lastAnalysis = null;
       buildDomFieldsToDefault();
+      // CAS Phase 1 — hide the session badge until the next update()
+      // or timer tick re-evaluates it; lastSymbol is intentionally
+      // preserved so an unrelated reset (e.g. a timeframe switch on
+      // the same symbol) doesn't lose session context.
+      const sessionEl = fieldEls.get('sessionIndicator');
+      if(sessionEl) sessionEl.style.display = 'none';
       // Sync the diff baseline to exactly what was just written, so the
       // next update() only reports fields that differ from THIS reset
       // state — not every field, just because lastValues was cleared.
@@ -330,7 +418,15 @@
 
     function getLastAnalysis(){ return lastAnalysis; }
 
+    // CAS Phase 1 — keeps the session badge live (CONTINUOUS -> CAS ->
+    // POST_CLOSE) between update() calls, same "poll independently of
+    // the data pipeline" pattern auto-refresh-manager.js already uses
+    // for its own market-hours check. 20s is frequent enough for a
+    // ~15-20 minute CAS window without being wasteful.
+    const sessionTimer = setInterval(renderSessionIndicator, 20000);
+
     function destroy(){
+      clearInterval(sessionTimer);
       container.innerHTML = '';
       fieldEls.clear();
     }

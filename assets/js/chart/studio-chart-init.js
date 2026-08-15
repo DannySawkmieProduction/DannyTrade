@@ -221,7 +221,11 @@
       if(state.decisionPanel){
         state.decisionPanel.update(analysis, {
           rendererState: state.renderer ? state.renderer.getState() : null,
-          replayState: state.replayEngine ? state.replayEngine.getState() : null
+          replayState: state.replayEngine ? state.replayEngine.getState() : null,
+          // CAS Phase 1 — passed through so decision-panel.js can show
+          // its own session/CAS indicator; every other field above is
+          // unchanged. See assets/js/chart/decision-panel.js.
+          symbol: symbol
         });
       }
       const annotations = config.AnnotationModel ? config.AnnotationModel.buildAnnotations(candles, analysis) : [];
@@ -350,7 +354,7 @@
       if(config.decisionPanelContainer){
         state.decisionPanel = await safeStep('Mounting decision panel', async () => {
           const panel = config.DecisionPanel.mount(config.decisionPanelContainer, state.renderer);
-          if(state.lastAnalysis) panel.update(state.lastAnalysis, { rendererState: state.renderer.getState() });
+          if(state.lastAnalysis) panel.update(state.lastAnalysis, { rendererState: state.renderer.getState(), symbol: config.symbol });
           return panel;
         });
       }

@@ -38,7 +38,11 @@
                          studio-chart-init.js already listens to.
      'offline'        - navigator.onLine is false / a 'offline' event fired.
      'marketClosed'   - the injected isMarketOpen() check returned false
-                         (default: NSE cash session, Mon-Fri 09:15-15:30 IST).
+                         (default: delegates to market-session.js's
+                         MarketSession.isMarketOpen() — see that file
+                         for the exact window, which now runs Mon-Fri
+                         09:15-16:00 IST to also cover the CAS + post-
+                         close window instead of stopping at 15:30).
      'manual'         - pause() was called explicitly.
 
    The loop only fires when the reason set is empty AND the manager is
@@ -70,12 +74,22 @@
   const DEFAULT_RETRY_MAX_MS = 30000;
   const MARKET_CHECK_INTERVAL_MS = 30000;
 
-  /** Default market-open check: NSE cash session, Mon-Fri 09:15-15:30
-   *  IST, computed via Intl so it's correct regardless of the browser's
-   *  local timezone. Callers targeting a different market/provider pass
-   *  their own `isMarketOpen` instead — this module never assumes NSE
-   *  is the only calendar that matters. */
+  /** Default market-open check — delegates to the single authoritative
+   *  session module (assets/js/chart/market-session.js) instead of
+   *  keeping its own hardcoded NSE window. That module computes in
+   *  Asia/Kolkata via Intl regardless of the browser's local timezone,
+   *  exactly as this function used to do directly. Callers targeting a
+   *  different market/provider still pass their own `isMarketOpen`
+   *  instead — this module never assumes NSE is the only calendar that
+   *  matters. Falls back to the previous inline 09:15-15:30 check ONLY
+   *  if market-session.js somehow isn't loaded, so a script-order
+   *  problem degrades gracefully rather than breaking auto-refresh. */
   function defaultIsMarketOpen(date){
+    const MarketSession = window.DannyChart && window.DannyChart.MarketSession;
+    if(MarketSession && typeof MarketSession.isMarketOpen === 'function'){
+      return MarketSession.isMarketOpen(date || new Date());
+    }
+
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: 'Asia/Kolkata', hour12: false,
       weekday: 'short', hour: '2-digit', minute: '2-digit'
@@ -97,7 +111,7 @@
    * @param {number} [opts.intervalMs=15000]      - ms between automatic refreshes
    * @param {boolean} [opts.autoStart=true]        - start the loop immediately
    * @param {boolean} [opts.respectMarketHours=true] - gate automatic refreshes on isMarketOpen()
-   * @param {function} [opts.isMarketOpen]         - (Date) => boolean; defaults to NSE cash-session hours
+   * @param {function} [opts.isMarketOpen]         - (Date) => boolean; defaults to market-session.js's MarketSession.isMarketOpen()
    * @param {number} [opts.marketCheckIntervalMs=30000] - how often market-open status is re-evaluated
    * @param {boolean} [opts.monitorConnection=true] - pause while navigator.onLine is false
    * @param {number} [opts.maxRetries=4]           - consecutive failed refreshes before giving up until the next scheduled tick
