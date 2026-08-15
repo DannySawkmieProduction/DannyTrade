@@ -164,16 +164,27 @@ console.log('\n[11] Liquidity sweep direction mapping — sell-side sweep is bul
   assert(evBuy.bearish.some(e => e.source === 'liquidity'), 'Buy-side sweep correctly mapped to bearish evidence');
 }
 
-console.log('\n[12] PCR evidence — high PCR (>1.2) is bullish, low PCR (<0.8) is bearish, tagged group:options');
+console.log('\n[12] PCR evidence — Phase 3: now CONTEXTUAL, never standalone. Only becomes evidence when supportive of an already-established underlying direction');
 {
-  const evHigh = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 100, putOi: 150, pcr: 1.5 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
-  assert(evHigh.bullish.some(e => e.source === 'optionsPCR' && e.group === 'options'), 'PCR 1.5 (>1.2) produces bullish evidence tagged group:options');
+  const bullishCtx = baseAnalysisContext({ marketStructure: { data: { external: { trend: 'bullish', swings: [] }, meta: { insufficientData: false } } } });
+  const evHigh = EM.buildEvidence(bullishCtx, optionChainFixture({ aggregate: { callOi: 100, putOi: 150, pcr: 1.5 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evHigh.bullish.some(e => e.source === 'optionsPCR' && e.group === 'options'), 'PCR 1.5 (>1.2) IS evidence when underlying is already bullish (supportive)');
+  assert(evHigh.marketAnalysis.pcrContext === 'PCR_SUPPORTIVE', 'marketAnalysis.pcrContext correctly labeled PCR_SUPPORTIVE');
 
-  const evLow = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 150, putOi: 100, pcr: 100/150 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
-  assert(evLow.bearish.some(e => e.source === 'optionsPCR' && e.group === 'options'), 'PCR ~0.67 (<0.8) produces bearish evidence tagged group:options');
+  const bearishCtx = baseAnalysisContext({ marketStructure: { data: { external: { trend: 'bearish', swings: [] }, meta: { insufficientData: false } } } });
+  const evLow = EM.buildEvidence(bearishCtx, optionChainFixture({ aggregate: { callOi: 150, putOi: 100, pcr: 100/150 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evLow.bearish.some(e => e.source === 'optionsPCR' && e.group === 'options'), 'PCR ~0.67 (<0.8) IS evidence when underlying is already bearish (supportive)');
 
-  const evNeutral = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 100, putOi: 100, pcr: 1 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
-  assert(!evNeutral.bullish.some(e => e.source === 'optionsPCR') && !evNeutral.bearish.some(e => e.source === 'optionsPCR'), 'PCR 1.0 (neutral band) produces no directional evidence');
+  // Critical: PCR must NEVER stand alone. Same PCR=1.5 reading with NO
+  // underlying direction established (NEUTRAL) produces NO evidence.
+  const evNoContext = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 100, putOi: 150, pcr: 1.5 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(!evNoContext.bullish.some(e => e.source === 'optionsPCR') && !evNoContext.bearish.some(e => e.source === 'optionsPCR'), 'PCR 1.5 with NO underlying direction established produces NO evidence — PCR alone can never decide');
+
+  // A PCR reading that CONTRADICTS the underlying is recorded
+  // informationally but never pushed as evidence for either side.
+  const evContradict = EM.buildEvidence(bullishCtx, optionChainFixture({ aggregate: { callOi: 150, putOi: 100, pcr: 100/150 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evContradict.marketAnalysis.pcrContext === 'PCR_CONTRADICTORY', 'Bullish underlying + low PCR correctly labeled PCR_CONTRADICTORY');
+  assert(!evContradict.bullish.some(e => e.source === 'optionsPCR') && !evContradict.bearish.some(e => e.source === 'optionsPCR'), 'A contradictory PCR reading is never pushed as directional evidence for either side');
 }
 
 console.log('\n[13] OI buildup/unwinding — ONLY computed when a real previous snapshot is supplied, never inferred from a single reading');
@@ -213,6 +224,96 @@ console.log('\n[16] Greeks unavailable -> a SOFT risk flag (GREEKS_UNAVAILABLE),
   assert(evidence.riskFlags.some(f => f.code === 'GREEKS_UNAVAILABLE'), 'GREEKS_UNAVAILABLE flag present when greeksAvailable is false');
   assert(!evidence.riskFlags.some(f => f.code === 'OPTION_DATA_UNAVAILABLE'), 'OPTION_DATA_UNAVAILABLE NOT raised — the option chain itself IS available, just without Greeks');
   assert(evidence.dataAvailability.optionGreeks === false, 'dataAvailability.optionGreeks correctly false');
+}
+
+console.log('\n[17] classifyUnderlyingState() — BULLISH/BEARISH/NEUTRAL/CONFLICTED');
+{
+  assert(EM.classifyUnderlyingState(3, 0) === 'BULLISH', '3 bullish, 0 bearish -> BULLISH');
+  assert(EM.classifyUnderlyingState(0, 2) === 'BEARISH', '0 bullish, 2 bearish -> BEARISH');
+  assert(EM.classifyUnderlyingState(0, 0) === 'NEUTRAL', 'No evidence either way -> NEUTRAL');
+  assert(EM.classifyUnderlyingState(2, 1) === 'CONFLICTED', 'Both bullish AND bearish underlying evidence present -> CONFLICTED, not just "majority wins"');
+}
+
+console.log('\n[18] classifyStrikePositioning() — the exact 4-quadrant OI+premium classification');
+{
+  assert(EM.classifyStrikePositioning({ oi: 1200, ltp: 50 }, { oi: 1000, ltp: 40 }) === 'LIKELY_LONG_BUILDUP', 'OI up + LTP up -> LIKELY_LONG_BUILDUP');
+  assert(EM.classifyStrikePositioning({ oi: 1200, ltp: 30 }, { oi: 1000, ltp: 40 }) === 'LIKELY_SHORT_BUILDUP', 'OI up + LTP down -> LIKELY_SHORT_BUILDUP');
+  assert(EM.classifyStrikePositioning({ oi: 800, ltp: 50 }, { oi: 1000, ltp: 40 }) === 'LIKELY_SHORT_COVERING', 'OI down + LTP up -> LIKELY_SHORT_COVERING');
+  assert(EM.classifyStrikePositioning({ oi: 800, ltp: 30 }, { oi: 1000, ltp: 40 }) === 'LIKELY_LONG_UNWINDING', 'OI down + LTP down -> LIKELY_LONG_UNWINDING');
+  assert(EM.classifyStrikePositioning({ oi: 1000, ltp: 40 }, { oi: 1000, ltp: 40 }) === null, 'No change in either -> null, not guessed');
+  assert(EM.classifyStrikePositioning(null, { oi: 1000, ltp: 40 }) === null, 'Missing current reading -> null, never inferred from one side only');
+  assert(EM.classifyStrikePositioning({ oi: 1000, ltp: 40 }, null) === null, 'Missing previous reading -> null, never inferred from a single snapshot');
+}
+
+console.log('\n[19] detectTrap() — BULL_TRAP and BEAR_TRAP require a real sweep AND a real, later, opposite-direction structure event');
+{
+  const bullTrapMs = { external: { structureEvents: [{ index: 10, direction: 'bearish', type: 'CHOCH' }] } };
+  const bullTrapLiq = { sweeps: [{ direction: 'buySide', sweepIndex: 5 }] };
+  const bullTrap = EM.detectTrap(bullTrapMs, bullTrapLiq);
+  assert(bullTrap && bullTrap.type === 'BULL_TRAP', 'Buy-side sweep (index 5) then bearish reversal (index 10) -> BULL_TRAP');
+
+  const bearTrapMs = { external: { structureEvents: [{ index: 8, direction: 'bullish', type: 'CHOCH' }] } };
+  const bearTrapLiq = { sweeps: [{ direction: 'sellSide', sweepIndex: 3 }] };
+  const bearTrap = EM.detectTrap(bearTrapMs, bearTrapLiq);
+  assert(bearTrap && bearTrap.type === 'BEAR_TRAP', 'Sell-side sweep (index 3) then bullish reversal (index 8) -> BEAR_TRAP');
+
+  // No reversal AFTER the sweep -> no trap (never guessed).
+  const noTrapMs = { external: { structureEvents: [{ index: 2, direction: 'bearish', type: 'CHOCH' }] } }; // reversal BEFORE the sweep
+  const noTrapLiq = { sweeps: [{ direction: 'buySide', sweepIndex: 5 }] };
+  assert(EM.detectTrap(noTrapMs, noTrapLiq) === null, 'A structure event that occurred BEFORE the sweep does not count as a trap reversal');
+
+  // Same direction (continuation, not a trap) -> null.
+  const continuationMs = { external: { structureEvents: [{ index: 10, direction: 'bullish', type: 'BOS' }] } };
+  const continuationLiq = { sweeps: [{ direction: 'buySide', sweepIndex: 5 }] };
+  assert(EM.detectTrap(continuationMs, continuationLiq) === null, 'Buy-side sweep followed by a BULLISH continuation (not a reversal) is correctly NOT a trap');
+
+  assert(EM.detectTrap(null, null) === null, 'Null inputs handled safely, no throw');
+  assert(EM.detectTrap({ external: { structureEvents: [] } }, { sweeps: [] }) === null, 'Empty arrays -> null, never fabricated');
+}
+
+console.log('\n[20] detectShortCovering() — POSITIONING_ONLY vs POSITIONING_AND_TRIGGER, and evidence only fires for the TRIGGERED case');
+{
+  const strikes = [{ strike: 24500, ce: { oi: 800, ltp: 60 }, pe: { oi: 300, ltp: 20 } }];
+  const prevStrikes = { 24500: { ce: { oi: 1000, ltp: 40 }, pe: { oi: 300, ltp: 20 } } }; // CE: OI down, LTP up -> short covering
+  const underlyingBullishWithMomentum = [{ source: 'momentum', direction: 'bullish', signal: 'x', group: 'underlying' }];
+  const underlyingBullishNoMomentum = [{ source: 'trend', direction: 'bullish', signal: 'x', group: 'underlying' }];
+
+  const triggered = EM.detectShortCovering(strikes, prevStrikes, underlyingBullishWithMomentum, []);
+  assert(triggered.call && triggered.call.state === 'POTENTIAL_CALL_SHORT_COVERING', 'Call-side short covering correctly detected');
+  assert(triggered.call.trigger === 'POSITIONING_AND_TRIGGER', 'Underlying bullish momentum present -> POSITIONING_AND_TRIGGER (the strong case)');
+
+  const untriggered = EM.detectShortCovering(strikes, prevStrikes, underlyingBullishNoMomentum, []);
+  assert(untriggered.call.trigger === 'POSITIONING_ONLY', 'No momentum evidence present -> POSITIONING_ONLY (the weak case), correctly distinguished');
+
+  // End-to-end via buildEvidence(): POSITIONING_ONLY must NOT become
+  // directional evidence; POSITIONING_AND_TRIGGER must.
+  const ctxWithMomentum = baseAnalysisContext({
+    trend: { data: { primary: { current: { direction: 'bullish', strength: 1, persistence: 1, evidence: { momentumConfirmed: true } } } } }
+  });
+  const ocWithSnapshot = optionChainFixture({ strikes, aggregate: { callOi: 800, putOi: 300, pcr: 300/800 } });
+  const evTriggered = EM.buildEvidence(ctxWithMomentum, ocWithSnapshot, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(), previousOptionSnapshot: { callOi: 1000, putOi: 300, strikes: prevStrikes } });
+  assert(evTriggered.bullish.some(e => e.source === 'shortCovering'), 'POSITIONING_AND_TRIGGER short-covering IS pushed as real bullish evidence');
+
+  const ctxNoMomentum = baseAnalysisContext(); // no trend/momentum evidence at all
+  const evUntriggered = EM.buildEvidence(ctxNoMomentum, ocWithSnapshot, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(), previousOptionSnapshot: { callOi: 1000, putOi: 300, strikes: prevStrikes } });
+  assert(!evUntriggered.bullish.some(e => e.source === 'shortCovering'), 'POSITIONING_ONLY (no confirming momentum) is NEVER pushed as directional evidence — informational only');
+}
+
+console.log('\n[21] dataQualityLabel() — LIVE/RECENT/STALE/UNAVAILABLE, and it appears in buildEvidence()\'s meta');
+{
+  assert(EM.dataQualityLabel(30, 900) === 'LIVE', '30s old -> LIVE');
+  assert(EM.dataQualityLabel(400, 900) === 'RECENT', '400s old -> RECENT');
+  assert(EM.dataQualityLabel(1000, 900) === 'STALE', '1000s old (over the 900s threshold) -> STALE');
+  assert(EM.dataQualityLabel(null, 900) === 'UNAVAILABLE', 'null age -> UNAVAILABLE');
+  const evidence = EM.buildEvidence(baseAnalysisContext(), OPTION_UNAVAILABLE, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(['LIVE', 'RECENT'].includes(evidence.meta.candleDataQuality), 'meta.candleDataQuality reflects real freshness (fresh candles -> LIVE or RECENT): ' + evidence.meta.candleDataQuality);
+}
+
+console.log('\n[22] underlyingState surfaces correctly in marketAnalysis for the panel to render');
+{
+  const ctx = baseAnalysisContext({ marketStructure: { data: { external: { trend: 'bullish', swings: [] }, meta: { insufficientData: false } } } });
+  const evidence = EM.buildEvidence(ctx, OPTION_UNAVAILABLE, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evidence.marketAnalysis.underlyingState === 'BULLISH', 'marketAnalysis.underlyingState correctly BULLISH given one bullish structure signal');
 }
 
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
