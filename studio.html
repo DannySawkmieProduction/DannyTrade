@@ -260,6 +260,11 @@
 <script defer src="assets/js/studio-gate-config.js"></script>
 <script defer src="assets/js/studio-gate.js"></script>
 <script defer src="assets/js/chart/fyers-service.js"></script>
+<!-- CAS Phase 1: single authoritative session engine — loaded before
+     decision-panel.js and auto-refresh-manager.js, its two consumers.
+     All scripts here are `defer`, so exact order only matters for
+     readability; both consumers already guard for it being absent. -->
+<script defer src="assets/js/chart/market-session.js"></script>
 <script defer src="assets/js/chart/data-adapter.js"></script>
 <script defer src="assets/js/chart/annotation-model.js"></script>
 <script defer src="assets/js/chart/chart-renderer.js"></script>
