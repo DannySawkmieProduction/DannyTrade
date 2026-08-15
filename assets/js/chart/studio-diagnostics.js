@@ -65,6 +65,22 @@
     return isNaN(n) ? 0 : n;
   }
 
+  /** Investigation-proven: whether a computed z-index string represents an
+   *  EXPLICIT integer (e.g. "1", "2", "-3") as opposed to "auto" or any
+   *  other non-numeric computed value. Strict regex match (not parseInt,
+   *  which would accept "12px" as 12) — used ONLY to decide whether two
+   *  z-index values are meaningfully comparable at all, never to assign
+   *  "auto" a numeric stand-in like 0. Two elements without a proven
+   *  shared stacking context (which this diagnostic cannot establish —
+   *  see classifyRendering()'s CLASSIFICATION 8 comment) only have a
+   *  well-defined relative paint order from z-index when BOTH sides are
+   *  explicit numbers; "auto" participates in whatever local paint order
+   *  its DOM position gives it, which a bare number is not compatible
+   *  with comparing against. */
+  function isExplicitZIndex(v){
+    return /^-?\d+$/.test(String(v == null ? '' : v).trim());
+  }
+
   /** FIX 1 — mirrors chart-renderer.js's getPlotCanvasRect() selection
    *  logic exactly: among every <canvas> the chart library created, the
    *  real plotting-pane canvas is reliably the LARGEST-AREA one —
@@ -189,17 +205,44 @@
         };
       }
 
-      var overlayZ = zIndexNum(ov.zIndex);
-      var plotZ = plotCanvas ? zIndexNum(plotCanvas.zIndex) : 0;
-      if(plotZ > overlayZ){
-        return {
-          code: 8, label: 'CSS COMPOSITING / Z-INDEX ISSUE',
-          evidence: [
-            'Overlay canvas computed z-index: ' + ov.zIndex + ' (treated as ' + overlayZ + ').',
-            'Plot-pane canvas computed z-index: ' + plotCanvas.zIndex + ' (treated as ' + plotZ + ') — higher than the overlay, so the chart\'s own canvas paints on top of the annotation overlay.'
-          ]
-        };
+      // CLASSIFICATION 8 — evidence-based, not a bare numeric comparison.
+      // Proven by investigation: #lwChartContainer (the plot canvas's
+      // ancestor) establishes no CSS stacking context of its own (no
+      // z-index set alongside its position), so a z-indexed descendant's
+      // stacking position is resolved against whatever ANCESTOR stacking
+      // context actually contains it — not provably the same one
+      // #annotationOverlay's "auto" participates in. A bare
+      // "plotZ(number) > overlayZ(auto-treated-as-0)" comparison was
+      // therefore comparing two values with no proven common paint-order
+      // meaning, and produced a false CLASSIFICATION 8 even while
+      // annotations were demonstrably rendering correctly on screen.
+      //
+      // The comparison is now only trusted when BOTH sides are an
+      // EXPLICIT integer z-index (never "auto" treated as a stand-in
+      // value on either side) — the one case where two definite numbers
+      // give a real, comparable stacking order. Any other combination
+      // (either side "auto") is reported as not comparable and does NOT
+      // fire CLASSIFICATION 8 — this doesn't prove painting is correct on
+      // its own, it just means this specific check can't determine
+      // compositing failure from z-index alone here, consistent with
+      // "do not hard-code that 8 can never happen" — a genuinely
+      // explicit-vs-explicit mismatch still fires it below.
+      if(isExplicitZIndex(ov.zIndex) && isExplicitZIndex(plotCanvas.zIndex)){
+        var overlayZ = zIndexNum(ov.zIndex);
+        var plotZ = zIndexNum(plotCanvas.zIndex);
+        if(plotZ > overlayZ){
+          return {
+            code: 8, label: 'CSS COMPOSITING / Z-INDEX ISSUE',
+            evidence: [
+              'Overlay canvas computed z-index: ' + ov.zIndex + ' (explicit).',
+              'Plot-pane canvas computed z-index: ' + plotCanvas.zIndex + ' (explicit) — higher than the overlay, and both are explicit, comparable integer z-index values, so the chart\'s own canvas paints on top of the annotation overlay.'
+            ]
+          };
+        }
       }
+      // else: at least one side is "auto" (or otherwise non-numeric) —
+      // not proven comparable, so this check does not fire. Falls
+      // through to CLASSIFICATION 3 below if nothing else flagged.
     }
 
     return {
