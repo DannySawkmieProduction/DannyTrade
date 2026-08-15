@@ -461,18 +461,28 @@ export async function handleFyersCandles(request, env) {
 /* =====================================================================
    Option Chain — Pre-Close Options Intelligence, live FYERS integration.
 
-   Endpoint per the confirmed FYERS v3 Option Chain API contract:
-     GET https://api-t1.fyers.in/data/options-chain-v3
-     params: symbol, strikecount, timestamp, greeks
+   ⚠ ENDPOINT NOT CONFIRMED — TWO CONFLICTING SOURCES FOUND DURING AUDIT.
+   This environment has no network access to FYERS, so neither
+   candidate below has been tested against a real response:
 
-   ⚠ VERIFY BEFORE FIRST REAL REQUEST: FYERS_OPTIONCHAIN_URL below, and
-   the exact response field names read in the mapping at the bottom of
-   handleFyersOptionChain(), against a live authenticated call. This
-   environment has no network access to FYERS, so nothing below has
-   been tested against a real response — implemented against the
-   documented/confirmed v3 contract only (see
-   docs/DANNYTRADE_PRECLOSE_HANDOFF.md's "Live API verification"
-   section for exactly what was and wasn't tested).
+     Candidate A (matches this project's own confirmed-working
+     /data/history host convention, and the endpoint the project owner
+     specified): GET https://api-t1.fyers.in/data/options-chain-v3
+
+     Candidate B (from a real, dated Feb-2025 community-shared script
+     with a literal URL constant — a different host AND a different
+     path shape): GET https://api.fyers.in/v3/data/options-chain
+
+   Neither source is the official rendered docs page (myapi.fyers.in/
+   docsv3 returned a 404 to this environment's fetch tool). Rather than
+   silently pick one, this handler tries Candidate A first and falls
+   through to Candidate B ONLY on an HTTP 404 (a 401/403/429/other
+   status means the path exists — falling through on those would mask
+   a real auth/rate-limit problem behind a wrong-endpoint retry, so it
+   doesn't happen). Whichever succeeds is reported back in the
+   response's `fyers.endpointUsed` field so the very first real
+   deployment attempt tells you definitively which one is correct —
+   see docs/DANNYTRADE_PRECLOSE_HANDOFF.md's verification section.
 
    Same token/auth path as handleFyersCandles() above — no second
    authentication system. Never returns the access token to the
@@ -480,7 +490,10 @@ export async function handleFyersCandles(request, env) {
    the server-side Authorization header, never echoed back).
 ===================================================================== */
 
-const FYERS_OPTIONCHAIN_URL = 'https://api-t1.fyers.in/data/options-chain-v3';
+const FYERS_OPTIONCHAIN_URL_CANDIDATES = [
+  'https://api-t1.fyers.in/data/options-chain-v3',
+  'https://api.fyers.in/v3/data/options-chain'
+];
 
 /* ---------------------------------------------------------------
    POST /api/fyers/optionchain
@@ -489,7 +502,8 @@ const FYERS_OPTIONCHAIN_URL = 'https://api-t1.fyers.in/data/options-chain-v3';
            greeks: 0|1 }
 
    Returns { ok:true, data: <FYERS response's own `data` object,
-   passed through with field names UNCHANGED> } or { ok:false, error }.
+   passed through with field names UNCHANGED>, fyers: { endpointUsed } }
+   or { ok:false, error }.
 
    Deliberately NOT normalized/reshaped at the Worker layer — that
    normalization (into DannyTrade's stable internal contract, handling
@@ -532,19 +546,38 @@ export async function handleFyersOptionChain(request, env) {
     return jsonEnvelope({ ok: false, error: 'Not authenticated with FYERS. Visit /api/fyers/login to connect your account.' }, 401);
   }
 
-  const optionChainUrl = new URL(FYERS_OPTIONCHAIN_URL);
-  optionChainUrl.searchParams.set('symbol', symbol);
-  optionChainUrl.searchParams.set('strikecount', String(strikecount));
-  optionChainUrl.searchParams.set('timestamp', timestamp);
-  optionChainUrl.searchParams.set('greeks', String(greeks));
+  function buildUrl(base) {
+    const u = new URL(base);
+    u.searchParams.set('symbol', symbol);
+    u.searchParams.set('strikecount', String(strikecount));
+    u.searchParams.set('timestamp', timestamp);
+    u.searchParams.set('greeks', String(greeks));
+    return u.toString();
+  }
 
-  let fyersRes;
-  try {
-    fyersRes = await fetch(optionChainUrl.toString(), {
-      headers: { Authorization: `${env.FYERS_APP_ID}:${accessToken}` }
-    });
-  } catch {
-    return jsonEnvelope({ ok: false, error: 'Could not reach FYERS to fetch the option chain. Please try again shortly.' }, 502);
+  let fyersRes = null;
+  let endpointUsed = null;
+  let lastNetworkError = false;
+  let allCandidates404 = true;
+  for (let i = 0; i < FYERS_OPTIONCHAIN_URL_CANDIDATES.length; i++) {
+    const candidateUrl = buildUrl(FYERS_OPTIONCHAIN_URL_CANDIDATES[i]);
+    try {
+      fyersRes = await fetch(candidateUrl, {
+        headers: { Authorization: `${env.FYERS_APP_ID}:${accessToken}` }
+      });
+      lastNetworkError = false;
+    } catch {
+      lastNetworkError = true;
+      fyersRes = null;
+      continue; // try the next candidate on a network-level failure too
+    }
+    endpointUsed = FYERS_OPTIONCHAIN_URL_CANDIDATES[i];
+    if (fyersRes.status !== 404) { allCandidates404 = false; break; } // found a candidate whose path exists — stop here, even if it then fails auth/rate-limit below
+    console.log('[FYERS DIAG][Worker] Option chain candidate 404, trying next:', FYERS_OPTIONCHAIN_URL_CANDIDATES[i]);
+  }
+
+  if (!fyersRes || (allCandidates404 && fyersRes.status === 404)) {
+    return jsonEnvelope({ ok: false, error: lastNetworkError ? 'Could not reach FYERS to fetch the option chain. Please try again shortly.' : 'All known option-chain endpoint candidates returned 404 — the endpoint may have changed. See worker/fyers.js\'s FYERS_OPTIONCHAIN_URL_CANDIDATES.' }, 502);
   }
 
   if (fyersRes.status === 401 || fyersRes.status === 403) {
@@ -562,17 +595,17 @@ export async function handleFyersOptionChain(request, env) {
       for (const secret of secretsToMask) out = out.split(secret).join('[REDACTED]');
       return out;
     };
-    console.log('[FYERS DIAG][Worker] /data/options-chain-v3 rejected — HTTP status:', fyersRes.status);
+    console.log('[FYERS DIAG][Worker] Option chain endpoint rejected — HTTP status:', fyersRes.status, '— endpoint tried:', endpointUsed);
     console.log('[FYERS DIAG][Worker] FYERS raw response body:', mask(rawBody));
 
     return jsonEnvelope({
       ok: false,
       error: 'FYERS rejected the stored access token (expired or invalid). Visit /api/fyers/login to reconnect — this project does not auto-refresh tokens (Decision B).',
-      fyers: { code: parsedBody && parsedBody.code, message: parsedBody && parsedBody.message }
+      fyers: { code: parsedBody && parsedBody.code, message: parsedBody && parsedBody.message, endpointUsed }
     }, 401);
   }
   if (fyersRes.status === 429) {
-    return jsonEnvelope({ ok: false, error: 'FYERS rate limit reached. Please try again shortly.' }, 429);
+    return jsonEnvelope({ ok: false, error: 'FYERS rate limit reached. Please try again shortly.', fyers: { endpointUsed } }, 429);
   }
 
   let fyersJson = null;
@@ -584,9 +617,13 @@ export async function handleFyersOptionChain(request, env) {
 
   if (!fyersRes.ok || !fyersJson || fyersJson.s !== 'ok' || !fyersJson.data) {
     const detail = (fyersJson && fyersJson.message) ? fyersJson.message : `HTTP ${fyersRes.status}`;
-    return jsonEnvelope({ ok: false, error: `FYERS option chain request failed: ${detail}` }, 502);
+    return jsonEnvelope({ ok: false, error: `FYERS option chain request failed: ${detail}`, fyers: { endpointUsed } }, 502);
   }
 
   // Passed through unmodified — see the file-header comment above for why.
-  return jsonEnvelope({ ok: true, data: fyersJson.data }, 200);
+  // `endpointUsed` tells the caller (and, ultimately, the person
+  // deploying this) which of the two candidate URLs actually worked —
+  // the definitive answer to the "which endpoint is real" question,
+  // available the moment a genuine authenticated request succeeds.
+  return jsonEnvelope({ ok: true, data: fyersJson.data, fyers: { endpointUsed } }, 200);
 }
