@@ -195,9 +195,58 @@
     return json.candles;
   }
 
+  /**
+   * Fetches a live FYERS option chain via the Worker's
+   * /api/fyers/optionchain route. Reuses toFyersSymbol() — no second
+   * symbol map. Returns the FYERS response's own `data` object
+   * UNMODIFIED (the Worker route is a thin passthrough — see
+   * worker/fyers.js's handleFyersOptionChain()); normalization into
+   * DannyTrade's stable internal contract happens in
+   * option-chain-provider.js, not here — this function's only job is
+   * "get the real response or throw," matching getCandles()'s own
+   * shape exactly.
+   *
+   * @param {object} params
+   * @param {string} params.symbol - DannyTrade internal symbol id (e.g. 'NIFTY')
+   * @param {number} [params.strikecount=10]
+   * @param {string} [params.timestamp=''] - '' = nearest expiry
+   * @param {number} [params.greeks=0] - 1 to request Greeks/IV if FYERS supports it
+   * @returns {Promise<object>} the FYERS response's `data` object, unmodified
+   */
+  async function getOptionChain({ symbol, strikecount, timestamp, greeks }) {
+    const fyersSymbol = toFyersSymbol(symbol);
+
+    let res;
+    try {
+      res = await fetch('/api/fyers/optionchain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: fyersSymbol,
+          strikecount: (typeof strikecount === 'number' && strikecount > 0) ? strikecount : 10,
+          timestamp: typeof timestamp === 'string' ? timestamp : '',
+          greeks: greeks ? 1 : 0
+        })
+      });
+    } catch (err) {
+      throw new Error(`[FyersService] Could not reach the Worker's /api/fyers/optionchain route: ${err.message}`);
+    }
+
+    let json = null;
+    try { json = await res.json(); } catch { json = null; }
+
+    if (!res.ok || !json || json.ok !== true || !json.data) {
+      const detail = (json && (json.error || json.message)) ? (json.error || json.message) : `HTTP ${res.status}`;
+      throw new Error(`[FyersService] ${detail}`);
+    }
+
+    return json.data;
+  }
+
   window.DannyChart.FyersService = {
     getSymbols,
     getCandles,
+    getOptionChain,
     toFyersSymbol,
     setContractSymbol,
     isContractPending,

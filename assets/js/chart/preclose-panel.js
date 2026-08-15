@@ -1,0 +1,345 @@
+/* =====================================================================
+   assets/js/chart/preclose-panel.js — Pre-Close Phase 2
+
+   Presentation only. Computes NO evidence and NO decision itself —
+   every fact comes from window.DannyChart.Analysis.AnalysisEngine
+   (existing, unmodified), window.DannyChart.OptionChainProvider (now
+   calling the real FYERS Option Chain API), window.DannyChart.
+   PrecloseEvidenceModel (normalization only), and window.DannyChart.
+   PrecloseDecisionEngine (pure deterministic decision). Never
+   fabricates a number, never invents a direction, never overrides
+   NO_TRADE, never places an order.
+
+   Polling: while open, re-fetches the option chain every REFRESH_MS
+   (90s — within the spec's 60-120s range) so OI buildup/unwinding can
+   be observed poll-to-poll. Cleared on close()/destroy(). A stale
+   response from a superseded poll or a closed panel is discarded via
+   loadToken, the same pattern timeframe-manager.js already uses.
+===================================================================== */
+
+(function initPreclosePanel(){
+  window.DannyChart = window.DannyChart || {};
+
+  const REFRESH_MS = 90 * 1000; // within the spec's 60-120s range, not per-second
+
+  function esc(v){
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+  function fmtNum(v, digits){
+    return (typeof v === 'number' && Number.isFinite(v)) ? v.toFixed(digits == null ? 2 : digits) : null;
+  }
+  function fmtOrNA(v, digits){
+    const f = fmtNum(v, digits);
+    return f == null ? 'DATA UNAVAILABLE' : f;
+  }
+  function fmtAge(seconds){
+    if(seconds == null) return 'unknown';
+    if(seconds < 60) return seconds + 's ago';
+    return Math.round(seconds / 60) + 'm ago';
+  }
+
+  const DECISION_DISPLAY = {
+    CALL_BIAS: { label: 'CALL BIAS', color: '#35D399' },
+    PUT_BIAS:  { label: 'PUT BIAS',  color: '#FF5C6C' },
+    NO_TRADE:  { label: 'NO TRADE',  color: '#8D93A6' }
+  };
+
+  /**
+   * @param {object} opts
+   * @param {function} opts.getCandles - async (symbol) => Candle[]
+   */
+  function mount(opts){
+    opts = opts || {};
+    let overlayEl = null;
+    let currentSymbol = null;
+    let isOpen = false;
+    let loadToken = 0;
+    let pollTimer = null;
+    const previousOptionSnapshots = {}; // symbol -> {callOi, putOi}
+
+    function buildOverlay(){
+      const el = document.createElement('div');
+      el.id = 'preclosePanelOverlay';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-label', 'Pre-Close Options Intelligence');
+      el.style.cssText = [
+        'position:fixed', 'inset:0', 'z-index:4000', 'display:none',
+        'background:rgba(6,8,12,0.72)', 'backdrop-filter:blur(3px)',
+        'align-items:flex-end', 'justify-content:center'
+      ].join(';');
+      const sheet = document.createElement('div');
+      sheet.style.cssText = [
+        'width:100%', 'max-width:480px', 'max-height:92vh', 'overflow-y:auto',
+        '-webkit-overflow-scrolling:touch',
+        'background:var(--bg-elev,#12161F)', 'border:1px solid var(--border,#232838)',
+        'border-radius:16px 16px 0 0', 'padding:0',
+        'font-family:var(--font-body,"Inter",sans-serif)', 'color:var(--text,#E9EBF1)',
+        'box-shadow:0 -12px 40px rgba(0,0,0,0.5)'
+      ].join(';');
+      el.appendChild(sheet);
+      document.body.appendChild(el);
+      el.addEventListener('click', function(e){ if(e.target === el) close(); });
+      return { el, sheet };
+    }
+
+    function sectionTitle(text, extra){
+      return `<div style="margin-top:18px;font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">${esc(text)}${extra ? ' <span style="color:var(--text-dim,#8D93A6)">' + esc(extra) + '</span>' : ''}</div>`;
+    }
+
+    function renderEvidenceList(title, items, color){
+      if(!items.length) return sectionTitle(title) + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">No ${esc(title.toLowerCase())} detected this run.</div>`;
+      return sectionTitle(title, '(' + items.length + ')') +
+        `<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">` +
+        items.map(e => `<div style="padding:6px 10px;border-left:2px solid ${color};background:var(--bg-elev-2,#1A1F2B);border-radius:0 6px 6px 0;font-size:12.5px">
+          <span style="color:var(--text-faint,#565C70);font-family:var(--font-mono,monospace);font-size:10px">${esc(e.source)} · ${esc(e.group || 'underlying')}</span><br>${esc(e.signal)}
+        </div>`).join('') + `</div>`;
+    }
+
+    function renderMarketState(info, spotPrice, lastCandleTime, candleAgeSeconds){
+      return sectionTitle('MARKET STATE') + `<div style="margin-top:6px">
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Instrument</span><span>${esc(info.symbol)}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Spot (last candle close)</span><span style="font-family:var(--font-mono,monospace)">${spotPrice != null ? esc(fmtNum(spotPrice)) : 'DATA UNAVAILABLE'}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Data age</span><span style="font-family:var(--font-mono,monospace);color:${candleAgeSeconds != null && candleAgeSeconds > 900 ? 'var(--red,#FF5C6C)' : 'var(--text,#E9EBF1)'}">${esc(fmtAge(candleAgeSeconds))}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Trading session</span><span>${esc(info.session)}</span></div>
+      </div>`;
+    }
+
+    function renderUnderlyingAnalysis(ma){
+      const rows = [
+        ['Market Structure', ma.marketStructure ? (ma.marketStructure.trend || 'no clear trend') : 'DATA UNAVAILABLE'],
+        ['Liquidity', ma.liquidity ? (ma.liquidity.sweepCount + ' sweep(s) detected') : 'DATA UNAVAILABLE'],
+        ['FVG', ma.fvg ? (ma.fvg.count + ' fair value gap(s)') : 'DATA UNAVAILABLE'],
+        ['Order Block', ma.orderBlocks ? (ma.orderBlocks.count + ' order block(s)') : 'DATA UNAVAILABLE'],
+        ['Premium/Discount', ma.premiumDiscount ? (ma.premiumDiscount.currentLocation || 'unresolved') : 'DATA UNAVAILABLE'],
+        ['Trend', ma.trend ? (ma.trend.direction || 'no clear trend') : 'DATA UNAVAILABLE'],
+        ['Momentum', ma.momentum && ma.momentum.confirmed != null ? (ma.momentum.confirmed ? 'confirms trend' : 'diverges from trend') : 'DATA UNAVAILABLE'],
+        ['Volume', ma.volume ? (ma.volume.highestVolumeBucket ? 'highest-volume level identified' : 'no dominant level') : 'DATA UNAVAILABLE'],
+        ['Support/Resistance', ma.supportResistance ? (ma.supportResistance.levelCount + ' level(s) identified') : 'DATA UNAVAILABLE']
+      ];
+      return sectionTitle('UNDERLYING ANALYSIS', '· deterministic Analysis Engine, not AI') +
+        `<div style="margin-top:6px">` + rows.map(([k, v]) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px">
+          <span style="color:var(--text-dim,#8D93A6)">${esc(k)}</span><span style="font-family:var(--font-mono,monospace);font-size:11.5px;color:${v === 'DATA UNAVAILABLE' ? 'var(--text-faint,#565C70)' : 'var(--text,#E9EBF1)'}">${esc(v)}</span>
+        </div>`).join('') + `</div>`;
+    }
+
+    function renderOptionsSnapshot(oc, atmStrike){
+      if(!oc || !oc.available){
+        return sectionTitle('OPTIONS SNAPSHOT') +
+          `<div style="margin-top:6px;padding:10px 12px;border:1px dashed var(--red,#FF5C6C);border-radius:8px;background:rgba(255,92,108,0.08);font-size:12px;color:var(--text-dim,#8D93A6)">${esc((oc && oc.reason) || 'No option-chain data source is currently connected.')}</div>`;
+      }
+      return sectionTitle('OPTIONS SNAPSHOT') + `<div style="margin-top:6px">
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Expiry</span><span style="font-family:var(--font-mono,monospace)">${oc.expiry ? esc(oc.expiry.expiry || oc.expiry.date) : 'DATA UNAVAILABLE'}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">ATM Strike</span><span style="font-family:var(--font-mono,monospace)">${atmStrike != null ? esc(String(atmStrike)) : 'DATA UNAVAILABLE'}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Call OI (aggregate)</span><span style="font-family:var(--font-mono,monospace)">${oc.aggregate.callOi != null ? esc(String(oc.aggregate.callOi)) : 'DATA UNAVAILABLE'}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Put OI (aggregate)</span><span style="font-family:var(--font-mono,monospace)">${oc.aggregate.putOi != null ? esc(String(oc.aggregate.putOi)) : 'DATA UNAVAILABLE'}</span></div>
+      </div>`;
+    }
+
+    function renderPcr(oc){
+      const pcr = oc && oc.available ? oc.aggregate.pcr : null;
+      return sectionTitle('PCR') + `<div style="margin-top:6px;font-family:var(--font-mono,monospace);font-size:20px;font-weight:600;color:${pcr != null ? 'var(--text,#E9EBF1)' : 'var(--text-faint,#565C70)'}">${pcr != null ? esc(pcr.toFixed(2)) : 'N/A'}</div>
+        <div style="margin-top:2px;font-size:10.5px;color:var(--text-faint,#565C70)">Put OI ÷ Call OI — real aggregate OI only, never estimated. PCR alone never determines the decision.</div>`;
+    }
+
+    function renderStrikePressureMap(oc, atmStrike){
+      if(!oc || !oc.available || !oc.strikes.length) return sectionTitle('STRIKE PRESSURE MAP') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">DATA UNAVAILABLE</div>`;
+      const idx = atmStrike != null ? oc.strikes.findIndex(s => s.strike === atmStrike) : Math.floor(oc.strikes.length / 2);
+      const start = Math.max(0, idx - 5), end = Math.min(oc.strikes.length, idx + 6);
+      const rows = oc.strikes.slice(start, end);
+      const maxCallOi = Math.max.apply(null, rows.map(s => (s.ce && s.ce.oi) || 0).concat([1]));
+      const maxPutOi = Math.max.apply(null, rows.map(s => (s.pe && s.pe.oi) || 0).concat([1]));
+      return sectionTitle('STRIKE PRESSURE MAP', '(±5 strikes around ATM)') +
+        `<div style="margin-top:6px;display:flex;flex-direction:column;gap:2px">` +
+        rows.map(s => {
+          const isAtm = s.strike === atmStrike;
+          const callOi = s.ce && s.ce.oi != null ? s.ce.oi : null;
+          const putOi = s.pe && s.pe.oi != null ? s.pe.oi : null;
+          const isMaxCall = callOi === maxCallOi && callOi > 0;
+          const isMaxPut = putOi === maxPutOi && putOi > 0;
+          return `<div style="display:grid;grid-template-columns:1fr 60px 1fr;align-items:center;gap:6px;padding:4px 0;background:${isAtm ? 'rgba(212,175,106,0.08)' : 'none'};font-size:11px;font-family:var(--font-mono,monospace)">
+            <span style="text-align:right;color:${isMaxCall ? 'var(--red,#FF5C6C)' : 'var(--text-dim,#8D93A6)'}">${callOi != null ? esc(String(callOi)) : '—'}${isMaxCall ? ' ◀' : ''}</span>
+            <span style="text-align:center;color:${isAtm ? 'var(--gold,#D4AF6A)' : 'var(--text,#E9EBF1)'};font-weight:${isAtm ? '700' : '400'}">${esc(String(s.strike))}</span>
+            <span style="color:${isMaxPut ? 'var(--mint,#35D399)' : 'var(--text-dim,#8D93A6)'}">${isMaxPut ? '▶ ' : ''}${putOi != null ? esc(String(putOi)) : '—'}</span>
+          </div>`;
+        }).join('') +
+        `</div><div style="margin-top:4px;font-size:9.5px;color:var(--text-faint,#565C70)">◀ strongest Call OI (resistance-leaning) · ▶ strongest Put OI (support-leaning) · gold row = ATM</div>`;
+    }
+
+    function renderOiBuildup(bullish, bearish){
+      const items = bullish.concat(bearish).filter(e => e.source === 'optionsOiChange');
+      if(!items.length) return sectionTitle('OI BUILDUP / UNWINDING') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">No previous snapshot yet this session — comparison available after the next refresh (~${REFRESH_MS/1000}s).</div>`;
+      return sectionTitle('OI BUILDUP / UNWINDING') + `<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">` +
+        items.map(e => `<div style="font-size:12px;color:var(--text-dim,#8D93A6)">${esc(e.signal)}</div>`).join('') + `</div>`;
+    }
+
+    function renderIvGreeks(oc){
+      const label = oc && oc.available ? (oc.greeksAvailable ? 'AVAILABLE' : 'DATA UNAVAILABLE') : 'DATA UNAVAILABLE';
+      return sectionTitle('IV / GREEKS') +
+        `<div style="margin-top:6px;font-size:12.5px;color:${label === 'AVAILABLE' ? 'var(--mint,#35D399)' : 'var(--text-faint,#565C70)'}">${esc(label)}</div>` +
+        (label !== 'AVAILABLE' ? `<div style="margin-top:2px;font-size:10.5px;color:var(--text-faint,#565C70)">Greeks/IV were not present in this response — this reduces decision confidence rather than blocking it (see Decision below).</div>` : '');
+    }
+
+    function renderDecision(decision){
+      // Always immediately visible — never hidden behind an expandable section.
+      const disp = DECISION_DISPLAY[decision.state] || DECISION_DISPLAY.NO_TRADE;
+      return `<div style="margin-top:16px;font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">DECISION</div>
+      <div style="margin-top:6px;padding:14px;border:1px solid ${disp.color}55;border-radius:12px;background:${disp.color}14">
+        <div style="display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:20px;background:${disp.color}22;border:1px solid ${disp.color}55">
+          <span style="width:9px;height:9px;border-radius:50%;background:${disp.color};display:inline-block"></span>
+          <span style="font-family:var(--font-mono,monospace);font-weight:700;font-size:14px;letter-spacing:.03em;color:${disp.color}">${disp.label}</span>
+        </div>
+        <div style="margin-top:8px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-dim,#8D93A6)">Confidence: ${(decision.confidence * 100).toFixed(0)}% <span style="color:var(--text-faint,#565C70)">(deterministic — evidence agreement, not AI-estimated)</span></div>
+        <div style="margin-top:8px;font-size:10.5px;color:var(--text-faint,#565C70);letter-spacing:.04em">REASONS</div>
+        <div style="margin-top:2px;display:flex;flex-direction:column;gap:2px;font-size:11.5px;color:var(--text-dim,#8D93A6)">${decision.reasons.map(r => `<div>${esc(r)}</div>`).join('')}</div>
+      </div>
+      <div style="margin-top:18px;font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">RISK / INVALIDATION</div>
+      <div style="margin-top:6px">
+        <div style="padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12px"><span style="color:var(--text-dim,#8D93A6)">Entry condition:</span> ${esc(decision.entryCondition)}</div>
+        <div style="padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12px"><span style="color:var(--text-dim,#8D93A6)">Invalidation:</span> ${esc(decision.invalidationCondition)}</div>
+        <div style="padding:6px 0;font-size:12px"><span style="color:var(--text-dim,#8D93A6)">No-trade condition:</span> ${esc(decision.noTradeCondition)}</div>
+      </div>
+      <div style="margin-top:8px;font-size:10.5px;color:var(--text-faint,#565C70)">Decision support only — no order is placed. Verify independently before acting.</div>`;
+    }
+
+    function renderRiskFlags(decision){
+      if(!decision.blockers.length) return sectionTitle('RISK FLAGS') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">None.</div>`;
+      return sectionTitle('RISK FLAGS') + `<div style="margin-top:6px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--red,#FF5C6C)">${esc(decision.blockers.join(', '))}</div>`;
+    }
+
+    function renderAiInterpretation(){
+      // Deliberately NOT implemented this phase — the decision engine
+      // above is fully deterministic and does not use AI. Adding a
+      // real AI explanation layer would touch worker/openrouter.js /
+      // the existing AI pipeline, which this phase was told not to
+      // modify unless absolutely necessary — it isn't, for a
+      // decision engine that already explains itself via REASONS
+      // above. Labeled honestly rather than silently omitted.
+      return sectionTitle('AI INTERPRETATION') +
+        `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">Not enabled for Pre-Close in this phase — the DECISION and its REASONS above are fully deterministic (no AI). A future phase may add an AI explanation layer reading these same evidence fields, without changing how the decision itself is computed.</div>`;
+    }
+
+    function renderBody(result){
+      if(result.error){
+        return `<div style="margin-top:18px;padding:14px;border:1px solid var(--red,#FF5C6C);border-radius:10px;color:var(--red,#FF5C6C);font-size:13px">${esc(result.error)}</div>`;
+      }
+      const { info, spotPrice, lastCandleTime, candleAgeSeconds, evidence, decision, optionChain } = result;
+      const atmStrike = evidence.marketAnalysis.atmStrike;
+
+      return renderDecision(decision) +
+        `<div style="margin-top:20px;font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.08em;color:var(--gold,#D4AF6A);border-top:2px solid rgba(212,175,106,0.3);padding-top:4px">FACTUAL DATA</div>` +
+        renderMarketState(info, spotPrice, lastCandleTime, candleAgeSeconds) +
+        renderOptionsSnapshot(optionChain, atmStrike) +
+        renderPcr(optionChain) +
+        renderStrikePressureMap(optionChain, atmStrike) +
+        renderIvGreeks(optionChain) +
+        `<div style="margin-top:20px;font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.08em;color:var(--gold,#D4AF6A);border-top:2px solid rgba(212,175,106,0.3);padding-top:4px">ENGINE ANALYSIS <span style="color:var(--text-faint,#565C70)">(deterministic — no AI)</span></div>` +
+        renderUnderlyingAnalysis(evidence.marketAnalysis) +
+        renderOiBuildup(evidence.bullish, evidence.bearish) +
+        renderEvidenceList('BULLISH EVIDENCE', evidence.bullish, '#35D399') +
+        renderEvidenceList('BEARISH EVIDENCE', evidence.bearish, '#FF5C6C') +
+        renderEvidenceList('CONFLICTS', evidence.conflicting, '#D4AF6A') +
+        renderRiskFlags(decision) +
+        renderAiInterpretation() +
+        sectionTitle('DATA TIMESTAMP') +
+        `<div style="margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-dim,#8D93A6)">Option chain: ${optionChain && optionChain.timestamp ? esc(optionChain.timestamp) : 'unavailable'}</div>` +
+        `<div style="margin-top:16px;font-size:10.5px;color:var(--text-faint,#565C70);line-height:1.6">FACTUAL DATA = candles + option-chain fields from FYERS. ENGINE ANALYSIS = the deterministic Analysis Engine + evidence model (no AI). This panel performs no automatic AI interpretation and never places orders — decision support only.</div>`;
+    }
+
+    async function load(symbol, isPoll){
+      const myToken = ++loadToken;
+      if(!isPoll){
+        overlayEl.sheet.innerHTML = `<div style="padding:24px;color:var(--text-dim,#8D93A6)">Loading Pre-Close Intelligence for ${esc(symbol)}…</div>`;
+      }
+
+      const MarketSession = window.DannyChart.MarketSession;
+      const AnalysisEngine = window.DannyChart.Analysis && window.DannyChart.Analysis.AnalysisEngine;
+      const OptionChainProvider = window.DannyChart.OptionChainProvider;
+      const EvidenceModel = window.DannyChart.PrecloseEvidenceModel;
+      const DecisionEngine = window.DannyChart.PrecloseDecisionEngine;
+
+      if(!MarketSession || !AnalysisEngine || !OptionChainProvider || !EvidenceModel || !DecisionEngine){
+        if(myToken !== loadToken) return;
+        renderResult({ error: 'Pre-Close Intelligence modules are not fully loaded.' });
+        return;
+      }
+
+      let candles = [];
+      try{ candles = (typeof opts.getCandles === 'function') ? (await opts.getCandles(symbol)) || [] : []; }
+      catch(err){ candles = []; }
+      if(myToken !== loadToken) return;
+
+      const info = MarketSession.getSession(new Date(), symbol);
+      const analysisContext = candles.length ? AnalysisEngine.analyze(candles, { symbol, timeframe: null }) : null;
+      const optionChain = await OptionChainProvider.getOptionChain(symbol, { strikecount: 10, wantGreeks: true });
+      if(myToken !== loadToken) return;
+
+      const previousSnapshot = previousOptionSnapshots[symbol] || null;
+      const evidence = EvidenceModel.buildEvidence(analysisContext, optionChain, {
+        sessionInfo: info, candles, now: new Date(), previousOptionSnapshot: previousSnapshot
+      });
+      const decision = DecisionEngine.decide(evidence);
+
+      if(optionChain && optionChain.available && optionChain.aggregate.callOi != null && optionChain.aggregate.putOi != null){
+        previousOptionSnapshots[symbol] = { callOi: optionChain.aggregate.callOi, putOi: optionChain.aggregate.putOi };
+      }
+
+      const lastCandle = candles.length ? candles[candles.length - 1] : null;
+      renderResult({
+        info, evidence, decision, optionChain,
+        spotPrice: lastCandle ? lastCandle.close : null,
+        lastCandleTime: lastCandle ? lastCandle.time : null,
+        candleAgeSeconds: evidence.meta.candleAgeSeconds
+      });
+
+      // Schedule the next poll only if the panel is still open for this
+      // same symbol — never a tighter loop, never continues after close().
+      if(isOpen && currentSymbol === symbol){
+        if(pollTimer) clearTimeout(pollTimer);
+        pollTimer = setTimeout(function(){ load(symbol, true); }, REFRESH_MS);
+      }
+    }
+
+    function renderResult(result){
+      overlayEl.sheet.innerHTML = `
+        <div style="position:sticky;top:0;z-index:1;background:var(--bg-elev,#12161F);padding:16px 18px 12px;border-bottom:1px solid var(--border-soft,#1B2030);display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <div style="font-family:var(--font-mono,monospace);font-size:10.5px;letter-spacing:.06em;color:var(--text-faint,#565C70)">PRE-CLOSE OPTIONS INTELLIGENCE</div>
+            <div style="font-family:var(--font-display,'Space Grotesk',sans-serif);font-weight:700;font-size:19px;margin-top:2px">${esc(currentSymbol)}</div>
+          </div>
+          <button id="preclosePanelCloseBtn" aria-label="Close" style="background:none;border:1px solid var(--border,#232838);color:var(--text-dim,#8D93A6);border-radius:8px;width:34px;height:34px;font-size:16px;cursor:pointer;flex-shrink:0">✕</button>
+        </div>
+        <div style="padding:14px 18px 24px">
+          ${renderBody(result)}
+        </div>`;
+      const closeBtn = overlayEl.sheet.querySelector('#preclosePanelCloseBtn');
+      if(closeBtn) closeBtn.addEventListener('click', close);
+    }
+
+    function open(symbol){
+      if(!symbol) return;
+      currentSymbol = symbol;
+      if(!overlayEl) overlayEl = buildOverlay();
+      overlayEl.el.style.display = 'flex';
+      isOpen = true;
+      load(symbol, false);
+    }
+
+    function close(){
+      isOpen = false;
+      loadToken++; // invalidate any in-flight load
+      if(pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
+      if(overlayEl) overlayEl.el.style.display = 'none';
+    }
+
+    function destroy(){
+      close();
+      if(overlayEl && overlayEl.el && overlayEl.el.parentNode) overlayEl.el.parentNode.removeChild(overlayEl.el);
+      overlayEl = null;
+    }
+
+    return { open, close, destroy, isOpen: () => isOpen };
+  }
+
+  window.DannyChart.PreclosePanel = { mount };
+})();
