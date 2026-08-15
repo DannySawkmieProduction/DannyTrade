@@ -26,6 +26,17 @@ function nowUnix(){ return Math.floor(Date.now() / 1000); }
 const OPTION_UNAVAILABLE = { available: false, reason: 'No option-chain endpoint exists in the current DannyTrade data layer.' };
 const SESSION_CONTINUOUS_IN_WINDOW = { symbol: 'NIFTY', session: 'CONTINUOUS', continuousTradingEnd: '15:30', casEligible: false };
 
+function optionChainFixture(overrides){
+  return Object.assign({
+    available: true, reason: null, underlying: { symbol: 'NIFTY' },
+    expiry: { date: '2026-08-27', expiry: '27AUG26' },
+    strikes: [], aggregate: { callOi: null, putOi: null, pcr: null },
+    indiaVix: null, greeksAvailable: true,
+    dataAvailability: { oi: true, oiChange: false, bidAsk: true, greeks: true, aggregate: true },
+    timestamp: new Date().toISOString()
+  }, overrides);
+}
+
 function baseAnalysisContext(overrides){
   return Object.assign({
     marketStructure: { data: { external: { trend: null, swings: [] }, meta: { insufficientData: false } } },
@@ -56,7 +67,7 @@ console.log('\n[1] Bullish evidence — market structure + FVG + order block + p
     orderBlocks: { data: { orderBlocks: [{ direction: 'bullish', mitigationState: 'unmitigated', qualityScore: 80 }], meta: { insufficientData: false } } },
     premiumDiscount: { data: { currentLocation: 'discount', meta: { insufficientData: false } } }
   });
-  const evidence = EM.buildEvidence(ctx, { available: true, reason: null, atmStrike: 100, callOI: 1, putOI: 1, changeCallOI: 0, changePutOI: 0, pcr: 1, iv: 10, bidAsk: { bid: 1, ask: 2 }, expiry: '2026-08-28' }, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  const evidence = EM.buildEvidence(ctx, optionChainFixture({ aggregate: { callOi: 500, putOi: 500, pcr: 1 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
   assert(evidence.bullish.length === 4, '4 bullish evidence items extracted (structure, fvg, orderBlock, premiumDiscount)');
   assert(evidence.bullish.every(e => e.direction === 'bullish'), 'Every bullish item is tagged direction:bullish');
   assert(evidence.bullish.every(e => !!e.source), 'Every evidence item identifies its source');
@@ -151,6 +162,57 @@ console.log('\n[11] Liquidity sweep direction mapping — sell-side sweep is bul
   const ctxBuy = baseAnalysisContext({ liquidity: { data: { sweeps: [{ direction: 'buySide', level: 101, isStopHunt: false }], meta: { insufficientData: false } } } });
   const evBuy = EM.buildEvidence(ctxBuy, OPTION_UNAVAILABLE, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
   assert(evBuy.bearish.some(e => e.source === 'liquidity'), 'Buy-side sweep correctly mapped to bearish evidence');
+}
+
+console.log('\n[12] PCR evidence — high PCR (>1.2) is bullish, low PCR (<0.8) is bearish, tagged group:options');
+{
+  const evHigh = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 100, putOi: 150, pcr: 1.5 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evHigh.bullish.some(e => e.source === 'optionsPCR' && e.group === 'options'), 'PCR 1.5 (>1.2) produces bullish evidence tagged group:options');
+
+  const evLow = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 150, putOi: 100, pcr: 100/150 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evLow.bearish.some(e => e.source === 'optionsPCR' && e.group === 'options'), 'PCR ~0.67 (<0.8) produces bearish evidence tagged group:options');
+
+  const evNeutral = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 100, putOi: 100, pcr: 1 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(!evNeutral.bullish.some(e => e.source === 'optionsPCR') && !evNeutral.bearish.some(e => e.source === 'optionsPCR'), 'PCR 1.0 (neutral band) produces no directional evidence');
+}
+
+console.log('\n[13] OI buildup/unwinding — ONLY computed when a real previous snapshot is supplied, never inferred from a single reading');
+{
+  const noSnapshot = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 1000, putOi: 800, pcr: 0.8 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(!noSnapshot.bullish.concat(noSnapshot.bearish).some(e => e.source === 'optionsOiChange'), 'No previous snapshot supplied -> no OI-change evidence fabricated from a single reading');
+
+  const withSnapshot = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ aggregate: { callOi: 1200, putOi: 1100, pcr: 1100/1200 } }), {
+    sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(),
+    previousOptionSnapshot: { callOi: 1000, putOi: 800 }
+  });
+  assert(withSnapshot.bearish.some(e => e.source === 'optionsOiChange' && /Call OI increased/.test(e.signal)), 'Call OI increase (1000->1200) vs a real previous snapshot -> bearish evidence');
+  assert(withSnapshot.bullish.some(e => e.source === 'optionsOiChange' && /Put OI increased/.test(e.signal)), 'Put OI increase (800->1100) vs a real previous snapshot -> bullish evidence');
+  assert(withSnapshot.bullish.concat(withSnapshot.bearish).filter(e => e.source === 'optionsOiChange').every(e => e.group === 'options'), 'OI-change evidence tagged group:options');
+}
+
+console.log('\n[14] ATM strike computed from real spot price + real strikes, never hardcoded');
+{
+  const candles = freshCandles(); // last close ~= 100 + 30*0.1 = 103
+  const spot = candles[candles.length - 1].close;
+  const evidence = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({
+    strikes: [ { strike: 90, ce: null, pe: null }, { strike: 100, ce: null, pe: null }, { strike: 105, ce: null, pe: null } ]
+  }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles });
+  assert(evidence.marketAnalysis.atmStrike === 105, 'ATM strike (105) is the closest to the real spot price (~103), computed not hardcoded: spot=' + spot);
+}
+
+console.log('\n[15] Underlying evidence remains tagged group:underlying by default (backward-compatible with Phase 1)');
+{
+  const ctx = baseAnalysisContext({ marketStructure: { data: { external: { trend: 'bullish', swings: [] }, meta: { insufficientData: false } } } });
+  const evidence = EM.buildEvidence(ctx, OPTION_UNAVAILABLE, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evidence.bullish.find(e => e.source === 'marketStructure').group === 'underlying', 'marketStructure evidence is tagged group:underlying');
+}
+
+console.log('\n[16] Greeks unavailable -> a SOFT risk flag (GREEKS_UNAVAILABLE), option chain still marked available');
+{
+  const evidence = EM.buildEvidence(baseAnalysisContext(), optionChainFixture({ greeksAvailable: false, aggregate: { callOi: 100, putOi: 100, pcr: 1 } }), { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evidence.riskFlags.some(f => f.code === 'GREEKS_UNAVAILABLE'), 'GREEKS_UNAVAILABLE flag present when greeksAvailable is false');
+  assert(!evidence.riskFlags.some(f => f.code === 'OPTION_DATA_UNAVAILABLE'), 'OPTION_DATA_UNAVAILABLE NOT raised — the option chain itself IS available, just without Greeks');
+  assert(evidence.dataAvailability.optionGreeks === false, 'dataAvailability.optionGreeks correctly false');
 }
 
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
