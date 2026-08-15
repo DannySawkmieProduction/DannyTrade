@@ -55,7 +55,7 @@
     let isOpen = false;
     let loadToken = 0;
     let pollTimer = null;
-    const previousOptionSnapshots = {}; // symbol -> {callOi, putOi}
+    const previousOptionSnapshots = {}; // symbol -> {callOi, putOi, strikes:{[strike]:{ce:{oi,ltp},pe:{oi,ltp}}}}
 
     function buildOverlay(){
       const el = document.createElement('div');
@@ -96,13 +96,35 @@
         </div>`).join('') + `</div>`;
     }
 
-    function renderMarketState(info, spotPrice, lastCandleTime, candleAgeSeconds){
-      return sectionTitle('MARKET STATE') + `<div style="margin-top:6px">
+    const UNDERLYING_STATE_COLOR = { BULLISH: '#35D399', BEARISH: '#FF5C6C', CONFLICTED: '#D4AF6A', NEUTRAL: '#8D93A6' };
+
+    function renderMarketState(info, spotPrice, lastCandleTime, candleAgeSeconds, ma, candleDataQuality){
+      const stateColor = UNDERLYING_STATE_COLOR[ma.underlyingState] || '#8D93A6';
+      return sectionTitle('MARKET STATE') +
+        `<div style="margin-top:6px;display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:16px;background:${stateColor}22;border:1px solid ${stateColor}55;font-family:var(--font-mono,monospace);font-weight:700;font-size:12px;color:${stateColor}">${esc(ma.underlyingState || 'NEUTRAL')}</div>
+      <div style="margin-top:8px">
         <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Instrument</span><span>${esc(info.symbol)}</span></div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Spot (last candle close)</span><span style="font-family:var(--font-mono,monospace)">${spotPrice != null ? esc(fmtNum(spotPrice)) : 'DATA UNAVAILABLE'}</span></div>
-        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Data age</span><span style="font-family:var(--font-mono,monospace);color:${candleAgeSeconds != null && candleAgeSeconds > 900 ? 'var(--red,#FF5C6C)' : 'var(--text,#E9EBF1)'}">${esc(fmtAge(candleAgeSeconds))}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Candle data quality</span><span style="font-family:var(--font-mono,monospace);color:${candleDataQuality === 'STALE' || candleDataQuality === 'UNAVAILABLE' ? 'var(--red,#FF5C6C)' : 'var(--text,#E9EBF1)'}">${esc(candleDataQuality)} (${esc(fmtAge(candleAgeSeconds))})</span></div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Trading session</span><span>${esc(info.session)}</span></div>
       </div>`;
+    }
+
+    function renderTrapAnalysis(ma){
+      if(!ma.trap) return sectionTitle('LIQUIDITY / TRAPS') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">No trap sequence detected this run.</div>`;
+      const color = ma.trap === 'BULL_TRAP' ? '#FF5C6C' : '#35D399';
+      return sectionTitle('LIQUIDITY / TRAPS') + `<div style="margin-top:6px;padding:8px 10px;border-left:2px solid ${color};background:var(--bg-elev-2,#1A1F2B);border-radius:0 6px 6px 0;font-size:12.5px;color:${color};font-weight:600">${esc(ma.trap.replace('_', ' '))}</div>
+      <div style="margin-top:2px;font-size:10.5px;color:var(--text-faint,#565C70)">A liquidity level was swept, then a structure event reversed in the opposite direction — see BEARISH/BULLISH EVIDENCE below for detail.</div>`;
+    }
+
+    function renderShortCoveringSection(ma){
+      const sc = ma.shortCovering;
+      if(!sc || (!sc.call && !sc.put)) return sectionTitle('SHORT-COVERING / WIND-UP') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">No short-covering pattern detected this run (requires two real successive option-chain snapshots).</div>`;
+      const rows = [];
+      if(sc.call) rows.push(`<div style="padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12px"><b>${esc(sc.call.state)}</b> at strike ${esc(String(sc.call.strike))} — <span style="color:${sc.call.trigger === 'POSITIONING_AND_TRIGGER' ? 'var(--mint,#35D399)' : 'var(--text-faint,#565C70)'}">${esc(sc.call.trigger)}</span></div>`);
+      if(sc.put) rows.push(`<div style="padding:6px 0;font-size:12px"><b>${esc(sc.put.state)}</b> at strike ${esc(String(sc.put.strike))} — <span style="color:${sc.put.trigger === 'POSITIONING_AND_TRIGGER' ? 'var(--mint,#35D399)' : 'var(--text-faint,#565C70)'}">${esc(sc.put.trigger)}</span></div>`);
+      return sectionTitle('SHORT-COVERING / WIND-UP') + `<div style="margin-top:6px">${rows.join('')}</div>
+      <div style="margin-top:2px;font-size:10.5px;color:var(--text-faint,#565C70)">POSITIONING_AND_TRIGGER = confirmed by underlying momentum (counted as evidence). POSITIONING_ONLY = informational, not counted.</div>`;
     }
 
     function renderUnderlyingAnalysis(ma){
@@ -136,10 +158,12 @@
       </div>`;
     }
 
-    function renderPcr(oc){
+    function renderPcr(oc, pcrContext){
       const pcr = oc && oc.available ? oc.aggregate.pcr : null;
+      const contextColor = { PCR_SUPPORTIVE: '#35D399', PCR_CONTRADICTORY: '#FF5C6C', PCR_NEUTRAL: '#8D93A6' }[pcrContext] || '#8D93A6';
       return sectionTitle('PCR') + `<div style="margin-top:6px;font-family:var(--font-mono,monospace);font-size:20px;font-weight:600;color:${pcr != null ? 'var(--text,#E9EBF1)' : 'var(--text-faint,#565C70)'}">${pcr != null ? esc(pcr.toFixed(2)) : 'N/A'}</div>
-        <div style="margin-top:2px;font-size:10.5px;color:var(--text-faint,#565C70)">Put OI ÷ Call OI — real aggregate OI only, never estimated. PCR alone never determines the decision.</div>`;
+        ${pcrContext ? `<div style="margin-top:2px;font-family:var(--font-mono,monospace);font-size:11px;color:${contextColor}">${esc(pcrContext.replace('_', ' '))}</div>` : ''}
+        <div style="margin-top:2px;font-size:10.5px;color:var(--text-faint,#565C70)">Put OI ÷ Call OI — real aggregate OI only, never estimated. Read in context of the underlying state; PCR alone never determines the decision.</div>`;
     }
 
     function renderStrikePressureMap(oc, atmStrike){
@@ -228,14 +252,16 @@
 
       return renderDecision(decision) +
         `<div style="margin-top:20px;font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.08em;color:var(--gold,#D4AF6A);border-top:2px solid rgba(212,175,106,0.3);padding-top:4px">FACTUAL DATA</div>` +
-        renderMarketState(info, spotPrice, lastCandleTime, candleAgeSeconds) +
+        renderMarketState(info, spotPrice, lastCandleTime, candleAgeSeconds, evidence.marketAnalysis, evidence.meta.candleDataQuality) +
         renderOptionsSnapshot(optionChain, atmStrike) +
-        renderPcr(optionChain) +
+        renderPcr(optionChain, evidence.marketAnalysis.pcrContext) +
         renderStrikePressureMap(optionChain, atmStrike) +
         renderIvGreeks(optionChain) +
         `<div style="margin-top:20px;font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.08em;color:var(--gold,#D4AF6A);border-top:2px solid rgba(212,175,106,0.3);padding-top:4px">ENGINE ANALYSIS <span style="color:var(--text-faint,#565C70)">(deterministic — no AI)</span></div>` +
         renderUnderlyingAnalysis(evidence.marketAnalysis) +
+        renderTrapAnalysis(evidence.marketAnalysis) +
         renderOiBuildup(evidence.bullish, evidence.bearish) +
+        renderShortCoveringSection(evidence.marketAnalysis) +
         renderEvidenceList('BULLISH EVIDENCE', evidence.bullish, '#35D399') +
         renderEvidenceList('BEARISH EVIDENCE', evidence.bearish, '#FF5C6C') +
         renderEvidenceList('CONFLICTS', evidence.conflicting, '#D4AF6A') +
@@ -281,7 +307,18 @@
       const decision = DecisionEngine.decide(evidence);
 
       if(optionChain && optionChain.available && optionChain.aggregate.callOi != null && optionChain.aggregate.putOi != null){
-        previousOptionSnapshots[symbol] = { callOi: optionChain.aggregate.callOi, putOi: optionChain.aggregate.putOi };
+        // Phase 3 — also stores a per-strike {ce:{oi,ltp}, pe:{oi,ltp}}
+        // map so the NEXT poll can classify buildup/unwinding and
+        // short-covering at the strike level (needs two real readings
+        // per strike, never inferred from one).
+        const strikesMap = {};
+        (optionChain.strikes || []).forEach(function(s){
+          strikesMap[s.strike] = {
+            ce: s.ce ? { oi: s.ce.oi, ltp: s.ce.ltp } : null,
+            pe: s.pe ? { oi: s.pe.oi, ltp: s.pe.ltp } : null
+          };
+        });
+        previousOptionSnapshots[symbol] = { callOi: optionChain.aggregate.callOi, putOi: optionChain.aggregate.putOi, strikes: strikesMap };
       }
 
       const lastCandle = candles.length ? candles[candles.length - 1] : null;
