@@ -457,3 +457,136 @@ export async function handleFyersCandles(request, env) {
 
   return jsonEnvelope({ ok: true, candles: trimmed }, 200);
 }
+
+/* =====================================================================
+   Option Chain — Pre-Close Options Intelligence, live FYERS integration.
+
+   Endpoint per the confirmed FYERS v3 Option Chain API contract:
+     GET https://api-t1.fyers.in/data/options-chain-v3
+     params: symbol, strikecount, timestamp, greeks
+
+   ⚠ VERIFY BEFORE FIRST REAL REQUEST: FYERS_OPTIONCHAIN_URL below, and
+   the exact response field names read in the mapping at the bottom of
+   handleFyersOptionChain(), against a live authenticated call. This
+   environment has no network access to FYERS, so nothing below has
+   been tested against a real response — implemented against the
+   documented/confirmed v3 contract only (see
+   docs/DANNYTRADE_PRECLOSE_HANDOFF.md's "Live API verification"
+   section for exactly what was and wasn't tested).
+
+   Same token/auth path as handleFyersCandles() above — no second
+   authentication system. Never returns the access token to the
+   browser (same discipline as the candles handler: only ever used in
+   the server-side Authorization header, never echoed back).
+===================================================================== */
+
+const FYERS_OPTIONCHAIN_URL = 'https://api-t1.fyers.in/data/options-chain-v3';
+
+/* ---------------------------------------------------------------
+   POST /api/fyers/optionchain
+   Body: { symbol: '<already FYERS-formatted symbol>', strikecount:
+           number, timestamp: string (optional, '' = nearest expiry),
+           greeks: 0|1 }
+
+   Returns { ok:true, data: <FYERS response's own `data` object,
+   passed through with field names UNCHANGED> } or { ok:false, error }.
+
+   Deliberately NOT normalized/reshaped at the Worker layer — that
+   normalization (into DannyTrade's stable internal contract, handling
+   any fields that turn out to be absent) happens client-side in
+   option-chain-provider.js, the one place that needs to change if a
+   live response's actual fields differ from what's documented here.
+   Keeping the Worker route a thin, faithful passthrough (like
+   handleFyersCandles() already is for candles) means that adjustment
+   never requires a Worker redeploy.
+--------------------------------------------------------------- */
+export async function handleFyersOptionChain(request, env) {
+  if (request.method !== 'POST') {
+    return jsonEnvelope({ ok: false, error: 'Method not allowed.' }, 405);
+  }
+  if (!env.FYERS_TOKENS) {
+    return jsonEnvelope({ ok: false, error: 'FYERS_TOKENS KV namespace is not bound on this Worker — check wrangler.toml.' }, 500);
+  }
+  if (!env.FYERS_APP_ID) {
+    return jsonEnvelope({ ok: false, error: 'FYERS is not configured on this Worker (missing FYERS_APP_ID).' }, 500);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonEnvelope({ ok: false, error: 'Request body must be valid JSON.' }, 400);
+  }
+
+  const symbol = body && body.symbol;
+  if (!symbol || typeof symbol !== 'string') {
+    return jsonEnvelope({ ok: false, error: 'Missing or invalid "symbol".' }, 400);
+  }
+  const rawStrikeCount = body && body.strikecount;
+  const strikecount = (Number.isFinite(rawStrikeCount) && rawStrikeCount > 0) ? Math.floor(rawStrikeCount) : 10;
+  const timestamp = (body && typeof body.timestamp === 'string') ? body.timestamp : '';
+  const greeks = (body && (body.greeks === 1 || body.greeks === true)) ? 1 : 0;
+
+  const accessToken = await getStoredAccessToken(env);
+  if (!accessToken) {
+    return jsonEnvelope({ ok: false, error: 'Not authenticated with FYERS. Visit /api/fyers/login to connect your account.' }, 401);
+  }
+
+  const optionChainUrl = new URL(FYERS_OPTIONCHAIN_URL);
+  optionChainUrl.searchParams.set('symbol', symbol);
+  optionChainUrl.searchParams.set('strikecount', String(strikecount));
+  optionChainUrl.searchParams.set('timestamp', timestamp);
+  optionChainUrl.searchParams.set('greeks', String(greeks));
+
+  let fyersRes;
+  try {
+    fyersRes = await fetch(optionChainUrl.toString(), {
+      headers: { Authorization: `${env.FYERS_APP_ID}:${accessToken}` }
+    });
+  } catch {
+    return jsonEnvelope({ ok: false, error: 'Could not reach FYERS to fetch the option chain. Please try again shortly.' }, 502);
+  }
+
+  if (fyersRes.status === 401 || fyersRes.status === 403) {
+    // Same Decision B handling as handleFyersCandles() — no
+    // auto-refresh, surface plainly, redact secrets before logging.
+    let rawBody = '';
+    try { rawBody = await fyersRes.text(); } catch { rawBody = ''; }
+    let parsedBody = null;
+    try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = null; }
+
+    const secretsToMask = [accessToken, env.FYERS_SECRET_KEY].filter(Boolean);
+    const mask = (value) => {
+      if (typeof value !== 'string') return value;
+      let out = value;
+      for (const secret of secretsToMask) out = out.split(secret).join('[REDACTED]');
+      return out;
+    };
+    console.log('[FYERS DIAG][Worker] /data/options-chain-v3 rejected — HTTP status:', fyersRes.status);
+    console.log('[FYERS DIAG][Worker] FYERS raw response body:', mask(rawBody));
+
+    return jsonEnvelope({
+      ok: false,
+      error: 'FYERS rejected the stored access token (expired or invalid). Visit /api/fyers/login to reconnect — this project does not auto-refresh tokens (Decision B).',
+      fyers: { code: parsedBody && parsedBody.code, message: parsedBody && parsedBody.message }
+    }, 401);
+  }
+  if (fyersRes.status === 429) {
+    return jsonEnvelope({ ok: false, error: 'FYERS rate limit reached. Please try again shortly.' }, 429);
+  }
+
+  let fyersJson = null;
+  try {
+    fyersJson = await fyersRes.json();
+  } catch {
+    fyersJson = null;
+  }
+
+  if (!fyersRes.ok || !fyersJson || fyersJson.s !== 'ok' || !fyersJson.data) {
+    const detail = (fyersJson && fyersJson.message) ? fyersJson.message : `HTTP ${fyersRes.status}`;
+    return jsonEnvelope({ ok: false, error: `FYERS option chain request failed: ${detail}` }, 502);
+  }
+
+  // Passed through unmodified — see the file-header comment above for why.
+  return jsonEnvelope({ ok: true, data: fyersJson.data }, 200);
+}
