@@ -125,12 +125,26 @@ function makeFakeStudioInstance(){
   const drawableDiagnostics = {
     generatedAt: Date.now(), dpr: 2, canvasCssWidth: 360, canvasCssHeight: 240,
     canvasPhysicalWidth: 720, canvasPhysicalHeight: 480,
+    paintFrameCallCount: 12, resizeCallCount: 3,
+    paintHistory: [{ at: 1, entryCount: 2, paintedCount: 2 }],
     entries: [
       { id: 'fvg1', type: 'FVG', subtype: 'bullish', layer: 'fvg', index: 3, startTime: 100, price1: 50, x: 120, y: 60, painted: true, insideViewport: true, reason: null },
       { id: 'ob1', type: 'ORDER_BLOCK', subtype: 'bullish', layer: 'orderBlocks', index: 5, startTime: 110, price1: 55, x: null, y: null, painted: false, insideViewport: false, reason: "timeToX(startTime) returned null/non-finite — startTime not inside the chart's current visible time range" }
     ]
   };
-  const renderer = { getState: () => rendererState, getDrawableDiagnostics: () => drawableDiagnostics };
+  const canvasLayoutDiagnostics = {
+    dpr: 2,
+    overlay: { attrWidth: 720, attrHeight: 480, styleWidth: '360px', styleHeight: '240px',
+      rect: { left: 10, top: 20, width: 360, height: 240 }, zIndex: 'auto', position: 'absolute', visibility: 'visible', opacity: '1', display: 'block' },
+    chartCanvases: [
+      { rect: { left: 10, top: 20, width: 360, height: 240 }, zIndex: 'auto', position: 'absolute', visibility: 'visible', opacity: '1', display: 'block' }
+    ]
+  };
+  const renderer = {
+    getState: () => rendererState,
+    getDrawableDiagnostics: () => drawableDiagnostics,
+    getCanvasLayoutDiagnostics: () => canvasLayoutDiagnostics
+  };
   const lastAnalysis = {
     swings: [1, 2, 3], structureEvents: [1, 2],
     liquidity: [1, 2], orderBlocks: [1, 2, 3],
@@ -222,6 +236,107 @@ console.log('\n[6] Jump-to-Geometry button scrolls the panel to the anchor (mobi
   assert(panel.innerHTML.indexOf('Geometry ↓') !== -1, 'Sticky header exposes a direct "Geometry ↓" jump button (no reliance on discovering scroll)');
   assert(panel.innerHTML.indexOf('position:sticky') !== -1, 'Header is sticky so Close/Jump stay reachable while scrolled down');
   assert(panel.innerHTML.indexOf('-webkit-overflow-scrolling:touch') !== -1, 'Momentum scrolling is enabled for the mobile panel body');
+}
+
+console.log('\n[9] Canvas Layout section shows real bounding rects, z-index, dpr — matched overlay/chart -> DRAW CALL EXECUTED');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+
+  assert(html.indexOf('Canvas Layout') !== -1, 'Canvas Layout section is present');
+  assert(html.indexOf('CSS size: 360×240px') !== -1, 'CSS size read from getDrawableDiagnostics()');
+  assert(html.indexOf('Backing size: 720×480px') !== -1, 'Backing size read from getDrawableDiagnostics()');
+  assert(html.indexOf('Overlay rect: left 10, top 20, w 360, h 240') !== -1, 'Overlay bounding rect is the real measured rect, not fabricated');
+  assert(html.indexOf('Chart canvas #1 rect: left 10, top 20, w 360, h 240') !== -1, 'Chart canvas rect is the real measured rect');
+  assert(html.indexOf('CLASSIFICATION 3: DRAW CALL EXECUTED') !== -1, 'Aligned overlay+chart canvas with an in-view painted drawable classifies as DRAW CALL EXECUTED (3)');
+}
+
+console.log('\n[10] Mobile Summary cards show exactly the 7 requested fields with NO horizontal-scroll table');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+
+  assert(html.indexOf('Mobile Summary') !== -1, 'Mobile Summary section is present');
+  assert(html.indexOf('<b>fvg</b>') !== -1, 'Card shows Layer (fvg)');
+  assert(html.indexOf('· FVG') !== -1, 'Card shows Type (FVG)');
+  assert(/X: 120/.test(html), 'Card shows X (120)');
+  assert(/Y: 60/.test(html), 'Card shows Y (60)');
+  assert(html.indexOf('In-view:') !== -1 && html.indexOf('Painted:') !== -1, 'Card shows In-view and Painted fields');
+  assert(html.indexOf("timeToX(startTime) returned null") !== -1, 'Failed drawable\'s failure reason is shown directly on its card (no tap/hover needed)');
+}
+
+console.log('\n[11] Classification: all coordinates invalid -> COORDINATES INVALID (1)');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 2, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 360, canvasCssHeight: 240, canvasPhysicalWidth: 360, canvasPhysicalHeight: 240,
+        paintHistory: [],
+        entries: [
+          { id: 'a', type: 'FVG', layer: 'fvg', x: null, y: null, painted: false, insideViewport: false, reason: 'timeToX(startTime) returned null/non-finite — out of range' },
+          { id: 'b', type: 'ORDER_BLOCK', layer: 'orderBlocks', x: null, y: null, painted: false, insideViewport: false, reason: 'timeToX(startTime) returned null/non-finite — out of range' }
+        ]
+      }),
+      getCanvasLayoutDiagnostics: () => null
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 1: COORDINATES INVALID') !== -1, 'All-unpainted entries with timeToX/priceToY reasons classify as COORDINATES INVALID (1)');
+}
+
+console.log('\n[12] Classification: painted but outside canvas -> COORDINATES OUT OF VIEW (2)');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 1, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 360, canvasCssHeight: 240, canvasPhysicalWidth: 360, canvasPhysicalHeight: 240,
+        paintHistory: [],
+        entries: [ { id: 'a', type: 'FVG', layer: 'fvg', x: 5000, y: 60, painted: true, insideViewport: false, reason: null } ]
+      }),
+      getCanvasLayoutDiagnostics: () => null
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 2: COORDINATES OUT OF VIEW') !== -1, 'Painted-but-off-canvas entries classify as COORDINATES OUT OF VIEW (2)');
+}
+
+console.log('\n[13] Classification: chart canvas z-index above overlay -> CSS COMPOSITING / Z-INDEX ISSUE (8)');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const __origState = studioInstance.getState();
+  studioInstance.getState = () => Object.assign({}, __origState, {
+    renderer: {
+      getState: () => ({ annotationCount: 1, visibleLayers: ['candlesticks'] }),
+      getDrawableDiagnostics: () => ({
+        dpr: 1, canvasCssWidth: 360, canvasCssHeight: 240, canvasPhysicalWidth: 360, canvasPhysicalHeight: 240,
+        paintHistory: [],
+        entries: [ { id: 'a', type: 'FVG', layer: 'fvg', x: 100, y: 60, painted: true, insideViewport: true, reason: null } ]
+      }),
+      getCanvasLayoutDiagnostics: () => ({
+        dpr: 1,
+        overlay: { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: 'auto', display: 'block', visibility: 'visible', opacity: '1' },
+        chartCanvases: [ { rect: { left: 0, top: 0, width: 360, height: 240 }, zIndex: '3' } ]
+      })
+    }
+  });
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('CLASSIFICATION 8: CSS COMPOSITING / Z-INDEX ISSUE') !== -1, 'Chart canvas z-index (3) above overlay (auto=0) classifies as CSS COMPOSITING / Z-INDEX ISSUE (8)');
 }
 
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);

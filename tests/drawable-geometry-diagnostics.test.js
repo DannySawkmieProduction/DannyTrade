@@ -44,15 +44,34 @@ function makeFakeCtx(){
   };
 }
 
-function makeFakeCanvasEl(){
-  return {
+function makeRect(left, top, width, height){
+  return { left, top, width, height, right: left + width, bottom: top + height };
+}
+
+function makeFakeCanvasEl(rect, styleOverrides){
+  var el = {
     width: 0, height: 0, style: {},
-    getContext: () => makeFakeCtx()
+    getContext: () => makeFakeCtx(),
+    getBoundingClientRect: () => rect || makeRect(0, 0, 800, 400),
+    __computedStyle: Object.assign({ zIndex: 'auto', position: 'absolute', visibility: 'visible', opacity: '1', display: 'block' }, styleOverrides || {})
+  };
+  return el;
+}
+
+function makeFakeContainerEl(childCanvases){
+  var kids = childCanvases || [];
+  return {
+    clientWidth: 800, clientHeight: 400,
+    getBoundingClientRect: () => makeRect(0, 0, 800, 400),
+    querySelectorAll: (sel) => (sel === 'canvas' ? kids : [])
   };
 }
 
-function makeFakeContainerEl(){
-  return { clientWidth: 800, clientHeight: 400 };
+// Fake window.getComputedStyle — returns whatever __computedStyle the
+// test attached to the element (mirrors what getBoundingClientRect/
+// getComputedStyle would report for real DOM/CSS in a browser).
+function fakeGetComputedStyle(el){
+  return el.__computedStyle || { zIndex: 'auto', position: 'static', visibility: 'visible', opacity: '1', display: 'block' };
 }
 
 /* ---- Fake TradingView chart/series. timeToCoordinate/priceToCoordinate
@@ -85,17 +104,19 @@ function makeFakeLightweightCharts(coordMap, priceMap){
    ResizeObserver is a no-op (resize() is called explicitly by
    setCandles() anyway, which is enough to size the overlay canvas for
    these tests). ---- */
-function loadRenderer(coordMap, priceMap){
-  const overlayCanvas = makeFakeCanvasEl();
-  const container = makeFakeContainerEl();
+function loadRenderer(coordMap, priceMap, opts){
+  opts = opts || {};
+  const overlayCanvas = opts.overlayCanvas || makeFakeCanvasEl(makeRect(0, 0, 800, 400));
+  const container = opts.container || makeFakeContainerEl(opts.chartCanvases || []);
   const sandbox = {
-    window: { LightweightCharts: makeFakeLightweightCharts(coordMap, priceMap), devicePixelRatio: 1 },
-    document: { createElement: () => makeFakeCanvasEl(), head: { appendChild: () => {} } },
+    window: { LightweightCharts: makeFakeLightweightCharts(coordMap, priceMap), devicePixelRatio: 1, getComputedStyle: fakeGetComputedStyle },
+    document: { createElement: () => makeFakeCanvasEl(makeRect(0,0,0,0)), head: { appendChild: () => {} } },
     console, Math, Date, Array, Object, Map, Set, Number,
     requestAnimationFrame: cb => cb(),
     ResizeObserver: function(){ return { observe: () => {}, disconnect: () => {} }; }
   };
   sandbox.window.requestAnimationFrame = sandbox.requestAnimationFrame;
+  sandbox.getComputedStyle = fakeGetComputedStyle;
   sandbox.global = sandbox;
   const ctx = vm.createContext(sandbox);
   const src = fs.readFileSync(path.join(__dirname, '..', 'assets', 'js', 'chart', 'chart-renderer.js'), 'utf8');
@@ -188,6 +209,50 @@ async function run(){
     assert(byId.fvg1.layer === 'fvg', 'FVG annotation tagged with layer "fvg"');
     assert(byId.swing1.layer === 'marketStructure', 'SWING_HIGH annotation tagged with layer "marketStructure"');
     assert(byId.fvg1.painted && byId.swing1.painted, 'Both drawables painted successfully with valid coordinates');
+  }
+
+  console.log('\n[6] getCanvasLayoutDiagnostics() reports real bounding rects/z-index for overlay + chart canvases');
+  {
+    const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 800, 400), { zIndex: 'auto' });
+    const chartCanvas = makeFakeCanvasEl(makeRect(0, 0, 800, 400), { zIndex: '2' }); // higher than overlay's "auto" (=0)
+    const container = makeFakeContainerEl([chartCanvas]);
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+    await renderer.ready;
+    const layout = renderer.getCanvasLayoutDiagnostics();
+    assert(!!layout, 'getCanvasLayoutDiagnostics() returns a snapshot');
+    assert(layout.overlay.rect.width === 800 && layout.overlay.rect.height === 400, 'Overlay bounding rect matches the real element (800x400)');
+    assert(layout.chartCanvases.length === 1, 'Exactly one chart-internal canvas was discovered via container.querySelectorAll("canvas")');
+    assert(layout.chartCanvases[0].zIndex === '2', 'Chart canvas z-index (2) is read from computed style, not guessed');
+    assert(layout.overlay.zIndex === 'auto', 'Overlay z-index (auto) is read from computed style, not guessed');
+  }
+
+  console.log('\n[7] Misaligned overlay canvas is measurable (different rect than the chart canvas)');
+  {
+    // Overlay canvas offset by 40px and 100px smaller than the chart canvas —
+    // simulates a stale/unresized overlay (e.g. resize() not yet called after
+    // a layout change).
+    const overlayCanvas = makeFakeCanvasEl(makeRect(0, 40, 700, 400));
+    const chartCanvas = makeFakeCanvasEl(makeRect(0, 0, 800, 400));
+    const container = makeFakeContainerEl([chartCanvas]);
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+    await renderer.ready;
+    const layout = renderer.getCanvasLayoutDiagnostics();
+    assert(layout.overlay.rect.top !== layout.chartCanvases[0].rect.top, 'Overlay/chart canvas vertical offset is measurable (40px top vs 0px)');
+    assert(layout.overlay.rect.width !== layout.chartCanvases[0].rect.width, 'Overlay/chart canvas width mismatch is measurable (700px vs 800px)');
+  }
+
+  console.log('\n[8] paintFrameCallCount, resizeCallCount, and paintHistory track real paint activity');
+  {
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 });
+    await renderer.ready;
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]); // triggers 1 resize() + 1 paint
+    await renderer.setAnnotations([ baseAnnotation({}) ]); // triggers 1 more paint
+    const diag = renderer.getDrawableDiagnostics();
+    assert(diag.resizeCallCount >= 1, 'resizeCallCount increments on setCandles() (which calls resize())');
+    assert(diag.paintFrameCallCount >= 2, 'paintFrameCallCount increments across both setCandles() and setAnnotations() paints');
+    assert(Array.isArray(diag.paintHistory) && diag.paintHistory.length >= 2, 'paintHistory records multiple frames');
+    const last = diag.paintHistory[diag.paintHistory.length - 1];
+    assert(last.paintedCount === 1, 'Most recent history entry reflects the actual painted count (1) for this frame');
   }
 
   console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
