@@ -84,6 +84,31 @@
     return h * 60 + m;
   }
 
+  // CAS Phase 3 — display-only inverse of hhmmToMinutes(), used to
+  // print cas-model.js's REFERENCE_WINDOW_START_MIN as "15:00" on the
+  // timeline without hardcoding that string a second time.
+  function hhmmFromMinutes(totalMinutes){
+    if(typeof totalMinutes !== 'number' || !Number.isFinite(totalMinutes)) return '';
+    const h = Math.floor(totalMinutes / 60), m = totalMinutes % 60;
+    return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  }
+
+  // CAS Phase 3 — Kolkata calendar date (YYYY-MM-DD), used only as a
+  // cache-key component for the reference-VWAP fetch below (so a
+  // symbol switch or a new trading day correctly triggers a fresh
+  // fetch) — not a session-state decision.
+  function kolkataTodayYMD(){
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+  }
+
+  // CAS Phase 3 — formats a real numeric price/quantity for display,
+  // or returns null-safe callers' own "N/A" text — this function only
+  // ever receives values already computed by cas-model.js from real
+  // candle data; it never invents a number itself.
+  function formatPrice(v){
+    return (typeof v === 'number' && Number.isFinite(v)) ? v.toFixed(2) : null;
+  }
+
   function formatCountdown(totalSeconds){
     if(totalSeconds == null || totalSeconds < 0) return '—';
     const h = Math.floor(totalSeconds / 3600);
@@ -129,6 +154,127 @@
     let currentSymbol = null;
     let tickTimer = null;
     let isOpen = false;
+    // CAS Phase 3 — cache for the reference-VWAP fetch, keyed by
+    // symbol+Kolkata-date so a symbol switch or a new trading day
+    // triggers exactly one fresh fetch, not one per 1s countdown tick.
+    // { key, status: 'loading'|'done', vwap: number|null, band: {...} }
+    let refCache = null;
+
+    // CAS Phase 3 — fires (at most once per symbol+day) a REAL fetch of
+    // 1-minute candles via the EXISTING FyersService.getCandles(), then
+    // computes a genuine VWAP via cas-model.js from whatever candles
+    // actually fall inside the 15:00–15:15 window. Never estimates,
+    // never fabricates a missing candle, never substitutes the chart's
+    // own (possibly different-timeframe) candle set. Only attempted
+    // once the reference window could plausibly contain data (current
+    // Kolkata time is at/after 15:00) — before that it correctly stays
+    // unavailable without wasting a network call.
+    function ensureReferenceVWAP(symbol, info){
+      const CasModel = window.DannyChart.CasModel;
+      const FyersService = window.DannyChart.FyersService;
+      if(!info.casEligible || !CasModel || !FyersService || typeof FyersService.getCandles !== 'function') return;
+
+      const { minutesOfDay } = kolkataNowParts();
+      if(minutesOfDay < CasModel.REFERENCE_WINDOW_START_MIN) return; // window hasn't started yet today
+
+      const key = symbol + '|' + kolkataTodayYMD();
+      if(refCache && refCache.key === key) return; // already fetched/in-flight for this symbol+day
+
+      refCache = { key, status: 'loading', vwap: null, band: { lowerBand: null, upperBand: null } };
+      FyersService.getCandles({ symbol, timeframe: '1m', limit: 400 })
+        .then(function(candles){
+          const vwap = CasModel.computeReferenceVWAP(candles);
+          refCache = { key, status: 'done', vwap, band: CasModel.computePriceBand(vwap) };
+          if(isOpen) render();
+        })
+        .catch(function(){
+          // A fetch failure is exactly as "unavailable" as no data at
+          // all — never silently retried every tick (that would poll),
+          // never treated as a value to estimate from.
+          refCache = { key, status: 'done', vwap: null, band: { lowerBand: null, upperBand: null } };
+          if(isOpen) render();
+        });
+    }
+
+    // CAS Phase 3 — the Reference Price + ±3% Band section. Renders
+    // whatever ensureReferenceVWAP() above has resolved for the CURRENT
+    // symbol+day only (a stale cache entry for a different symbol/day
+    // never displays here) — "N/A — reference VWAP unavailable from
+    // current data source" is the exact required text whenever no real
+    // value exists yet.
+    function renderReferencePriceSection(symbol){
+      const key = symbol + '|' + kolkataTodayYMD();
+      const cached = (refCache && refCache.key === key) ? refCache : null;
+      const NA = 'N/A — reference VWAP unavailable from current data source';
+      const loading = cached && cached.status === 'loading';
+      const vwapStr = cached && cached.status === 'done' ? formatPrice(cached.vwap) : null;
+      const band = (cached && cached.status === 'done') ? cached.band : { lowerBand: null, upperBand: null };
+
+      const statusLine = loading
+        ? '<span style="color:var(--text-dim,#8D93A6)">Loading — fetching 1-minute candles for 15:00–15:15…</span>'
+        : (vwapStr != null
+            ? '<span style="color:var(--mint,#35D399)">LIVE / AVAILABLE</span>'
+            : '<span style="color:var(--text-faint,#565C70)">' + esc(NA) + '</span>');
+
+      return `<div style="margin-top:18px">
+        <div style="font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70);margin-bottom:8px">REFERENCE PRICE</div>
+        <div style="padding:12px 14px;border:1px solid var(--border-soft,#1B2030);border-radius:10px;background:var(--bg-elev-2,#1A1F2B)">
+          <div style="font-size:12px;color:var(--text-dim,#8D93A6)">3:00–3:15 PM VWAP</div>
+          <div style="font-family:var(--font-mono,monospace);font-size:20px;font-weight:600;margin-top:2px;color:${vwapStr != null ? 'var(--text,#E9EBF1)' : 'var(--text-faint,#565C70)'}">${vwapStr != null ? esc(vwapStr) : '—'}</div>
+          <div style="margin-top:4px;font-size:11px">${statusLine}</div>
+        </div>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <div style="flex:1;padding:10px;border:1px solid var(--border-soft,#1B2030);border-radius:8px;text-align:center">
+            <div style="font-family:var(--font-mono,monospace);font-size:9.5px;color:var(--text-faint,#565C70);letter-spacing:.04em">LOWER BAND</div>
+            <div style="font-family:var(--font-mono,monospace);font-size:13px;margin-top:2px;color:${band.lowerBand != null ? 'var(--red,#FF5C6C)' : 'var(--text-faint,#565C70)'}">${formatPrice(band.lowerBand) != null ? esc(formatPrice(band.lowerBand)) : 'N/A'}</div>
+          </div>
+          <div style="flex:1;padding:10px;border:1px solid var(--border-soft,#1B2030);border-radius:8px;text-align:center">
+            <div style="font-family:var(--font-mono,monospace);font-size:9.5px;color:var(--text-faint,#565C70);letter-spacing:.04em">REFERENCE</div>
+            <div style="font-family:var(--font-mono,monospace);font-size:13px;margin-top:2px;color:${vwapStr != null ? 'var(--gold,#D4AF6A)' : 'var(--text-faint,#565C70)'}">${vwapStr != null ? esc(vwapStr) : 'N/A'}</div>
+          </div>
+          <div style="flex:1;padding:10px;border:1px solid var(--border-soft,#1B2030);border-radius:8px;text-align:center">
+            <div style="font-family:var(--font-mono,monospace);font-size:9.5px;color:var(--text-faint,#565C70);letter-spacing:.04em">UPPER BAND</div>
+            <div style="font-family:var(--font-mono,monospace);font-size:13px;margin-top:2px;color:${band.upperBand != null ? 'var(--mint,#35D399)' : 'var(--text-faint,#565C70)'}">${formatPrice(band.upperBand) != null ? esc(formatPrice(band.upperBand)) : 'N/A'}</div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    // CAS Phase 3 — Auction Data section. Every field here requires a
+    // genuine exchange auction order book, which the current FYERS
+    // historical-candle endpoint does not provide at all — no fetch is
+    // ever attempted for any of these, unlike the reference VWAP above.
+    // Always the exact required text; never a synthetic/derived number.
+    function renderAuctionDataSection(){
+      const NA = 'N/A — live CAS auction data unavailable from current data source';
+      const rows = ['Buy Quantity', 'Sell Quantity', 'Executable Volume', 'Unmatched Quantity', 'Indicative Price', 'Equilibrium Price', 'Auction Volume', 'Official Auction Close'];
+      return `<div style="margin-top:18px">
+        <div style="font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70);margin-bottom:8px">AUCTION DATA <span style="color:var(--red,#FF5C6C);font-weight:600">· EXCHANGE AUCTION DATA REQUIRED</span></div>
+        ${rows.map(k => `<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px">
+          <span style="color:var(--text-dim,#8D93A6)">${esc(k)}</span><span style="color:var(--text-faint,#565C70);font-family:var(--font-mono,monospace);font-size:10.5px;text-align:right;max-width:55%">${esc(NA)}</span>
+        </div>`).join('')}
+      </div>`;
+    }
+
+    // CAS Phase 3 — the two expandable methodology explanations, using
+    // native <details>/<summary> (no extra JS, no animation).
+    function renderMethodologySections(){
+      return `<div style="margin-top:18px;display:flex;flex-direction:column;gap:8px">
+        <details style="border:1px solid var(--border-soft,#1B2030);border-radius:8px;padding:10px 12px">
+          <summary style="cursor:pointer;font-weight:600;font-size:13px">Reference Price</summary>
+          <p style="margin-top:8px;font-size:12.5px;color:var(--text-dim,#8D93A6);line-height:1.6">The CAS reference price is based on the VWAP of trades executed between 3:00 PM and 3:15 PM during the continuous trading session.</p>
+        </details>
+        <details style="border:1px solid var(--border-soft,#1B2030);border-radius:8px;padding:10px 12px">
+          <summary style="cursor:pointer;font-weight:600;font-size:13px">How the closing price is discovered</summary>
+          <div style="margin-top:8px;font-size:12.5px;color:var(--text-dim,#8D93A6);line-height:1.7">
+            <div><b style="color:var(--text,#E9EBF1)">Step 1 — Maximum volume.</b> Find the price at which the largest quantity can be executed.</div>
+            <div style="margin-top:6px"><b style="color:var(--text,#E9EBF1)">Step 2 — Minimum imbalance.</b> If several prices have the same executable volume, select the one with the smallest absolute unmatched quantity.</div>
+            <div style="margin-top:6px"><b style="color:var(--text,#E9EBF1)">Step 3 — Reference-price proximity.</b> If the imbalance remains tied, select the price closest to the CAS reference price.</div>
+            <div style="margin-top:6px;color:var(--text-faint,#565C70)">DannyTrade cannot run this calculation today — it requires the genuine exchange auction order book, which the current data source does not provide. See Auction Data above.</div>
+          </div>
+        </details>
+      </div>`;
+    }
 
     function buildOverlay(){
       const el = document.createElement('div');
@@ -157,32 +303,41 @@
       return { el, sheet };
     }
 
-    function buildTimeline(info){
+    function buildTimeline(info, nowMinutesOfDay){
       if(!info.casEligible){
         return `<div style="margin-top:14px;color:var(--text-faint,#565C70);font-size:12.5px;font-family:var(--font-mono,monospace)">Session timeline applies only to CAS-eligible instruments.</div>`;
       }
+      const CasModel = window.DannyChart.CasModel;
+      const refWindowStart = CasModel ? hhmmFromMinutes(CasModel.REFERENCE_WINDOW_START_MIN) : '15:00';
       // Fixed, publicly-documented boundary labels for a CAS-eligible
-      // symbol's day (09:15 / 15:15 / 15:28 / 15:30 / 15:35) — display
-      // labels only, mirroring market-session.js's own header
-      // documentation of the SEBI circular; the ACTIVE segment
-      // highlighted below is driven entirely by info.session/
-      // info.casSubPhase, never recomputed here.
+      // symbol's day (09:15 / 15:00 / 15:15 / 15:28 / 15:30 / 15:35) —
+      // display labels only, mirroring market-session.js's own header
+      // documentation of the SEBI circular and cas-model.js's own
+      // REFERENCE_WINDOW_START_MIN; the ACTIVE segment highlighted
+      // below is driven entirely by info.session/info.casSubPhase (plus
+      // the current clock, for the 09:15-15:15 continuous span only,
+      // to distinguish "before 15:00" from "inside the reference
+      // window" — never an independent session decision).
       const segs = [
-        { key: 'CONTINUOUS', from: '09:15', to: info.continuousTradingEnd, label: 'Continuous Trading' },
+        { key: 'CONTINUOUS', from: '09:15', to: refWindowStart, label: 'Continuous Trading' },
+        { key: 'REF_WINDOW', from: refWindowStart, to: info.continuousTradingEnd, label: 'Reference VWAP Window' },
         { key: 'CAS_OC',     from: info.continuousTradingEnd, to: '15:28', label: 'Order Collection' },
         { key: 'CAS_RW',     from: '15:28', to: '15:30', label: 'Random / Restricted Window' },
         { key: 'CAS_MATCH',  from: '15:30', to: info.auctionEnd, label: 'Matching' }
       ];
-      const activeKey = info.session === 'CONTINUOUS' ? 'CONTINUOUS'
-        : (info.session === 'CAS'
-            ? (info.casSubPhase === 'ORDER_COLLECTION' ? 'CAS_OC' : info.casSubPhase === 'RESTRICTED_WINDOW' ? 'CAS_RW' : 'CAS_MATCH')
-            : null);
+      let activeKey = null;
+      if(info.session === 'CONTINUOUS'){
+        const refStartMin = CasModel ? CasModel.REFERENCE_WINDOW_START_MIN : 900;
+        activeKey = (nowMinutesOfDay >= refStartMin) ? 'REF_WINDOW' : 'CONTINUOUS';
+      } else if(info.session === 'CAS'){
+        activeKey = info.casSubPhase === 'ORDER_COLLECTION' ? 'CAS_OC' : info.casSubPhase === 'RESTRICTED_WINDOW' ? 'CAS_RW' : 'CAS_MATCH';
+      }
       return `<div style="margin-top:14px">
         <div style="display:flex;border-radius:6px;overflow:hidden;height:8px;background:var(--border-soft,#1B2030)">
           ${segs.map(s => `<div style="flex:1;margin:0 1px;background:${s.key === activeKey ? 'var(--gold,#D4AF6A)' : 'var(--border,#232838)'}"></div>`).join('')}
         </div>
-        <div style="display:flex;justify-content:space-between;margin-top:5px;font-family:var(--font-mono,monospace);font-size:9.5px;color:var(--text-faint,#565C70)">
-          <span>09:15</span><span>${esc(info.continuousTradingEnd)}</span><span>15:28</span><span>15:30</span><span>${esc(info.auctionEnd || '15:35')}</span>
+        <div style="display:flex;justify-content:space-between;margin-top:5px;font-family:var(--font-mono,monospace);font-size:9px;color:var(--text-faint,#565C70)">
+          <span>09:15</span><span>${esc(refWindowStart)}</span><span>${esc(info.continuousTradingEnd)}</span><span>15:28</span><span>15:30</span><span>${esc(info.auctionEnd || '15:35')}</span>
         </div>
         <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px">
           ${segs.map(s => `<div style="display:flex;justify-content:space-between;font-size:11.5px;${s.key === activeKey ? 'color:var(--gold,#D4AF6A);font-weight:600' : 'color:var(--text-dim,#8D93A6)'}">
@@ -253,27 +408,53 @@
         return;
       }
       const info = MarketSession.getSession(new Date(), currentSymbol);
-      const disp = SESSION_DISPLAY[info.session] || SESSION_DISPLAY.CLOSED;
-      const eligibilityTag = info.isIndex ? 'INDEX · CAS N/A' : (info.casEligible ? 'NSE · F&O ELIGIBLE' : 'NSE · CASH ONLY');
+      const { minutesOfDay: nowMinutesOfDay } = kolkataNowParts();
+
+      // CAS Phase 3 — top status badge per the 4 documented states
+      // (CAS ACTIVE / CAS NOT APPLICABLE / CAS COMPLETED / MARKET
+      // CLOSED); falls back to the existing generic session mapping
+      // for PRE_OPEN/CONTINUOUS on an eligible symbol (not one of the
+      // 4 named states, but still informative). Every branch reads
+      // info.casEligible/info.session — never re-derives them.
+      let disp;
+      if(!info.casEligible) disp = { label: 'CAS NOT APPLICABLE', color: '#565C70' };
+      else if(info.session === 'CAS') disp = { label: 'CAS ACTIVE', color: '#D4AF6A' };
+      else if(info.session === 'POST_CLOSE') disp = { label: 'CAS COMPLETED', color: '#35D399' };
+      else if(info.session === 'CLOSED') disp = { label: 'MARKET CLOSED', color: '#565C70' };
+      else disp = SESSION_DISPLAY[info.session] || SESSION_DISPLAY.CLOSED;
+
+      // CAS Phase 3 — explicit eligibility phrase per instrument
+      // category, delegated entirely to info.isIndex/info.casEligible
+      // and MarketSession.isMcxCommodity() (no second eligibility
+      // table). Distinct from `disp` above — this describes WHY, the
+      // badge above describes the current moment.
+      const isMcx = typeof MarketSession.isMcxCommodity === 'function' && MarketSession.isMcxCommodity(currentSymbol);
+      const eligibilityTag = info.casEligible
+        ? 'CAS APPLICABLE'
+        : (info.isIndex ? 'CAS NOT APPLICABLE — INDEX' : (isMcx ? 'CAS NOT APPLICABLE — MCX COMMODITY' : 'CAS NOT APPLICABLE'));
 
       let bodyHtml;
       if(!info.casEligible){
         const reason = info.isIndex
           ? 'This instrument is an index — indices are index values, not F&O-underlying cash securities, so the Closing Auction Session does not apply.'
-          : 'This stock has no active F&O (derivative) contracts, so it is not CAS-eligible. It trades continuously until 15:30, with the official close computed as the last-30-minute VWAP, unchanged by the CAS regulation.';
+          : (isMcx
+              ? 'This instrument is an MCX commodity future — the Closing Auction Session is an NSE/BSE equity-market mechanism and does not apply to commodity derivatives.'
+              : 'This stock has no active F&O (derivative) contracts, so it is not CAS-eligible. It trades continuously until 15:30, with the official close computed as the last-30-minute VWAP, unchanged by the CAS regulation.');
         bodyHtml = `
           <div style="margin-top:16px;padding:14px;border:1px dashed var(--border,#232838);border-radius:10px;background:var(--bg-elev-2,#1A1F2B)">
             <div style="font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">CLOSING AUCTION SESSION</div>
-            <div style="margin-top:4px;font-weight:600;color:var(--text-dim,#8D93A6)">NOT APPLICABLE</div>
+            <div style="margin-top:4px;font-weight:600;color:var(--text-dim,#8D93A6)">${esc(eligibilityTag)}</div>
             <div style="margin-top:8px;font-size:12.5px;color:var(--text-dim,#8D93A6);line-height:1.6">${esc(reason)}</div>
             <div style="margin-top:8px;font-size:12px;color:var(--text-faint,#565C70)">Closing method: ${esc(info.closingMethod)}</div>
           </div>`;
       } else {
+        ensureReferenceVWAP(currentSymbol, info); // fire-and-forget; re-renders itself when resolved — never blocks this render
+
         const target = nextBoundaryTarget(info);
-        const { minutesOfDay, secondsOfMinute } = kolkataNowParts();
+        const { secondsOfMinute } = kolkataNowParts();
         let countdownHtml = '';
         if(target != null){
-          const remainSeconds = Math.max(0, (target - minutesOfDay) * 60 - secondsOfMinute);
+          const remainSeconds = Math.max(0, (target - nowMinutesOfDay) * 60 - secondsOfMinute);
           const subLabel = info.session === 'CAS' ? (SUB_PHASE_LABEL[info.casSubPhase] || '') : 'Continuous Trading';
           countdownHtml = `
             <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:var(--bg-elev-2,#1A1F2B);border-radius:10px;border:1px solid var(--border-soft,#1B2030)">
@@ -284,20 +465,17 @@
             </div>`;
         }
         bodyHtml = `
+          <div style="margin-top:6px;font-family:var(--font-mono,monospace);font-size:10.5px;color:var(--text-dim,#8D93A6)">${esc(eligibilityTag)}</div>
           ${countdownHtml}
-          ${buildTimeline(info)}
-          <div style="margin-top:18px">
-            <div style="font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70);margin-bottom:8px">AUCTION INFORMATION</div>
-            ${['Official Auction Price','Auction Imbalance','Auction Volume','Indicative Price'].map(k =>
-              `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:13px">
-                 <span style="color:var(--text-dim,#8D93A6)">${k}</span><span style="color:var(--text-faint,#565C70);font-family:var(--font-mono,monospace);font-size:12px">Not available</span>
-               </div>`).join('')}
-          </div>
+          ${buildTimeline(info, nowMinutesOfDay)}
+          ${renderReferencePriceSection(currentSymbol)}
+          ${renderAuctionDataSection()}
           <div style="margin-top:16px;padding:12px 14px;border:1px solid var(--border-soft,#1B2030);border-radius:10px;background:var(--bg-elev-2,#1A1F2B)">
             <div style="font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">DATA SOURCE</div>
-            <div style="margin-top:4px;font-weight:600;color:var(--text,#E9EBF1)">FYERS <span style="font-weight:400;color:var(--text-dim,#8D93A6);font-size:12.5px">· Historical OHLC</span></div>
+            <div style="margin-top:4px;font-weight:600;color:var(--text,#E9EBF1)">FYERS <span style="font-weight:400;color:var(--text-dim,#8D93A6);font-size:12.5px">· Historical OHLC (1m candles used for Reference Price only)</span></div>
             <div style="margin-top:6px;font-size:12px;color:var(--text-dim,#8D93A6)">Auction-specific data: <span style="color:var(--red,#FF5C6C)">Unavailable</span></div>
           </div>
+          ${renderMethodologySections()}
           <div style="margin-top:16px">
             <div style="font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70);margin-bottom:8px">AI CAS INTERPRETATION</div>
             ${renderAiSection(info)}
@@ -309,7 +487,7 @@
           <div>
             <div style="font-family:var(--font-mono,monospace);font-size:10.5px;letter-spacing:.06em;color:var(--text-faint,#565C70)">CLOSING AUCTION SESSION</div>
             <div style="font-family:var(--font-display,'Space Grotesk',sans-serif);font-weight:700;font-size:19px;margin-top:2px">${esc(info.symbol)}</div>
-            <div style="font-family:var(--font-mono,monospace);font-size:10.5px;color:var(--text-dim,#8D93A6);margin-top:2px">${esc(eligibilityTag)}</div>
+            <div style="font-family:var(--font-mono,monospace);font-size:10.5px;color:var(--text-dim,#8D93A6);margin-top:2px">${esc(info.isIndex ? 'INDEX' : (isMcx ? 'MCX · FUTURE' : (info.casEligible ? 'NSE · F&O ELIGIBLE' : 'NSE · CASH ONLY')))}</div>
           </div>
           <button id="casPanelCloseBtn" aria-label="Close" style="background:none;border:1px solid var(--border,#232838);color:var(--text-dim,#8D93A6);border-radius:8px;width:34px;height:34px;font-size:16px;cursor:pointer;flex-shrink:0">✕</button>
         </div>
