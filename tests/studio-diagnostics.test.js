@@ -211,5 +211,18 @@ console.log('\n[5] Drawable Geometry section shows real per-drawable values, inc
   assert(html.indexOf('1 drawable(s) failed to paint') !== -1, 'Summary line counts the one failed-to-paint drawable');
 }
 
+console.log('\n[6] Jump-to-Geometry button scrolls the panel to the anchor (mobile scroll fix)');
+{
+  const studioInstance = makeFakeStudioInstance();
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance, aiProviderName: 'gemini' });
+  mobileDiagBtn.click();
+  const panel = doc.body.children.find(c => c.id === 'dtChartDiagnostics');
+
+  assert(panel.innerHTML.indexOf('dtDiagGeometryAnchor') !== -1, 'Geometry section has a stable anchor id to scroll to');
+  assert(panel.innerHTML.indexOf('Geometry ↓') !== -1, 'Sticky header exposes a direct "Geometry ↓" jump button (no reliance on discovering scroll)');
+  assert(panel.innerHTML.indexOf('position:sticky') !== -1, 'Header is sticky so Close/Jump stay reachable while scrolled down');
+  assert(panel.innerHTML.indexOf('-webkit-overflow-scrolling:touch') !== -1, 'Momentum scrolling is enabled for the mobile panel body');
+}
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 process.exit(failed > 0 ? 1 : 0);
