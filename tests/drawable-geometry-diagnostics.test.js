@@ -255,6 +255,77 @@ async function run(){
     assert(last.paintedCount === 1, 'Most recent history entry reflects the actual painted count (1) for this frame');
   }
 
+  console.log('\n[9] Overlay aligns to the ACTUAL plot-pane canvas (830x412), not the outer container (902x440) — reproduces the live-reported mismatch');
+  {
+    // Reproduces exactly the live evidence: container/outer wrap is
+    // 902x440 at (39,948); the chart library's plotting-pane canvas is
+    // the smaller 830x412 box at the SAME top-left (right/bottom axis
+    // gutters only affect width/height, not left/top, matching the
+    // measured left=39/top=948 on both).
+    const wrapEl = { getBoundingClientRect: () => makeRect(39, 948, 902, 440) };
+    const overlayCanvas = makeFakeCanvasEl(makeRect(39, 948, 902, 440)); // stale/unaligned starting rect
+    overlayCanvas.offsetParent = wrapEl;
+    const plotCanvas = makeFakeCanvasEl(makeRect(39, 948, 830, 412));     // the real plotting pane
+    const axisLabelCanvas = makeFakeCanvasEl(makeRect(869, 948, 72, 412)); // a narrow price-axis-label strip — must NOT be picked
+    const container = makeFakeContainerEl([plotCanvas, axisLabelCanvas]);
+    container.clientWidth = 902; container.clientHeight = 440;
+
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+    await renderer.ready;
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]); // triggers resize()
+
+    assert(overlayCanvas.style.width === '830px', 'Overlay CSS width is set to the plot-pane\'s width (830px), not the container\'s (902px)');
+    assert(overlayCanvas.style.height === '412px', 'Overlay CSS height is set to the plot-pane\'s height (412px), not the container\'s (440px)');
+    assert(overlayCanvas.style.left === '0px', 'Overlay left offset is 0px — plot pane and overlay share the same top-left origin (39,948), so the offset relative to the shared parent is 0');
+    assert(overlayCanvas.style.top === '0px', 'Overlay top offset is 0px for the same reason');
+    assert(overlayCanvas.width === 830, 'Overlay backing-store width (dpr=1) is derived from the measured 830px, not hardcoded and not the container\'s 902px');
+    assert(overlayCanvas.height === 412, 'Overlay backing-store height (dpr=1) is derived from the measured 412px, not hardcoded and not the container\'s 440px');
+
+    const diag = renderer.getDrawableDiagnostics();
+    assert(diag.canvasCssWidth === 830 && diag.canvasCssHeight === 412, 'Reported diagnostics canvas size matches the aligned plot-pane size (830x412), not the container (902x440)');
+  }
+
+  console.log('\n[10] Resize synchronization — a subsequent layout change realigns the overlay to the NEW plot-pane rect');
+  {
+    const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 902, 440) };
+    const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 902, 440));
+    overlayCanvas.offsetParent = wrapEl;
+    const plotCanvas = makeFakeCanvasEl(makeRect(0, 0, 830, 412));
+    const container = makeFakeContainerEl([plotCanvas]);
+    container.clientWidth = 902; container.clientHeight = 440;
+
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+    await renderer.ready;
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+    assert(overlayCanvas.style.width === '830px', 'Initial resize aligns overlay to the first plot-pane size (830px)');
+
+    // Simulate a layout change (e.g. orientation change / keyboard closing)
+    // — the container shrinks and the library's plot pane shrinks with it.
+    // Mutate the SAME rect objects resize() will re-measure on its next call.
+    container.clientWidth = 600; container.clientHeight = 300;
+    plotCanvas.getBoundingClientRect = () => makeRect(0, 0, 540, 280);
+    wrapEl.getBoundingClientRect = () => makeRect(0, 0, 600, 300);
+    overlayCanvas.getBoundingClientRect = () => makeRect(0, 0, 540, 280);
+
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]); // triggers resize() again
+    assert(overlayCanvas.style.width === '540px', 'After a second layout change, overlay CSS width re-syncs to the NEW plot-pane width (540px)');
+    assert(overlayCanvas.style.height === '280px', 'After a second layout change, overlay CSS height re-syncs to the NEW plot-pane height (280px)');
+    assert(overlayCanvas.width === 540 && overlayCanvas.height === 280, 'Backing-store dimensions re-sync on every resize(), not just the first one');
+
+    const diag = renderer.getDrawableDiagnostics();
+    assert(diag.resizeCallCount >= 2, 'resizeCallCount confirms resize() actually ran twice for this scenario');
+  }
+
+  console.log('\n[11] Fallback: no chart-internal canvas found yet -> overlay falls back to container size (no crash, old behavior preserved)');
+  {
+    const container = makeFakeContainerEl([]); // no chart canvases created yet
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { container });
+    await renderer.ready;
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+    const diag = renderer.getDrawableDiagnostics();
+    assert(diag.canvasCssWidth === 800 && diag.canvasCssHeight === 400, 'With no plot canvas discoverable, overlay safely falls back to the container size (800x400) instead of erroring or sizing to 0');
+  }
+
   console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
   process.exit(failed > 0 ? 1 : 0);
 }
