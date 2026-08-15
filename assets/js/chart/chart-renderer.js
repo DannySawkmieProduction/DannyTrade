@@ -540,6 +540,7 @@
 
     function paintFrame(){
       if(!chart || !series || destroyed) return;
+      paintFrameCallCount += 1;
       const dpr = window.devicePixelRatio || 1;
       ctx.setTransform(dpr,0,0,dpr,0,0);
       ctx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
@@ -574,6 +575,12 @@
       labelQueue.forEach(({text,x,y,color,align}) => drawLabel(text,x,y,color,align));
 
       lastHitRegions = hitRegions;
+      paintHistory.push({
+        at: Date.now(),
+        entryCount: diagnostics.length,
+        paintedCount: diagnostics.filter(function(e){ return e.painted; }).length
+      });
+      if(paintHistory.length > PAINT_HISTORY_MAX) paintHistory.shift();
       lastPaintDiagnostics = {
         generatedAt: Date.now(),
         dpr,
@@ -581,6 +588,8 @@
         canvasCssHeight: container.clientHeight,
         canvasPhysicalWidth: overlayCanvas.width,
         canvasPhysicalHeight: overlayCanvas.height,
+        paintFrameCallCount, resizeCallCount,
+        paintHistory: paintHistory.slice(),
         entries: diagnostics
       };
     }
@@ -599,9 +608,14 @@
 
     let lastHitRegions = [];
     let lastPaintDiagnostics = null; // Phase 6 — see paintFrame()/getDrawableDiagnostics()
+    let paintFrameCallCount = 0;     // Phase 6 — total paintFrame() invocations this session
+    let resizeCallCount = 0;         // Phase 6 — total resize() invocations this session
+    const paintHistory = [];         // Phase 6 — last 8 paints: {at, entryCount, paintedCount}, newest last
+    const PAINT_HISTORY_MAX = 8;
 
     function resize(){
       if(!chart) return;
+      resizeCallCount += 1;
       const w = container.clientWidth, h = container.clientHeight;
       chart.resize(w,h);
       const dpr = window.devicePixelRatio || 1;
@@ -609,6 +623,45 @@
       overlayCanvas.style.width = w+'px'; overlayCanvas.style.height = h+'px';
       scheduleDraw();
       emitter.emit('resize', { width: w, height: h, state: getState() });
+    }
+
+    /** Phase 6 — read-only DOM/CSS layout facts about the overlay canvas
+     *  and any canvas element(s) the chart library itself created inside
+     *  `container`. Pure observation via getBoundingClientRect()/
+     *  getComputedStyle() — never alters layout, positioning, or styling.
+     *  Used by the mobile Diag panel to answer "is the overlay canvas
+     *  actually the same size/position as the chart, and is it stacked
+     *  on top" without needing browser DevTools. */
+    function getCanvasLayoutDiagnostics(){
+      if(typeof window === 'undefined' || !window.getComputedStyle || !overlayCanvas.getBoundingClientRect){
+        return null; // not available in this environment (e.g. a non-DOM test sandbox)
+      }
+      const dpr = window.devicePixelRatio || 1;
+      const overlayRect = overlayCanvas.getBoundingClientRect();
+      const overlayStyle = window.getComputedStyle(overlayCanvas);
+      const overlay = {
+        attrWidth: overlayCanvas.width, attrHeight: overlayCanvas.height,
+        styleWidth: overlayCanvas.style.width, styleHeight: overlayCanvas.style.height,
+        rect: { left: overlayRect.left, top: overlayRect.top, width: overlayRect.width, height: overlayRect.height },
+        zIndex: overlayStyle.zIndex, position: overlayStyle.position,
+        visibility: overlayStyle.visibility, opacity: overlayStyle.opacity, display: overlayStyle.display
+      };
+
+      // Every <canvas> element the chart library created inside `container`
+      // (the library manages this DOM itself — we only read it, never touch
+      // it). Typically 1-2 canvases (a main pane + a crosshair/interaction
+      // layer) depending on the library version.
+      const chartCanvasEls = container.querySelectorAll ? Array.from(container.querySelectorAll('canvas')) : [];
+      const chartCanvases = chartCanvasEls.map(function(el){
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return {
+          rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+          zIndex: s.zIndex, position: s.position, visibility: s.visibility, opacity: s.opacity, display: s.display
+        };
+      });
+
+      return { dpr, overlay, chartCanvases };
     }
 
     /* ---- Candle data (Layer 1 — delegated to the TradingView series) ---- */
@@ -839,6 +892,10 @@
       // per-drawable geometry (see paintFrame() above). null until the
       // first frame has painted.
       getDrawableDiagnostics: () => lastPaintDiagnostics,
+      // Phase 6 — read-only DOM/CSS layout facts (bounding rects, computed
+      // z-index/visibility/opacity) for the overlay canvas and any canvas
+      // element(s) the chart library created. See getCanvasLayoutDiagnostics().
+      getCanvasLayoutDiagnostics,
       on: emitter.on, off: emitter.off, once: emitter.once, emit: emitter.emit
     };
   }
