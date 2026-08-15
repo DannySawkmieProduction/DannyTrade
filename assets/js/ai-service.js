@@ -317,6 +317,29 @@
         throw new Error((err && err.message) || 'Could not prepare the file for upload.');
       }
 
+      // CAS — attach normalized market-session metadata, provider-
+      // independent (this is the ONLY place it's added, so Gemini and
+      // OpenRouter both receive the exact same logical context; see
+      // assets/js/chart/market-session.js for what it contains and,
+      // importantly, what it deliberately never fabricates —
+      // officialClose is always null here, since FYERS provides no
+      // CAS-specific auction data). Every existing payload shape keeps
+      // working unchanged: this only ADDS a `marketSession` key, and
+      // only when a symbol/instrument is present and market-session.js
+      // is loaded. Never blocks or fails an AI request over this.
+      try {
+        const symbolForSession = normalizedPayload && (normalizedPayload.symbol || normalizedPayload.instrument);
+        const MarketSession = window.DannyChart && window.DannyChart.MarketSession;
+        if (symbolForSession && MarketSession && typeof MarketSession.getSession === 'function') {
+          normalizedPayload = Object.assign({}, normalizedPayload, {
+            marketSession: MarketSession.getSession(new Date(), symbolForSession)
+          });
+        }
+      } catch (err) {
+        // Session metadata is a best-effort enrichment, never a
+        // requirement — a failure here must never block analysis.
+      }
+
       let res;
       try {
         // Retries transient network failures only (see
