@@ -384,7 +384,7 @@ async function run(){
     await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
 
     assert(overlayCanvas.style.width === '830px' && overlayCanvas.style.height === '412px', 'Overlay ends at the correct, stable 830x412 size when the measurement never changes');
-    assert(measureCalls === 2, 'Exactly 2 measurements occurred (immediate sync + one post-layout re-sync) — the mechanism runs but produces no drift when nothing changed');
+    assert(renderer.getSyncTrace().length === 2, 'Exactly 2 syncs occurred (immediate + one post-layout re-sync) — the mechanism runs but produces no drift when nothing changed');
   }
 
   console.log('\n[14] Stale-callback guard — an OLDER resize()\'s deferred re-sync never overwrites a NEWER resize()\'s geometry');
@@ -400,12 +400,14 @@ async function run(){
     let measureCalls = 0;
     const plotCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
     // Always reports the CURRENT settled truth (830) after the very first
-    // (stale, pre-settle) measurement — mirrors [12]'s model, but the
-    // point of this test is call-count, not the returned value: if the
-    // stale resize's deferred callback incorrectly still fires, it adds
-    // extra measurement calls beyond what a correctly-guarded sequence
-    // produces.
-    plotCanvas.getBoundingClientRect = () => { measureCalls += 1; return measureCalls === 1 ? makeRect(0, 0, 846, 412) : makeRect(0, 0, 830, 412); };
+    // (stale, pre-settle) measurement — mirrors [12]'s model. Note: with the
+    // candidate-enumeration instrumentation added this turn, each sync now
+    // reads getBoundingClientRect() on the plot canvas TWICE (once for the
+    // candidate trace, once for the actual selection) — so this counter
+    // alone is no longer 1:1 with "number of syncs"; the sync-count
+    // assertions below use renderer.getSyncTrace().length instead, which is
+    // exact regardless of how many candidate reads each sync performs.
+    plotCanvas.getBoundingClientRect = () => { measureCalls += 1; return measureCalls <= 2 ? makeRect(0, 0, 846, 412) : makeRect(0, 0, 830, 412); };
     const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 846, 412) };
     const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
     overlayCanvas.offsetParent = wrapEl;
@@ -415,18 +417,16 @@ async function run(){
     const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container, requestAnimationFrame: controlledRAF });
     await renderer.ready;
 
-    // First resize (generation 1): immediate sync measures once (call #1,
-    // returns the stale 846) and queues its outer post-layout rAF —
-    // NOT yet flushed.
+    // First resize (generation 1): immediate sync runs once and queues its
+    // outer post-layout rAF — NOT yet flushed.
     await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
-    assert(measureCalls === 1, 'First resize\'s immediate sync measured once; its deferred post-layout callback is queued but not yet run');
+    assert(renderer.getSyncTrace().length === 1, 'First resize\'s immediate sync ran once; its deferred post-layout callback is queued but not yet run');
 
     // Second resize (generation 2) happens BEFORE the first resize's
-    // deferred callback ever fires — its own immediate sync measures
-    // again (call #2, now returns the settled 830) and queues its own
-    // outer post-layout rAF.
+    // deferred callback ever fires — its own immediate sync runs again
+    // (now measuring the settled 830) and queues its own outer post-layout rAF.
     await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
-    assert(measureCalls === 2, 'Second resize\'s immediate sync measured again (settled value) before either deferred callback has run');
+    assert(renderer.getSyncTrace().length === 2, 'Second resize\'s immediate sync ran again (settled value) before either deferred callback has run');
     assert(overlayCanvas.style.width === '830px', 'Second resize\'s immediate sync already corrected the overlay to 830px');
 
     // Flush frame 1: both queued OUTER callbacks run. The first resize's
@@ -434,16 +434,119 @@ async function run(){
     // and skip WITHOUT scheduling an inner rAF or re-measuring. The
     // second resize's (generation 2) must proceed and schedule its inner rAF.
     flushOneFrame();
-    assert(measureCalls === 2, 'After flushing frame 1: the STALE (generation-1) outer callback skipped without measuring — count stays at 2, not 3');
+    assert(renderer.getSyncTrace().length === 2, 'After flushing frame 1: the STALE (generation-1) outer callback skipped without syncing — count stays at 2, not 3');
 
     // Flush frame 2: only the second resize's inner callback should be
-    // queued and fire, re-measuring once more (call #3, settled 830).
+    // queued and fire, re-syncing once more (settled 830).
     flushOneFrame();
-    assert(measureCalls === 3, 'After flushing frame 2: only the CURRENT (generation-2) inner callback measured — exactly one more measurement, not two');
+    assert(renderer.getSyncTrace().length === 3, 'After flushing frame 2: only the CURRENT (generation-2) inner callback synced — exactly one more sync, not two');
     assert(overlayCanvas.style.width === '830px' && overlayCanvas.style.height === '412px', 'Final overlay size is still correctly 830x412 — the stale first resize never got a chance to apply anything after being superseded');
   }
 
-  console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
+  console.log('\n[15] Instrumentation Test A — plotRect path: branch=="plotRect", trace records real values');
+{
+  const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 830, 412));
+  const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 830, 412) };
+  overlayCanvas.offsetParent = wrapEl;
+  const plotCanvas = makeFakeCanvasEl(makeRect(0, 0, 830, 412));
+  const container = makeFakeContainerEl([plotCanvas]);
+  container.clientWidth = 830; container.clientHeight = 412;
+
+  const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+  await renderer.ready;
+  await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+
+  const trace = renderer.getSyncTrace();
+  assert(trace.length >= 1, 'Sync trace has at least one entry');
+  const first = trace[0];
+  assert(first.reason === 'immediate', 'First trace entry is labeled "immediate"');
+  assert(first.branch === 'plotRect', 'branch === "plotRect" when a plot canvas and a valid offsetParent are both present');
+  assert(first.plotRectFound === true, 'plotRectFound is true');
+  assert(first.plotRect && first.plotRect.width === 830 && first.plotRect.height === 412, 'plotRect records the real measured 830x412');
+  assert(first.finalCssWidth === 830 && first.finalCssHeight === 412, 'finalCssWidth/Height === 830/412 (cssWidth === plotRect.width taken, not container size)');
+  assert(first.offsetParentExists === true && first.offsetParentHasGBCR === true, 'offsetParentExists and offsetParentHasGBCR both recorded true');
+  assert(first.offsetParentRect && first.offsetParentRect.width === 830, 'offsetParentRect is recorded when the plotRect branch is taken');
+  assert(Array.isArray(first.candidates) && first.candidates.length === 1 && first.candidates[0].width === 830, 'candidates[] records the one real canvas geometry (830x412), matching getPlotCanvasRect()\'s own candidate pool');
+  assert(first.containerClientWidth === 830 && first.containerClientHeight === 412, 'containerClientWidth/Height recorded alongside the plotRect branch, for comparison');
+  assert(typeof first.generation === 'number' && typeof first.n === 'number' && typeof first.at === 'number', 'generation, invocation number (n), and timestamp (at) are all recorded');
+}
+
+console.log('\n[16] Instrumentation Test B — fallback path: branch=="fallback", cssWidth/Height === container size');
+{
+  // No chart canvas exists at all -> getPlotCanvasRect() returns null ->
+  // syncOverlayToPlotCanvas() must take the fallback branch.
+  const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
+  const container = makeFakeContainerEl([]); // no canvases
+  container.clientWidth = 846; container.clientHeight = 412;
+
+  const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+  await renderer.ready;
+  await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+
+  const trace = renderer.getSyncTrace();
+  const first = trace[0];
+  assert(first.branch === 'fallback', 'branch === "fallback" when getPlotCanvasRect() finds no canvas');
+  assert(first.plotRectFound === false && first.plotRect === null, 'plotRectFound is false and plotRect is null');
+  assert(first.finalCssWidth === 846 && first.finalCssHeight === 412, 'finalCssWidth/Height fall back to container.clientWidth/clientHeight (846x412)');
+  assert(first.containerClientWidth === 846 && first.containerClientHeight === 412, 'containerClientWidth/Height recorded, matching what the fallback branch used');
+  assert(Array.isArray(first.candidates) && first.candidates.length === 0, 'candidates[] is empty — confirms no canvas existed to select from');
+}
+
+console.log('\n[17] Instrumentation Test C — stale-to-settled trace preserves each measurement in order');
+{
+  // First TWO measurements (immediate) see the stale 846; the post-layout
+  // (deferred) measurement sees the settled 830 — trace must show this
+  // exact progression, in order, without altering the actual sync outcome.
+  let n = 0;
+  const plotCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
+  plotCanvas.getBoundingClientRect = () => {
+    n += 1;
+    // The candidate-enumeration read and the getPlotCanvasRect() selection
+    // read both happen within the SAME sync call, so each sync consumes
+    // two calls here; calls 1-2 belong to the "immediate" sync (846),
+    // calls 3-4 belong to the "post-layout" sync (830, settled).
+    return n <= 2 ? makeRect(0, 0, 846, 412) : makeRect(0, 0, 830, 412);
+  };
+  const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 846, 412) };
+  const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
+  overlayCanvas.offsetParent = wrapEl;
+  const container = makeFakeContainerEl([plotCanvas]);
+  container.clientWidth = 846; container.clientHeight = 412;
+
+  const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+  await renderer.ready;
+  await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+
+  const trace = renderer.getSyncTrace();
+  assert(trace.length === 2, 'Exactly 2 sync entries recorded (immediate + post-layout), in order');
+  assert(trace[0].reason === 'immediate' && trace[0].finalCssWidth === 846, 'Entry 1 (immediate) recorded the stale 846 measurement, unaltered');
+  assert(trace[1].reason === 'post-layout' && trace[1].finalCssWidth === 830, 'Entry 2 (post-layout) recorded the settled 830 measurement, unaltered');
+  assert(trace[0].n < trace[1].n, 'Invocation numbers (n) are strictly increasing, preserving call order');
+  assert(overlayCanvas.style.width === '830px', 'The actual synchronization OUTCOME is unchanged by adding this instrumentation — overlay still correctly ends at 830px');
+}
+
+console.log('\n[18] Sync trace is bounded — does not grow past SYNC_TRACE_MAX entries');
+{
+  const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 830, 412));
+  const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 830, 412) };
+  overlayCanvas.offsetParent = wrapEl;
+  const plotCanvas = makeFakeCanvasEl(makeRect(0, 0, 830, 412));
+  const container = makeFakeContainerEl([plotCanvas]);
+  container.clientWidth = 830; container.clientHeight = 412;
+
+  const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+  await renderer.ready;
+  // Each setCandles() call produces 2 trace entries (immediate + post-layout);
+  // 15 calls -> 30 entries, well past a 20-entry cap.
+  for(let i = 0; i < 15; i++){
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+  }
+  const trace = renderer.getSyncTrace();
+  assert(trace.length <= 20, 'Sync trace never exceeds its bounded cap (<=20 entries) even after many resize/sync cycles — count: ' + trace.length);
+  assert(trace[trace.length - 1].n > trace[0].n, 'Trace retains the MOST RECENT entries (oldest ones evicted first), still in order');
+}
+
+console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
   process.exit(failed > 0 ? 1 : 0);
 }
 
