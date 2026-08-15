@@ -543,7 +543,14 @@
     return {
       initialize, destroy, reload, loadSymbol, loadTimeframe, loadAnalysis,
       refreshNow, forceRefresh,
-      getState: () => ({ ...state })
+      // CAS Phase 2 — additive: exposes the currently active symbol
+      // alongside the existing state snapshot, so external UI (e.g.
+      // cas-panel.js, wired from studio-bootstrap.js) can read "what
+      // instrument is on screen right now" through the same
+      // already-public getState() instead of tracking a second copy.
+      // config.symbol is the single place this file's own loadSymbol()
+      // already keeps current; nothing new is computed here.
+      getState: () => ({ ...state, symbol: config.symbol })
     };
   }
 

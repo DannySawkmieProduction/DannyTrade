@@ -246,6 +246,33 @@
     // not required for the chart to function.
     window.DannyChart.studioInstance = orchestrator;
 
+    // CAS Phase 2 — mount the dedicated Closing Auction Session panel
+    // and wire the toolbar entry point to it. Additive only: if the
+    // button or module are missing for any reason, this silently
+    // no-ops rather than breaking chart boot. The panel itself never
+    // computes session state — it reads MarketSession.getSession() at
+    // open() time via the current symbol from orchestrator.getState().
+    (function wireCasPanel(){
+      if(!DC.CasPanel || typeof DC.CasPanel.mount !== 'function') return;
+      var casBtn = document.getElementById('casEntryBtn');
+      if(!casBtn) return;
+      var casPanel = DC.CasPanel.mount({
+        getProviderName: function(){
+          return (window.AIService && typeof window.AIService.getProviderName === 'function')
+            ? window.AIService.getProviderName() : null;
+        },
+        getAnalysis: function(){
+          var s = orchestrator.getState();
+          return s ? s.lastAnalysis : null;
+        }
+      });
+      casBtn.addEventListener('click', function(){
+        var s = orchestrator.getState();
+        var symbol = (s && s.symbol) || 'NIFTY';
+        casPanel.open(symbol);
+      });
+    })();
+
     // OpenRouter integration — mount the AI Provider UI once the
     // chart itself is up.
     var aiPanel = document.getElementById('aiConnectionsPanel');
