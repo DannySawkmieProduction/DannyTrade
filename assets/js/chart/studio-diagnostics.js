@@ -62,16 +62,22 @@
     var el = document.createElement('div');
     el.id = 'dtChartDiagnostics';
     el.style.cssText = [
-      'position:fixed', 'right:12px', 'bottom:12px', 'z-index:5000',
-      'width:min(92vw,340px)', 'max-height:70vh', 'overflow:auto',
-      'background:rgba(10,12,18,0.95)', 'border:1px solid rgba(212,175,106,0.35)',
-      'border-radius:10px', 'padding:12px 14px', 'color:#E9EBF1',
+      'position:fixed', 'left:8px', 'right:8px', 'top:8px', 'bottom:8px', 'z-index:5000',
+      'max-width:420px', 'margin:0 auto', 'overflow-y:auto', 'overflow-x:hidden',
+      // -webkit-overflow-scrolling:touch enables momentum/inertial scrolling in
+      // Android/iOS WebViews — without it, overflow:auto content is technically
+      // scrollable but can feel "stuck" under a single slow finger-drag, which
+      // is almost certainly why the section below the fold went unnoticed.
+      '-webkit-overflow-scrolling:touch', 'touch-action:pan-y',
+      'background:rgba(10,12,18,0.97)', 'border:1px solid rgba(212,175,106,0.35)',
+      'border-radius:10px', 'color:#E9EBF1',
       'font-family:"JetBrains Mono",monospace', 'font-size:11px', 'line-height:1.5',
-      'box-shadow:0 12px 40px rgba(0,0,0,0.5)', 'display:none'
+      'box-shadow:0 12px 40px rgba(0,0,0,0.6)', 'display:none'
     ].join(';');
     document.body.appendChild(el);
     return el;
   }
+
 
   function render(){
     if(!panelEl) return;
@@ -138,27 +144,34 @@
     var drawDiag = state.renderer && typeof state.renderer.getDrawableDiagnostics === 'function'
       ? state.renderer.getDrawableDiagnostics() : null;
     if(drawDiag && drawDiag.entries && drawDiag.entries.length){
-      geomRows += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Drawable Geometry</b> ' +
+      geomRows += '<div id="dtDiagGeometryAnchor" style="margin-top:12px;padding:8px 6px 4px;border-top:2px solid rgba(212,175,106,0.5)">' +
+        '<b style="color:#D4AF6A">▾ Drawable Geometry</b> ' +
         '<span style="color:#565C70">(canvas ' + drawDiag.canvasCssWidth + '×' + drawDiag.canvasCssHeight +
         'px, dpr ' + drawDiag.dpr + ')</span></div>';
-      geomRows += '<table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:10px">';
-      geomRows += '<tr style="color:#8D93A6"><td>Layer</td><td>Type</td><td>Idx</td><td>t</td><td>Price</td><td>X</td><td>Y</td><td>In-view</td><td>Painted</td></tr>';
+      // Own horizontal-scroll box, separate from the panel's vertical scroll —
+      // 9 columns don't fit a phone's width, so this table scrolls sideways
+      // independently instead of forcing the whole panel to scroll horizontally
+      // (or silently clipping columns with no way to reach them).
+      geomRows += '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid #232838;border-radius:6px;margin-top:4px">';
+      geomRows += '<table style="border-collapse:collapse;font-size:10px;white-space:nowrap">';
+      geomRows += '<tr style="color:#8D93A6"><td style="padding:3px 6px">Layer</td><td style="padding:3px 6px">Type</td><td style="padding:3px 6px">Idx</td><td style="padding:3px 6px">t</td><td style="padding:3px 6px">Price</td><td style="padding:3px 6px">X</td><td style="padding:3px 6px">Y</td><td style="padding:3px 6px">In-view</td><td style="padding:3px 6px">Painted</td></tr>';
       drawDiag.entries.forEach(function(e){
         var inView = e.painted ? (e.insideViewport ? 'yes' : 'NO') : '—';
         var paintedColor = e.painted ? '#35D399' : '#FF5C6C';
         geomRows += '<tr title="' + escapeHtml(e.reason || '') + '">' +
-          '<td>' + escapeHtml(e.layer || '—') + '</td>' +
-          '<td>' + escapeHtml(e.type || '—') + '</td>' +
-          '<td>' + (e.index != null ? e.index : '—') + '</td>' +
-          '<td>' + (e.startTime != null ? e.startTime : '—') + '</td>' +
-          '<td>' + (e.price1 != null ? e.price1 : '—') + '</td>' +
-          '<td>' + (e.x != null ? Math.round(e.x) : '—') + '</td>' +
-          '<td>' + (e.y != null ? Math.round(e.y) : '—') + '</td>' +
-          '<td style="color:' + (e.insideViewport ? '#35D399' : '#FFA53C') + '">' + inView + '</td>' +
-          '<td style="color:' + paintedColor + '">' + (e.painted ? 'yes' : 'NO') + '</td>' +
+          '<td style="padding:3px 6px">' + escapeHtml(e.layer || '—') + '</td>' +
+          '<td style="padding:3px 6px">' + escapeHtml(e.type || '—') + '</td>' +
+          '<td style="padding:3px 6px">' + (e.index != null ? e.index : '—') + '</td>' +
+          '<td style="padding:3px 6px">' + (e.startTime != null ? e.startTime : '—') + '</td>' +
+          '<td style="padding:3px 6px">' + (e.price1 != null ? e.price1 : '—') + '</td>' +
+          '<td style="padding:3px 6px">' + (e.x != null ? Math.round(e.x) : '—') + '</td>' +
+          '<td style="padding:3px 6px">' + (e.y != null ? Math.round(e.y) : '—') + '</td>' +
+          '<td style="padding:3px 6px;color:' + (e.insideViewport ? '#35D399' : '#FFA53C') + '">' + inView + '</td>' +
+          '<td style="padding:3px 6px;color:' + paintedColor + '">' + (e.painted ? 'yes' : 'NO') + '</td>' +
           '</tr>';
       });
-      geomRows += '</table>';
+      geomRows += '</table></div>';
+      geomRows += '<div style="margin-top:2px;color:#565C70;font-size:9.5px">Swipe sideways on the table if columns are cut off. Tap/hold a row for its full reason text.</div>';
       var failCount = drawDiag.entries.filter(function(e){ return !e.painted; }).length;
       var offViewCount = drawDiag.entries.filter(function(e){ return e.painted && !e.insideViewport; }).length;
       if(failCount || offViewCount){
@@ -168,27 +181,45 @@
           '</div>';
       }
     } else if(drawDiag){
-      geomRows = '<div style="margin-top:10px;color:#8D93A6">Last paint pass recorded 0 drawables (nothing currently visible/toggled ON, or no annotations loaded yet).</div>';
+      geomRows = '<div id="dtDiagGeometryAnchor" style="margin-top:12px;padding-top:8px;border-top:2px solid rgba(212,175,106,0.5);color:#8D93A6">Last paint pass recorded 0 drawables (nothing currently visible/toggled ON, or no annotations loaded yet).</div>';
     } else {
-      geomRows = '<div style="margin-top:10px;color:#8D93A6">Drawable geometry not available yet (renderer has not painted a frame).</div>';
+      geomRows = '<div id="dtDiagGeometryAnchor" style="margin-top:12px;padding-top:8px;border-top:2px solid rgba(212,175,106,0.5);color:#8D93A6">Drawable geometry not available yet (renderer has not painted a frame).</div>';
     }
 
     var statusColor = status.status === 'ok' ? '#35D399' : (status.status === 'unknown' ? '#8D93A6' : '#FFA53C');
 
     panelEl.innerHTML =
-      '<div style="display:flex;justify-content:space-between;align-items:center">' +
-        '<b>DannyTrade Chart Diagnostics</b>' +
-        '<button id="dtDiagCloseBtn" style="background:none;border:1px solid #232838;color:#8D93A6;border-radius:6px;padding:4px 12px;cursor:pointer;font-family:inherit;font-size:12px;min-height:30px">Close</button>' +
+      // Sticky header — stays pinned at the top of the panel's own scroll
+      // area while the rest scrolls underneath, so Close and the new
+      // "Jump to Geometry" button are always reachable without having to
+      // scroll back up first.
+      '<div style="position:sticky;top:0;z-index:1;background:rgba(10,12,18,0.98);display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid #232838">' +
+        '<b>DannyTrade Diagnostics</b>' +
+        '<span style="display:flex;gap:6px">' +
+          '<button id="dtDiagJumpBtn" style="background:none;border:1px solid rgba(212,175,106,0.5);color:#D4AF6A;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:11px;min-height:32px">Geometry ↓</button>' +
+          '<button id="dtDiagCloseBtn" style="background:none;border:1px solid #232838;color:#8D93A6;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:11px;min-height:32px">Close</button>' +
+        '</span>' +
       '</div>' +
-      '<div style="margin-top:6px;color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
+      '<div style="padding:10px 12px 16px">' +
+      '<div style="color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
       '<div style="margin-top:4px;color:#8D93A6">Renderer drawables (total): ' + totalDrawables + ' &nbsp;|&nbsp; Visible layers: ' + visibleLayerCount + '</div>' +
       '<div style="margin-top:4px;color:' + (DC.lastRenderError ? '#FF5C6C' : '#8D93A6') + '">Last error: ' + lastError + '</div>' +
       rows +
       geomRows +
-      '<div style="margin-top:8px;color:#565C70">Tap the Diag button (or Ctrl+Shift+D on desktop) to toggle. Dev-only — not shown by default.</div>';
+      '<div style="margin-top:10px;color:#565C70">Tap the Diag button (or Ctrl+Shift+D on desktop) to toggle. Dev-only — not shown by default.</div>' +
+      '</div>';
 
     var closeBtn = document.getElementById('dtDiagCloseBtn');
     if(closeBtn) closeBtn.addEventListener('click', hide);
+    var jumpBtn = document.getElementById('dtDiagJumpBtn');
+    if(jumpBtn){
+      jumpBtn.addEventListener('click', function(){
+        var anchor = document.getElementById('dtDiagGeometryAnchor');
+        if(anchor && typeof anchor.scrollIntoView === 'function'){
+          anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    }
   }
 
   function escapeHtml(s){
