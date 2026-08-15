@@ -108,11 +108,12 @@ function loadRenderer(coordMap, priceMap, opts){
   opts = opts || {};
   const overlayCanvas = opts.overlayCanvas || makeFakeCanvasEl(makeRect(0, 0, 800, 400));
   const container = opts.container || makeFakeContainerEl(opts.chartCanvases || []);
+  const raf = opts.requestAnimationFrame || (cb => cb());
   const sandbox = {
     window: { LightweightCharts: makeFakeLightweightCharts(coordMap, priceMap), devicePixelRatio: 1, getComputedStyle: fakeGetComputedStyle },
     document: { createElement: () => makeFakeCanvasEl(makeRect(0,0,0,0)), head: { appendChild: () => {} } },
     console, Math, Date, Array, Object, Map, Set, Number,
-    requestAnimationFrame: cb => cb(),
+    requestAnimationFrame: raf,
     ResizeObserver: function(){ return { observe: () => {}, disconnect: () => {} }; }
   };
   sandbox.window.requestAnimationFrame = sandbox.requestAnimationFrame;
@@ -324,6 +325,122 @@ async function run(){
     await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
     const diag = renderer.getDrawableDiagnostics();
     assert(diag.canvasCssWidth === 800 && diag.canvasCssHeight === 400, 'With no plot canvas discoverable, overlay safely falls back to the container size (800x400) instead of erroring or sizing to 0');
+  }
+
+  console.log('\n[12] Post-layout re-sync — overlay corrects from a stale first measurement (846x412) to the settled plot-pane size (830x412)');
+  {
+    // Simulates the exact live-reported scenario: the plot pane's rect
+    // measured immediately (846x412, still reflecting a not-yet-settled
+    // price-scale gutter) differs from what it measures to once the
+    // library's layout has had a chance to settle (830x412, after
+    // chart.timeScale().fitContent() and/or the library's own deferred
+    // layout pass). The double-rAF post-layout sync (scheduleOverlayPostLayoutSync())
+    // re-measures and must correct the overlay to the settled value.
+    let measureCalls = 0;
+    const plotCanvas = makeFakeCanvasEl(makeRect(39, 740, 846, 412));
+    plotCanvas.getBoundingClientRect = () => {
+      measureCalls += 1;
+      // First measurement (the immediate sync inside resize()) sees the
+      // stale, too-wide rect; every measurement after that sees the
+      // settled, correct one — modeling "the library's layout settles
+      // sometime after the immediate resize() call returns".
+      return measureCalls === 1 ? makeRect(39, 740, 846, 412) : makeRect(39, 740, 830, 412);
+    };
+    const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 846, 412) };
+    const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
+    overlayCanvas.offsetParent = wrapEl;
+    const container = makeFakeContainerEl([plotCanvas]);
+    container.clientWidth = 846; container.clientHeight = 412;
+
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+    await renderer.ready;
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]); // triggers resize() -> immediate sync (846) -> double-rAF post-layout sync (830)
+
+    assert(overlayCanvas.style.width === '830px', 'After the post-layout re-sync, overlay CSS width corrects to the settled plot-pane width (830px), not the stale first measurement (846px)');
+    assert(overlayCanvas.style.height === '412px', 'Overlay CSS height matches the settled plot-pane height (412px)');
+    assert(overlayCanvas.width === 830, 'Overlay backing-store width is round(830 × dpr) — derived from the SETTLED measurement, not the stale one');
+    assert(overlayCanvas.height === 412, 'Overlay backing-store height is round(412 × dpr) — derived from the settled measurement');
+
+    const diag = renderer.getDrawableDiagnostics();
+    assert(diag.canvasCssWidth === 830 && diag.canvasCssHeight === 412, 'Reported diagnostics reflect the corrected, settled size (830x412) after the post-layout sync ran');
+  }
+
+  console.log('\n[13] Genuine single-layout (stable) case still works — no drift when the measurement never changes');
+  {
+    // Guards against the post-layout sync introducing any regression for
+    // the common case where the plot pane's rect is already correct on
+    // the very first measurement and never changes.
+    let measureCalls = 0;
+    const plotCanvas = makeFakeCanvasEl(makeRect(0, 0, 830, 412));
+    plotCanvas.getBoundingClientRect = () => { measureCalls += 1; return makeRect(0, 0, 830, 412); };
+    const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 830, 412) };
+    const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 830, 412));
+    overlayCanvas.offsetParent = wrapEl;
+    const container = makeFakeContainerEl([plotCanvas]);
+    container.clientWidth = 830; container.clientHeight = 412;
+
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container });
+    await renderer.ready;
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+
+    assert(overlayCanvas.style.width === '830px' && overlayCanvas.style.height === '412px', 'Overlay ends at the correct, stable 830x412 size when the measurement never changes');
+    assert(measureCalls === 2, 'Exactly 2 measurements occurred (immediate sync + one post-layout re-sync) — the mechanism runs but produces no drift when nothing changed');
+  }
+
+  console.log('\n[14] Stale-callback guard — an OLDER resize()\'s deferred re-sync never overwrites a NEWER resize()\'s geometry');
+  {
+    // Uses a manually-controlled rAF queue (instead of the synchronous
+    // cb=>cb() used elsewhere) so two resize() calls can be interleaved
+    // with their deferred callbacks NOT yet fired, then flushed in order —
+    // reproducing "setCandles() called twice in quick succession" for real.
+    let rafQueue = [];
+    const controlledRAF = cb => { rafQueue.push(cb); };
+    function flushOneFrame(){ const q = rafQueue; rafQueue = []; q.forEach(cb => cb()); }
+
+    let measureCalls = 0;
+    const plotCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
+    // Always reports the CURRENT settled truth (830) after the very first
+    // (stale, pre-settle) measurement — mirrors [12]'s model, but the
+    // point of this test is call-count, not the returned value: if the
+    // stale resize's deferred callback incorrectly still fires, it adds
+    // extra measurement calls beyond what a correctly-guarded sequence
+    // produces.
+    plotCanvas.getBoundingClientRect = () => { measureCalls += 1; return measureCalls === 1 ? makeRect(0, 0, 846, 412) : makeRect(0, 0, 830, 412); };
+    const wrapEl = { getBoundingClientRect: () => makeRect(0, 0, 846, 412) };
+    const overlayCanvas = makeFakeCanvasEl(makeRect(0, 0, 846, 412));
+    overlayCanvas.offsetParent = wrapEl;
+    const container = makeFakeContainerEl([plotCanvas]);
+    container.clientWidth = 846; container.clientHeight = 412;
+
+    const { renderer } = loadRenderer({ 100: 300 }, { 50: 150, 40: 180 }, { overlayCanvas, container, requestAnimationFrame: controlledRAF });
+    await renderer.ready;
+
+    // First resize (generation 1): immediate sync measures once (call #1,
+    // returns the stale 846) and queues its outer post-layout rAF —
+    // NOT yet flushed.
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+    assert(measureCalls === 1, 'First resize\'s immediate sync measured once; its deferred post-layout callback is queued but not yet run');
+
+    // Second resize (generation 2) happens BEFORE the first resize's
+    // deferred callback ever fires — its own immediate sync measures
+    // again (call #2, now returns the settled 830) and queues its own
+    // outer post-layout rAF.
+    await renderer.setCandles([{ time: 100, open:1, high:1, low:1, close:1 }]);
+    assert(measureCalls === 2, 'Second resize\'s immediate sync measured again (settled value) before either deferred callback has run');
+    assert(overlayCanvas.style.width === '830px', 'Second resize\'s immediate sync already corrected the overlay to 830px');
+
+    // Flush frame 1: both queued OUTER callbacks run. The first resize's
+    // (generation 1) must detect it is stale (resizeGeneration is now 2)
+    // and skip WITHOUT scheduling an inner rAF or re-measuring. The
+    // second resize's (generation 2) must proceed and schedule its inner rAF.
+    flushOneFrame();
+    assert(measureCalls === 2, 'After flushing frame 1: the STALE (generation-1) outer callback skipped without measuring — count stays at 2, not 3');
+
+    // Flush frame 2: only the second resize's inner callback should be
+    // queued and fire, re-measuring once more (call #3, settled 830).
+    flushOneFrame();
+    assert(measureCalls === 3, 'After flushing frame 2: only the CURRENT (generation-2) inner callback measured — exactly one more measurement, not two');
+    assert(overlayCanvas.style.width === '830px' && overlayCanvas.style.height === '412px', 'Final overlay size is still correctly 830x412 — the stale first resize never got a chance to apply anything after being superseded');
   }
 
   console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
