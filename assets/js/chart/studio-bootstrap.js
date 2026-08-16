@@ -306,10 +306,95 @@
           if(!id) return;
           orchestrator.loadSymbol(id);
           updateCasButtonState(id);
+          updatePreCloseButtonState(id);
         }
       });
       updateCasButtonState('NIFTY'); // initial default symbol — see studio-chart-init's config.symbol default
     })();
+
+    // Pre-Close Options Intelligence — mounted the same way as the CAS
+    // panel above: an always-present toolbar entry, muted for a
+    // non-index instrument (the spec targets NIFTY/BANKNIFTY/SENSEX
+    // only), using MarketSession.isIndex() — the SAME existing,
+    // unmodified classification CAS's own eligibility check uses.
+    // getCandles is wired to the existing FyersService.getCandles()
+    // directly (no new data path) — 15m/180 gives the Analysis Engine
+    // several days of intraday structure to work with.
+    var preCloseBtn = document.getElementById('preCloseEntryBtn');
+    function updatePreCloseButtonState(symbol){
+      if(!preCloseBtn) return;
+      var MarketSession = window.DannyChart && window.DannyChart.MarketSession;
+      var applicable = !!(MarketSession && MarketSession.isIndex(symbol));
+      preCloseBtn.style.opacity = applicable ? '1' : '0.45';
+      preCloseBtn.title = applicable ? 'Pre-Close Options Intelligence' : 'Pre-Close Intelligence applies only to NIFTY/BANKNIFTY/SENSEX';
+    }
+
+    // Debugging note (found via a real DOM/click-execution audit, not
+    // just Node unit tests): the ORIGINAL wiring below silently
+    // returned — with ZERO console error and ZERO visible feedback —
+    // whenever window.DannyChart.PreclosePanel wasn't present (e.g. if
+    // preclose-panel.js, or any file it depends on, failed to load or
+    // deploy correctly). The button stayed fully visible and clickable
+    // with no listener ever attached — clicking it did nothing,
+    // exactly the reported symptom, and nothing in the console would
+    // have explained why. showPreCloseFallback() below is a tiny,
+    // SELF-CONTAINED overlay (it builds its own DOM directly, using
+    // only the CSS custom properties already defined globally — it
+    // does not call into DC.PreclosePanel or anything else that might
+    // itself be the broken piece) so the button can NEVER again appear
+    // to do nothing, even in a failure mode this file didn't
+    // anticipate. It also satisfies the requirement that the panel
+    // show a clear state ("module unavailable" / "not applicable")
+    // rather than silently no-op.
+    function showPreCloseFallback(message){
+      var existing = document.getElementById('preCloseFallbackOverlay');
+      if(existing) existing.parentNode.removeChild(existing);
+      var el = document.createElement('div');
+      el.id = 'preCloseFallbackOverlay';
+      el.style.cssText = 'position:fixed;inset:0;z-index:4000;display:flex;align-items:flex-end;justify-content:center;background:rgba(6,8,12,0.72)';
+      el.innerHTML = '<div style="width:100%;max-width:480px;background:var(--bg-elev,#12161F);border:1px solid var(--border,#232838);border-radius:16px 16px 0 0;padding:20px;font-family:var(--font-body,sans-serif);color:var(--text,#E9EBF1)">' +
+        '<div style="font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">PRE-CLOSE OPTIONS INTELLIGENCE</div>' +
+        '<div style="margin-top:8px;font-size:13.5px;color:var(--text-dim,#8D93A6);line-height:1.6">' + message + '</div>' +
+        '<button id="preCloseFallbackCloseBtn" style="margin-top:16px;width:100%;padding:10px;border-radius:8px;border:1px solid var(--border,#232838);background:none;color:var(--text,#E9EBF1);cursor:pointer">Close</button>' +
+        '</div>';
+      document.body.appendChild(el);
+      el.addEventListener('click', function(e){ if(e.target === el) el.remove(); });
+      var closeBtn = document.getElementById('preCloseFallbackCloseBtn');
+      if(closeBtn) closeBtn.addEventListener('click', function(){ el.remove(); });
+    }
+
+    preCloseBtn && preCloseBtn.addEventListener('click', function(){
+      var MarketSession = window.DannyChart && window.DannyChart.MarketSession;
+      var s = orchestrator.getState();
+      var symbol = (s && s.symbol) || 'NIFTY';
+
+      if(!MarketSession){
+        showPreCloseFallback('Market session module is unavailable — this instrument\'s eligibility cannot be checked right now. Please reload the page.');
+        return;
+      }
+      if(!MarketSession.isIndex(symbol)){
+        showPreCloseFallback('Pre-Close Options Intelligence applies only to NIFTY, BANKNIFTY, and SENSEX. The current instrument (' + symbol + ') is not an index.');
+        return;
+      }
+      if(!DC.PreclosePanel || typeof DC.PreclosePanel.mount !== 'function'){
+        showPreCloseFallback('The Pre-Close Intelligence module failed to load (assets/js/chart/preclose-panel.js, or one of its dependencies, did not load correctly). Please reload the page; if this persists, check the browser console and verify all Pre-Close files were deployed.');
+        return;
+      }
+      try{
+        if(!precloseInstance){
+          precloseInstance = DC.PreclosePanel.mount({
+            getCandles: function(sym){
+              return window.DannyChart.FyersService.getCandles({ symbol: sym, timeframe: '15m', limit: 180 });
+            }
+          });
+        }
+        precloseInstance.open(symbol);
+      } catch(err){
+        showPreCloseFallback('Pre-Close Intelligence hit an unexpected error while opening: ' + (err && err.message ? err.message : String(err)) + '. See the browser console for details.');
+      }
+    });
+    var precloseInstance = null;
+    updatePreCloseButtonState('NIFTY');
 
     // OpenRouter integration — mount the AI Provider UI once the
     // chart itself is up.
