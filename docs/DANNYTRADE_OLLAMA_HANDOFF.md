@@ -112,30 +112,68 @@ object. It never throws.
 Gemini or OpenRouter — the two checks run in parallel and are reported
 independently.
 
-## Model context
+## Inference cost (Phase 2)
 
-`num_ctx` is 16384. It was previously 4096, which a full chartStructure prompt
-(system rules plus a JSON candle array) overflows; Ollama then drops the front
-of the prompt, the model never sees the JSON-shape rules, and it returns prose.
-The candle array is deliberately **not** trimmed instead — `tradeLevels.entry`
-is index-anchored into that exact array, so truncating it would silently shift
-every index the model returns and draw levels at the wrong prices.
+The first working build timed out at 180s on every chartStructure request.
+Measured cause, not guessed:
 
-If you ever load a very large candle window, the console warns before the call
-rather than silently truncating.
+| | Before | After |
+|---|---|---|
+| Prompt chars | 19,356 | 1,971 |
+| Prompt tokens (est.) | ~4,839 | ~500 |
+| Candle JSON share of prompt | 92.3% | 0% |
+| `num_predict` | unset (unbounded) | 800 |
+| `num_ctx` | 16384 (~460MB KV) | 4096 (~115MB KV) |
+| Timeout | 180s | 120s |
 
-## Response tolerance
+`studio-bootstrap.js` builds the deterministic Structured Analysis from the 8
+local engines **before** it calls the AI, then discards every structural array
+the AI returns — the project rule is that the deterministic engine decides and
+the AI may only explain. The prompt was nonetheless shipping all 180 raw candles
+and asking qwen2.5:1.5b to rediscover swings, structure events, order blocks,
+FVGs and liquidity from scratch. With no `num_predict` cap, the model generated
+thousands of tokens of arrays that were thrown away on arrival. On CPU at
+15-25 tok/s that alone exceeds 180s.
 
-`qwen2.5:1.5b` is a 1.5B model. It returns the right content in the wrong
-format constantly: `"NO TRADE"` for `NO_TRADE`, `"moderate"` for `"Moderate"`,
-`"1:2"` for a numeric `riskReward`. Normalization is field-level: recoverable
-formatting is repaired, unrecoverable fields become `null`, and
-`decision-panel.js` renders those as "Not available".
+The prompt now carries a compact digest of what the engines already found, and
+asks for the decision object only. `tradeLevels` is deliberately not requested:
+a 1.5B model inventing entry/stop/target prices would put fabricated levels on
+the chart, and the engines already compute real ones.
 
-Dropping is not fabricating. Nothing is ever invented, substituted, or
-defaulted to a tradeable value. `tradeLevels` and `premiumDiscount` remain
-all-or-nothing, because those drive drawn geometry and a half-defined level set
-would be a fabricated level.
+`num_ctx` at 16384 was **not** the cause of the timeout — Ollama allocates the
+KV cache up front (~28KB/token for this model) but attention cost scales with
+actual tokens, not reserved ones. It was simply ~345MB of wasted RAM once the
+prompt shrank.
+
+`stream: false` means the browser waits for the whole generation, but it does
+not make generation slower — it only removes progress feedback. With a bounded
+800-token cap the wait is short enough that streaming is not worth the added
+complexity.
+
+## Measuring your own hardware
+
+Every Ollama call now logs its real timing to the console, taken from Ollama's
+own nanosecond counters in the `/api/generate` response — not estimated:
+
+```
+[AIService/Ollama] timing { promptTokensActual, outputTokens, loadSec,
+                            promptEvalSec, generateSec, totalSec,
+                            tokensPerSec, hitPredictCap, numCtx, numPredict }
+```
+
+Also stored at `window.DannyChart.lastOllamaTiming`.
+
+For a deliberate measurement:
+
+```js
+await AIService.benchmarkOllama()
+```
+
+This times a warm-up call and a production-sized chartStructure call, reports
+measured tokens/sec, and returns a PASS/FAIL verdict against the timeout.
+
+If `hitPredictCap: true` appears, the model ran into the 800-token ceiling and
+the JSON may be truncated — raise `OLLAMA_NUM_PREDICT` in `ai-service.js`.
 
 ## Known limitations
 
