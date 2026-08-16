@@ -88,6 +88,17 @@
 .lw-chart-container{position:absolute;inset:0;}
 .annotation-overlay{
   position:absolute;inset:0;width:100%;height:100%;
+  /* Lightweight Charts 4.1.1 assigns its plot-pane canvas z-index:1 and its
+     top/crosshair canvas z-index:2 (PaneWidget constructor). Nothing between
+     those canvases and <html> establishes a stacking context — .lw-chart-wrap
+     and .lw-chart-container are positioned but z-index:auto, and the library's
+     own wrappers set only overflow/position:relative — so they resolve in the
+     SAME stacking context as this overlay. With z-index:auto the overlay
+     painted in step 8 of the CSS painting order and the chart's opaque canvases
+     painted over it in step 9, hiding every annotation despite the bitmap being
+     drawn correctly. 3 sits above both chart canvases and below the loading
+     state (4), tooltip (5) and AI status banner (40), preserving their order. */
+  z-index:3;
   pointer-events:none; /* mouse/touch pass through to the chart underneath for pan/zoom */
 }
 .annotation-tooltip{
