@@ -367,6 +367,120 @@
     return 'STALE';
   }
 
+  /** Deterministic breakout-quality classification. Reads ONLY real,
+   *  already-produced fields:
+   *    - the LATEST structureEvent (BOS/CHOCH) from market-structure-engine
+   *    - detectTrap()'s own result (an opposing trap always wins -> 'TRAP')
+   *    - momentum confirmation (trend-engine's own momentumConfirmed flag)
+   *    - a real volume comparison computed HERE directly from the candle
+   *      array (the breakout candle's own volume vs. the mean volume of
+   *      the preceding N candles) — NOT a re-implementation of
+   *      volume-engine.js (which clusters volume by PRICE level, a
+   *      different question; this is a simple, real, per-candle ratio)
+   *    - liquidity context: a same-direction-supporting sweep (the
+   *      opposite side swept before the break — e.g. a sell-side sweep
+   *      before a bullish break) at or before the break index
+   *    - options agreement: whether the options-group evidence net
+   *      direction (already computed) agrees with the breakout direction
+   *    - a minimal, real retest check on the candles AFTER the break
+   *
+   *  Thresholds are explicit integers (documented below), not hidden
+   *  percentages. Returns null if there is no structureEvent to
+   *  classify at all (nothing to grade).
+   *
+   *  @returns {{direction, quality:('CONFIRMED'|'WEAK'|'UNCONFIRMED'|'FAILED'|'TRAP'), retested:boolean, confirmations:string[], breakIndex:number}|null}
+   */
+  function classifyBreakout(msData, liqData, candles, momentumConfirmed, optionsNet, trapResult){
+    const events = (msData && msData.external && Array.isArray(msData.external.structureEvents)) ? msData.external.structureEvents : [];
+    if(!events.length || !Array.isArray(candles) || !candles.length) return null;
+    const latest = events[events.length - 1];
+    const direction = latest.direction;
+    const breakIndex = latest.index;
+
+    // A detected trap OPPOSING this breakout's direction overrides
+    // everything else — trap-first thinking (spec Priority 7).
+    if(trapResult){
+      if(direction === 'bullish' && trapResult.type === 'BULL_TRAP') return { direction, quality: 'TRAP', retested: false, confirmations: [], breakIndex };
+      if(direction === 'bearish' && trapResult.type === 'BEAR_TRAP') return { direction, quality: 'TRAP', retested: false, confirmations: [], breakIndex };
+    }
+
+    // Real volume check: breakout candle's volume vs. the mean of the
+    // preceding 10 candles (or however many exist) — a real ratio from
+    // real data, threshold >1.2x documented explicitly.
+    const VOLUME_LOOKBACK = 10, VOLUME_CONFIRM_RATIO = 1.2;
+    const breakCandle = candles[breakIndex];
+    let volumeConfirmed = false;
+    if(breakCandle && typeof breakCandle.volume === 'number'){
+      const start = Math.max(0, breakIndex - VOLUME_LOOKBACK);
+      const window = candles.slice(start, breakIndex).filter(c => typeof c.volume === 'number');
+      if(window.length){
+        const avgVol = window.reduce((s, c) => s + c.volume, 0) / window.length;
+        volumeConfirmed = avgVol > 0 && (breakCandle.volume / avgVol) >= VOLUME_CONFIRM_RATIO;
+      }
+    }
+
+    // Liquidity context: an opposite-side sweep at/before the break —
+    // the classic "grab liquidity, then break" sequence.
+    const sweeps = (liqData && Array.isArray(liqData.sweeps)) ? liqData.sweeps : [];
+    const liquidityContext = sweeps.some(s => s.sweepIndex <= breakIndex &&
+      ((direction === 'bullish' && s.direction === 'sellSide') || (direction === 'bearish' && s.direction === 'buySide')));
+
+    const optionsSupportive = direction === 'bullish' ? optionsNet > 0 : optionsNet < 0;
+
+    // Minimal real retest check: does any candle AFTER the break revisit
+    // the broken level (within 0.1% tolerance) and the LATEST candle
+    // still close in the breakout direction relative to that level?
+    const level = latest.level;
+    let retested = false;
+    if(typeof level === 'number' && breakIndex < candles.length - 1){
+      const after = candles.slice(breakIndex + 1);
+      const tolerance = Math.abs(level) * 0.001;
+      const touchedLevel = after.some(c => Math.abs((direction === 'bullish' ? c.low : c.high) - level) <= tolerance);
+      const lastClose = candles[candles.length - 1].close;
+      const heldAfterTouch = direction === 'bullish' ? lastClose > level : lastClose < level;
+      retested = touchedLevel && heldAfterTouch;
+    }
+
+    // Failed breakout: the LATEST candle has already closed back through
+    // the broken level in the opposite direction — the break didn't hold.
+    const lastCandle = candles[candles.length - 1];
+    const failed = typeof level === 'number' && lastCandle &&
+      ((direction === 'bullish' && lastCandle.close < level) || (direction === 'bearish' && lastCandle.close > level));
+    if(failed) return { direction, quality: 'FAILED', retested: false, confirmations: [], breakIndex };
+
+    const confirmations = [];
+    if(volumeConfirmed) confirmations.push('volume');
+    if(momentumConfirmed) confirmations.push('momentum');
+    if(liquidityContext) confirmations.push('liquidityContext');
+    if(optionsSupportive) confirmations.push('optionsPositioning');
+
+    let quality;
+    if(confirmations.length >= 3) quality = 'CONFIRMED';
+    else if(confirmations.length === 2) quality = 'WEAK';
+    else quality = 'UNCONFIRMED';
+
+    return { direction, quality, retested, confirmations, breakIndex };
+  }
+
+  /** NORMAL_SESSION / PRE_EXPIRY / EXPIRY_SESSION / EXPIRY_STATUS_UNKNOWN
+   *  — derived ONLY from the real expiry date the option chain itself
+   *  returned (optionChain.expiry.date, already a real FYERS field) vs.
+   *  the real current date. No hardcoded expiry calendar, no assumed
+   *  weekday. If the option chain has no expiry date, the status is
+   *  explicitly unknown — never guessed. */
+  function classifyExpirySession(optionChain, now){
+    const dateStr = optionChain && optionChain.available && optionChain.expiry && optionChain.expiry.date;
+    if(!dateStr) return 'EXPIRY_STATUS_UNKNOWN';
+    const expiryDate = new Date(dateStr + 'T00:00:00Z');
+    if(isNaN(expiryDate.getTime())) return 'EXPIRY_STATUS_UNKNOWN';
+    const nowDateStr = now.toISOString().slice(0, 10);
+    const daysToExpiry = Math.round((expiryDate.getTime() - new Date(nowDateStr + 'T00:00:00Z').getTime()) / (24 * 60 * 60 * 1000));
+    if(daysToExpiry === 0) return 'EXPIRY_SESSION';
+    if(daysToExpiry === 1) return 'PRE_EXPIRY';
+    if(daysToExpiry > 1) return 'NORMAL_SESSION';
+    return 'EXPIRY_STATUS_UNKNOWN'; // negative (expiry already passed in the returned data) — don't guess what that means
+  }
+
   /**
    * @param {object} analysisContext - real return of
    *   window.DannyChart.Analysis.AnalysisEngine.analyze(candles, opts)
@@ -453,8 +567,60 @@
         const strength = shortCovering.put.trigger === 'POSITIONING_AND_TRIGGER' ? 'bearish' : null;
         if(strength) bearish.push(ev('shortCovering', 'bearish', `${shortCovering.put.state} at strike ${shortCovering.put.strike} — confirmed by underlying bearish momentum (${shortCovering.put.trigger})`, shortCovering.put, 'options'));
       }
+
+      // Priority 8 — snapshot quality is surfaced honestly, never
+      // treated as more certain than it is.
+      marketAnalysis.snapshotStatus = prevStrikes ? 'SECOND_SNAPSHOT_OR_LATER' : 'WAITING_FOR_SECOND_SNAPSHOT';
+
+      // Priority 9 — the option chain's OWN timestamp determines ITS
+      // freshness, separate from candle freshness. A stale option
+      // chain is a hard blocker (Priority 9: "reduce confidence or
+      // NO TRADE" — this file chooses the safer NO TRADE, matching the
+      // existing STALE_DATA pattern for candles).
+      if(optionChainResult.timestamp){
+        const ocAgeSeconds = Math.max(0, Math.floor(now.getTime() / 1000) - Math.floor(new Date(optionChainResult.timestamp).getTime() / 1000));
+        marketAnalysis.optionChainDataQuality = dataQualityLabel(ocAgeSeconds, staleSeconds);
+        if(ocAgeSeconds > staleSeconds){
+          riskFlags.push({ code: 'STALE_OPTION_DATA', message: `Option chain snapshot is ${Math.round(ocAgeSeconds / 60)} minute(s) old (threshold ${Math.round(staleSeconds / 60)}m).` });
+        }
+      } else {
+        marketAnalysis.optionChainDataQuality = 'UNAVAILABLE';
+      }
     }
 
+    // Priority 1 — breakout-quality classification, computed AFTER
+    // both underlying and options evidence exist (it needs the
+    // options-group net direction and the trap result, both already
+    // computed above). A CONFIRMED breakout adds evidence in its own
+    // direction; FAILED/TRAP adds evidence AGAINST it (a failed/trapped
+    // breakout is itself informative — the reversal is real evidence,
+    // not neutral). WEAK/UNCONFIRMED add nothing (not enough to claim
+    // either way) but are still surfaced for the entry-state gate.
+    if(analysisContext){
+      const optionsNet = byGroupCount(bullish, 'options') - byGroupCount(bearish, 'options');
+      const momentumConfirmed = safeData(analysisContext.trend) && safeData(analysisContext.trend).primary
+        && safeData(analysisContext.trend).primary.current && safeData(analysisContext.trend).primary.current.evidence
+        ? !!safeData(analysisContext.trend).primary.current.evidence.momentumConfirmed : false;
+      const trapForBreakout = marketAnalysis.trap ? { type: marketAnalysis.trap } : null;
+      const breakout = classifyBreakout(safeData(analysisContext.marketStructure), safeData(analysisContext.liquidity), candles, momentumConfirmed, optionsNet, trapForBreakout);
+      marketAnalysis.breakout = breakout;
+      if(breakout){
+        if(breakout.quality === 'CONFIRMED'){
+          (breakout.direction === 'bullish' ? bullish : bearish).push(ev('breakout', breakout.direction, `${breakout.direction === 'bullish' ? 'Bullish' : 'Bearish'} breakout CONFIRMED (${breakout.confirmations.join(', ')})${breakout.retested ? ' — retest held' : ''}`, breakout));
+        } else if(breakout.quality === 'FAILED' || breakout.quality === 'TRAP'){
+          // A failed/trapped breakout is evidence for the OPPOSITE direction.
+          const oppositeDir = breakout.direction === 'bullish' ? 'bearish' : 'bullish';
+          (oppositeDir === 'bullish' ? bullish : bearish).push(ev('breakout', oppositeDir, `${breakout.direction === 'bullish' ? 'Bullish' : 'Bearish'} breakout ${breakout.quality} — reversal favors ${oppositeDir}`, breakout));
+        }
+      }
+    }
+
+    // Priority 3 — expiry/session classification from the option
+    // chain's own real expiry date, never a hardcoded calendar.
+    marketAnalysis.expirySession = classifyExpirySession(optionChainResult, now);
+    if(marketAnalysis.expirySession === 'EXPIRY_SESSION'){
+      riskFlags.push({ code: 'EXPIRY_SESSION_RISK', message: 'Today is the option chain\'s own expiry date — premium decay, false breakouts, and rapid OI shifts are more likely than on a normal session.', severity: 'confidence-penalty' });
+    }
 
     // Candle freshness — never call candle data "live"; only ever "as
     // of" the last fetched candle's own timestamp.
@@ -506,6 +672,8 @@
     // status without buildEvidence() needing to bundle every strike's
     // classification into its return value.
     classifyUnderlyingState, classifyPcrContext, classifyStrikePositioning,
-    detectTrap, detectShortCovering, dataQualityLabel
+    detectTrap, detectShortCovering, dataQualityLabel,
+    // Phase 4 additions
+    classifyBreakout, classifyExpirySession
   };
 })();
