@@ -94,12 +94,6 @@
   }
   window.DannyChart.hasDrawableStructure = hasDrawableStructure;
 
-  // Phase 3 — chart-level Trend state badge (see trend-badge.js for why
-  // this is not a canvas annotation). Mounted once, early in boot(),
-  // below; updated every time getStructuredAnalysis() computes a fresh
-  // Analysis Context, same lifecycle as the analysis banner above.
-  var trendBadgeInstance = null;
-
   var bannerEl = null;
   function ensureBanner(){
     if(bannerEl) return bannerEl;
@@ -137,17 +131,6 @@
     if(!DC || !DC.StudioChartInit){
       console.error('[StudioBootstrap] DannyChart.StudioChartInit is not available — check that all assets/js/chart/*.js files loaded before this script.');
       return;
-    }
-
-    // Phase 3 — mount before the first getStructuredAnalysis() call
-    // (triggered inside orchestrator.initialize() below), which is the
-    // first place trendBadgeInstance.update() is called. Additive only:
-    // if trend-badge.js failed to load, this silently no-ops rather
-    // than breaking boot, same pattern as every other optional module
-    // check in this file.
-    if(DC.TrendBadge && typeof DC.TrendBadge.mount === 'function'){
-      var trendWrap = document.getElementById('lwChartWrap');
-      if(trendWrap) trendBadgeInstance = DC.TrendBadge.mount({ container: trendWrap });
     }
 
     // OpenRouter integration — resolve which AI provider should be
@@ -264,18 +247,12 @@
             engineDiag = Adapter.describe(ctx, structured);
             structured.__engineDiagnostics = engineDiag;
             console.log('[StudioBootstrap] Deterministic Analysis Engine -> Structured Analysis:', engineDiag);
-            // Phase 3 — trend is chart-level state, read straight from
-            // the Analysis Context (ctx.trend), never passed through
-            // annotation-model.js. See trend-badge.js for why.
-            if(trendBadgeInstance) trendBadgeInstance.update(ctx.trend);
           } catch(err){
             console.error('[StudioBootstrap] Deterministic analysis failed:', err);
             structured = null;
-            if(trendBadgeInstance) trendBadgeInstance.update(null);
           }
         } else if(!Adapter || !Engine){
           console.error('[StudioBootstrap] Deterministic analysis unavailable — AnalysisContextAdapter or AnalysisEngine did not load. Check the script order in studio.html.');
-          if(trendBadgeInstance) trendBadgeInstance.update(null);
         }
 
         if(!structured){
@@ -288,7 +265,17 @@
 
         var status = { status: 'unknown', message: '', at: Date.now() };
         try{
-          var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
+          // `deterministic` is the Structured Analysis the local engines
+          // just produced, a few lines above. Passing it lets a provider
+          // interpret findings rather than rediscover them from raw
+          // candles — the entire structural half of the AI's output is
+          // discarded below anyway. Gemini and OpenRouter read only
+          // symbol/timeframe/candles and ignore this extra field, so
+          // their behaviour is unchanged; the local Ollama provider uses
+          // it to build a prompt that is ~95% smaller.
+          var resp = await window.AIService.analyzeChartStructure({
+            symbol: symbol, timeframe: timeframe, candles: candles, deterministic: structured
+          });
           if(resp && resp.status === 'ok' && resp.data){
             status.status = 'ok';
             status.message = 'Analysis received.';
@@ -513,20 +500,6 @@
         s.renderer.on('timeframeError', function(payload){
           var msg = (payload && payload.error) || 'Could not load data for this instrument.';
           showAnalysisBanner(msg);
-        });
-      }
-
-      // Phase 3 — makes the existing 'trend' overlay toggle button
-      // meaningful: it already exists (overlay-layer-manager.js) and
-      // already calls renderer.showLayer('trend')/hideLayer('trend')
-      // on the empty canvas layer (harmless no-op) via
-      // OverlayManager.toggle(). This ALSO shows/hides the badge, off
-      // the SAME onVisibilityChange event toggle-controller.js uses —
-      // no change to either of those files.
-      if(s && s.overlayManager && trendBadgeInstance){
-        trendBadgeInstance.setVisible(s.overlayManager.isVisible('trend'));
-        s.overlayManager.onVisibilityChange(function(evt){
-          if(evt && evt.key === 'trend') trendBadgeInstance.setVisible(evt.visible);
         });
       }
     });
