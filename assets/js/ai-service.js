@@ -398,18 +398,26 @@
   --------------------------------------------------------------- */
   const OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
   const OLLAMA_MODEL = 'qwen2.5:1.5b';
-  const OLLAMA_TIMEOUT_MS = 180000;
-  /* Qwen 2.5 1.5B supports a 32k context. The previous value here was
-     4096, which a full chartStructure prompt (system rules + a JSON
-     candle array) overflows easily — Ollama then silently drops the
-     front of the prompt, so the model never sees the JSON-shape rules
-     and returns prose. That is a truncation bug, not a model bug.
-     16384 fits a realistic candle window with headroom and costs only
-     KV-cache memory on a 1.5B model. Deliberately NOT solved by
-     trimming the candle array: tradeLevels/entry are index-anchored
-     into that exact array, so truncating it would silently shift every
-     index the model returns and draw levels at wrong prices. */
-  const OLLAMA_NUM_CTX = 16384;
+  /* 120s, down from 180s. With a bounded num_predict the worst
+     realistic case on CPU is roughly (first-call model load ~10-30s) +
+     (prompt eval, now under 1k tokens) + (<=OLLAMA_NUM_PREDICT tokens
+     at 15-25 tok/s). A request that has not finished in 120s is not
+     going to finish usefully — failing sooner gets the user a
+     diagnosable error instead of a three-minute stall. */
+  const OLLAMA_TIMEOUT_MS = 120000;
+  /* 4096, down from 16384. Ollama allocates the KV cache for the whole
+     num_ctx up front — for qwen2.5:1.5b that is roughly 28KB/token, so
+     16384 reserved ~460MB of RAM for a prompt that is now well under
+     1000 tokens. 4096 reserves ~115MB and still leaves large headroom
+     over prompt + num_predict. This was NOT the cause of the timeout,
+     but it is wasted memory on a laptop once the prompt shrank. */
+  const OLLAMA_NUM_CTX = 4096;
+  /* Hard ceiling on generated tokens. Previously unset, which means
+     Ollama's default of "generate until EOS or the context fills" —
+     combined with a prompt that asked for five populated arrays, the
+     model would emit thousands of tokens at CPU speed. The decision
+     object this prompt asks for fits comfortably in 800. */
+  const OLLAMA_NUM_PREDICT = 800;
 
   /** The exact origin string the user must put in OLLAMA_ORIGINS. Read
    *  from the live page so the message is always correct for whichever
@@ -417,6 +425,40 @@
   function ollamaPageOrigin() {
     try { return (global.location && global.location.origin) || '<this site>'; }
     catch (_e) { return '<this site>'; }
+  }
+
+  /* Timing diagnostics. Ollama's /api/generate response carries its own
+     nanosecond counters — these are measured by Ollama, not estimated
+     here. Logged on every call so a slow laptop is diagnosable from the
+     DevTools console without a separate profiling build. Also stored on
+     window.DannyChart.lastOllamaTiming for the diagnostics panel. */
+  function ollamaLogTiming(type, prompt, body, startedAt) {
+    try {
+      const ns = v => (typeof v === 'number' && Number.isFinite(v)) ? v / 1e9 : null;
+      const t = {
+        type,
+        promptChars: prompt.length,
+        promptTokensEstimated: Math.round(prompt.length / 4),
+        promptTokensActual: (body && body.prompt_eval_count) || null,
+        outputTokens: (body && body.eval_count) || null,
+        responseChars: (body && typeof body.response === 'string') ? body.response.length : null,
+        numCtx: OLLAMA_NUM_CTX,
+        numPredict: OLLAMA_NUM_PREDICT,
+        loadSec: ns(body && body.load_duration),
+        promptEvalSec: ns(body && body.prompt_eval_duration),
+        generateSec: ns(body && body.eval_duration),
+        totalSec: ns(body && body.total_duration),
+        wallClockSec: (Date.now() - startedAt) / 1000,
+        hitPredictCap: (body && body.eval_count) === OLLAMA_NUM_PREDICT
+      };
+      if (t.outputTokens && t.generateSec) t.tokensPerSec = +(t.outputTokens / t.generateSec).toFixed(1);
+      console.info('[AIService/Ollama] timing', t);
+      if (t.hitPredictCap) {
+        console.warn(`[AIService/Ollama] Generation stopped at the ${OLLAMA_NUM_PREDICT}-token cap — the JSON may be truncated. Raise OLLAMA_NUM_PREDICT if this recurs.`);
+      }
+      const DC = global.DannyChart = global.DannyChart || {};
+      DC.lastOllamaTiming = t;
+    } catch (_e) { /* diagnostics must never break a working request */ }
   }
 
   function ollamaJsonFromResponse(body) {
@@ -575,6 +617,16 @@
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('Ollama chart analysis was not a JSON object.');
     }
+    /* The Ollama prompt now asks for the decision fields at the TOP
+       level (it is no longer asked for structural arrays at all), but
+       a model will sometimes still wrap them in a `decision` key out
+       of habit. Accept both shapes rather than losing a valid answer
+       to a wrapper. Structural arrays are returned empty: the caller
+       discards them regardless — the deterministic engines own them. */
+    const decisionSource = (parsed.decision && typeof parsed.decision === 'object' && !Array.isArray(parsed.decision))
+      ? parsed.decision
+      : parsed;
+
     return {
       version: typeof parsed.version === 'string' ? parsed.version : '1.0',
       timeframe: typeof parsed.timeframe === 'string' ? parsed.timeframe : '',
@@ -585,32 +637,135 @@
       liquidity: Array.isArray(parsed.liquidity) ? parsed.liquidity : [],
       premiumDiscount: ollamaNormalizePremiumDiscount(parsed.premiumDiscount),
       tradeLevels: ollamaNormalizeTradeLevels(parsed.tradeLevels),
-      decision: ollamaNormalizeDecision(parsed.decision)
+      decision: ollamaNormalizeDecision(decisionSource)
     };
   }
 
+  /* -----------------------------------------------------------------
+     Deterministic digest — the Ollama chartStructure prompt's input.
+
+     WHY THIS EXISTS. studio-bootstrap.js's getStructuredAnalysis()
+     builds the full deterministic Structured Analysis from the 8
+     local engines BEFORE it calls the AI, and then explicitly
+     DISCARDS every structural array the AI returns ("the deterministic
+     engine decides and AI may only explain"). The prompt was still
+     shipping the raw 180-candle array and asking the model to
+     rediscover swings/structureEvents/orderBlocks/fvgs/liquidity from
+     scratch — 92% of the prompt, and thousands of output tokens, spent
+     generating arrays that are thrown away on arrival.
+
+     This digest gives the model the findings instead of the raw data,
+     so its only remaining job is the one whose output is actually
+     used: interpret and decide. It reports what the engines found; it
+     never adds, drops or re-derives anything.
+  ----------------------------------------------------------------- */
+  function ollamaFmt(n) {
+    return (typeof n === 'number' && Number.isFinite(n)) ? String(n) : '?';
+  }
+
+  function ollamaDeterministicDigest(payload) {
+    const candles = Array.isArray(payload.candles) ? payload.candles : [];
+    const d = (payload.deterministic && typeof payload.deterministic === 'object') ? payload.deterministic : null;
+    const lines = [];
+
+    lines.push(`Symbol: ${payload.symbol || 'unspecified'}. Timeframe: ${payload.timeframe || 'unspecified'}. Candles analysed: ${candles.length}.`);
+
+    if (candles.length) {
+      const last = candles[candles.length - 1];
+      let hi = -Infinity, lo = Infinity;
+      for (const c of candles) {
+        if (typeof c.high === 'number' && c.high > hi) hi = c.high;
+        if (typeof c.low === 'number' && c.low < lo) lo = c.low;
+      }
+      lines.push(`Latest close: ${ollamaFmt(last && last.close)}. Window high: ${ollamaFmt(Number.isFinite(hi) ? hi : null)}. Window low: ${ollamaFmt(Number.isFinite(lo) ? lo : null)}.`);
+    }
+
+    if (!d) {
+      lines.push('No deterministic analysis was supplied with this request.');
+      return lines.join('\n');
+    }
+
+    const arr = k => Array.isArray(d[k]) ? d[k] : [];
+
+    const events = arr('structureEvents');
+    if (events.length) {
+      const recent = events.slice(-4).map(e =>
+        `${e.type || '?'} ${e.direction || ''} at index ${ollamaFmt(e.index)} level ${ollamaFmt(e.level)}`.replace(/\s+/g, ' ').trim());
+      lines.push(`Market structure events (${events.length} total, most recent last): ${recent.join('; ')}.`);
+    } else {
+      lines.push('Market structure events: none detected.');
+    }
+
+    const swings = arr('swings');
+    if (swings.length) {
+      const recent = swings.slice(-4).map(s => `${s.type || '?'} ${ollamaFmt(s.price)} at index ${ollamaFmt(s.index)}`);
+      lines.push(`Swings (${swings.length} total, most recent last): ${recent.join('; ')}.`);
+    }
+
+    const obs = arr('orderBlocks');
+    if (obs.length) {
+      const recent = obs.slice(-3).map(o => `${o.subtype || '?'} ${ollamaFmt(o.priceLow)}-${ollamaFmt(o.priceHigh)}`);
+      lines.push(`Order blocks (${obs.length} total): ${recent.join('; ')}.`);
+    } else {
+      lines.push('Order blocks: none detected.');
+    }
+
+    const fvgs = arr('fvgs');
+    if (fvgs.length) {
+      const recent = fvgs.slice(-3).map(f => `${f.subtype || '?'} ${ollamaFmt(f.bottom)}-${ollamaFmt(f.top)} at index ${ollamaFmt(f.index)}`);
+      lines.push(`Fair value gaps (${fvgs.length} total): ${recent.join('; ')}.`);
+    } else {
+      lines.push('Fair value gaps: none detected.');
+    }
+
+    const liq = arr('liquidity');
+    if (liq.length) {
+      const recent = liq.slice(-4).map(l => `${l.subtype || '?'} at ${ollamaFmt(l.price)}`);
+      lines.push(`Liquidity (${liq.length} total): ${recent.join('; ')}.`);
+    } else {
+      lines.push('Liquidity: none detected.');
+    }
+
+    const pd = d.premiumDiscount;
+    if (pd && typeof pd === 'object') {
+      lines.push(`Premium/discount range: high ${ollamaFmt(pd.rangeHighPrice)}, low ${ollamaFmt(pd.rangeLowPrice)}, equilibrium ${ollamaFmt(pd.equilibriumPrice)}.`);
+    }
+
+    const tl = d.tradeLevels;
+    if (tl && typeof tl === 'object') {
+      lines.push(`Deterministic trade levels already computed: ${tl.direction || '?'} entry ${ollamaFmt(tl.entry && tl.entry.price)}, ` +
+        `stop ${ollamaFmt(tl.stopLoss && tl.stopLoss.price)}, target1 ${ollamaFmt(tl.target1 && tl.target1.price)}.`);
+    } else {
+      lines.push('Deterministic trade levels: none — the engines did not find a valid setup.');
+    }
+
+    return lines.join('\n');
+  }
+
   function buildOllamaPrompt(type, payload) {
-    const candles = Array.isArray(payload && payload.candles) ? payload.candles : [];
     const base = `You are DannyTrade's local trading-analysis assistant. Apply ICT and Smart Money Concepts. ` +
       `Be conservative and never invent price data. Respond ONLY with one valid JSON object. `;
 
     if (type === 'chartStructure') {
+      /* Decision-only output contract. The caller discards every
+         structural array anyway, so asking for them cost thousands of
+         wasted output tokens per request and was the dominant term in
+         the 180s timeout. tradeLevels is deliberately NOT requested:
+         the deterministic engines own drawn geometry, and a 1.5B model
+         inventing entry/stop/target prices would put fabricated levels
+         on the chart. */
       return base +
-        `Return exactly these top-level keys: version, timeframe, swings, structureEvents, orderBlocks, fvgs, liquidity, ` +
-        `premiumDiscount, tradeLevels, decision. ` +
-        `Every index must be an actual candle-array index from 0 to ${Math.max(candles.length - 1, 0)}. ` +
-        `Every price must be supported by the supplied candle data; never invent or interpolate prices. ` +
-        `If there is no genuine pattern, return an empty array. If evidence is weak, use null for tradeLevels and decision, ` +
-        `or set decision.finalDecision to WAIT/NO_TRADE. ` +
-        `strength and confidence are numbers from 0 to 1. ` +
-        `If decision is non-null it MUST contain: finalDecision (BUY, SELL, WAIT, or NO_TRADE), tradeGrade (A+, A, B, C, D), ` +
-        `marketPhase, trapRisk (Very High, High, Moderate, Low), liquidityTarget, tradeQuality, confidence, reasoningSummary, ` +
-        `riskReward, trend (Bullish, Bearish, Sideways), structureSummary, lastStructureEvent, invalidationLevel, educationalNotes (array). ` +
-        `If tradeLevels is non-null it MUST contain direction (bullish/bearish), confidence, riskReward, entry(index,price), ` +
-        `stopLoss(price), target1(price), observation, evidence, reasoning, tradingImplication; target2, target3 and invalidation may be null. ` +
-        `If premiumDiscount is non-null it MUST contain rangeHighIndex, rangeHighPrice, rangeLowIndex, rangeLowPrice, equilibriumPrice, confidence. ` +
-        `Timeframe: ${payload.timeframe || 'unspecified'}. Symbol: ${payload.symbol || 'unspecified'}. ` +
-        `Candle array oldest first: ${JSON.stringify(candles)}`;
+        `You are given the output of DannyTrade's deterministic analysis engines. ` +
+        `Do NOT re-derive the chart structure and do NOT invent levels — interpret what is below and decide. ` +
+        `Return exactly these keys and nothing else: finalDecision, tradeGrade, marketPhase, trapRisk, ` +
+        `liquidityTarget, tradeQuality, confidence, reasoningSummary, riskReward, trend, structureSummary, ` +
+        `lastStructureEvent, invalidationLevel, educationalNotes. ` +
+        `finalDecision is BUY, SELL, WAIT or NO_TRADE. tradeGrade is A+, A, B, C or D. ` +
+        `trapRisk is Very High, High, Moderate or Low. trend is Bullish, Bearish or Sideways. ` +
+        `confidence and riskReward are numbers. educationalNotes is an array of short strings. ` +
+        `Keep reasoningSummary and structureSummary to two sentences each. ` +
+        `If the evidence is weak, mixed or absent, say so and use WAIT or NO_TRADE — never force a trade.\n\n` +
+        `DETERMINISTIC ANALYSIS:\n${ollamaDeterministicDigest(payload)}`;
     }
 
     const keys = [
@@ -636,11 +791,12 @@
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
       const prompt = buildOllamaPrompt(type, payload || {});
+      const startedAt = Date.now();
       // ~4 chars/token is the usual rough ratio; warn (never silently
-      // truncate) if the prompt is close to overflowing the context.
-      if (prompt.length / 4 > OLLAMA_NUM_CTX * 0.85) {
-        console.warn(`[AIService/Ollama] Prompt is ~${Math.round(prompt.length / 4)} tokens against num_ctx ${OLLAMA_NUM_CTX}. ` +
-          'Ollama will drop the front of the prompt and the response is likely to be off-schema. Reduce the candle window.');
+      // truncate) if prompt + generation could overflow the context.
+      if ((prompt.length / 4) + OLLAMA_NUM_PREDICT > OLLAMA_NUM_CTX * 0.85) {
+        console.warn(`[AIService/Ollama] Prompt ~${Math.round(prompt.length / 4)} tokens + up to ${OLLAMA_NUM_PREDICT} generated, against num_ctx ${OLLAMA_NUM_CTX}. ` +
+          'Ollama will drop the front of the prompt and the response is likely to be off-schema.');
       }
       try {
         const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -651,7 +807,7 @@
             prompt,
             stream: false,
             format: 'json',
-            options: { temperature: 0.1, num_ctx: OLLAMA_NUM_CTX }
+            options: { temperature: 0.1, num_ctx: OLLAMA_NUM_CTX, num_predict: OLLAMA_NUM_PREDICT }
           }),
           signal: controller.signal
         });
@@ -660,6 +816,7 @@
         if (!res.ok) {
           throw new Error((body && body.error) || `Ollama request failed (${res.status}).`);
         }
+        ollamaLogTiming(type, prompt, body, startedAt);
         const parsed = ollamaJsonFromResponse(body);
         if (type === 'chartStructure') return ollamaCoerceChartStructure(parsed);
 
@@ -676,7 +833,8 @@
         return normalized;
       } catch (err) {
         if (err && err.name === 'AbortError') {
-          throw new Error(`Local Ollama request timed out after ${Math.round(OLLAMA_TIMEOUT_MS/1000)} seconds.`);
+          throw new Error(`Local Ollama request timed out after ${Math.round(OLLAMA_TIMEOUT_MS/1000)} seconds. ` +
+            'Check the console for the last [AIService/Ollama] timing entry, or run: await AIService.benchmarkOllama()');
         }
         // A browser-level fetch rejection (TypeError, no HTTP status) is
         // indistinguishable in JS between "Ollama is stopped", "CORS
@@ -821,13 +979,83 @@
   }
   AIService.testOllama = testOllama;
 
+  /* ---------------------------------------------------------------
+     Hardware benchmark, for the DevTools console:
+         await AIService.benchmarkOllama()
+     Times a short generation and a production-sized one, using Ollama's
+     own duration counters, and reports whether this laptop can serve a
+     chartStructure request inside the timeout. Measures — never
+     estimates — tokens/sec.
+  --------------------------------------------------------------- */
+  async function benchmarkOllama() {
+    async function one(label, prompt, numPredict) {
+      const startedAt = Date.now();
+      try {
+        const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: OLLAMA_MODEL, prompt, stream: false, format: 'json',
+            options: { temperature: 0.1, num_ctx: OLLAMA_NUM_CTX, num_predict: numPredict }
+          })
+        });
+        const body = await res.json();
+        const ns = v => (typeof v === 'number' && Number.isFinite(v)) ? +(v / 1e9).toFixed(2) : null;
+        return {
+          label,
+          promptChars: prompt.length,
+          promptTokens: body.prompt_eval_count || null,
+          outputTokens: body.eval_count || null,
+          loadSec: ns(body.load_duration),
+          promptEvalSec: ns(body.prompt_eval_duration),
+          generateSec: ns(body.eval_duration),
+          totalSec: ns(body.total_duration),
+          wallClockSec: +((Date.now() - startedAt) / 1000).toFixed(2),
+          tokensPerSec: (body.eval_count && body.eval_duration)
+            ? +(body.eval_count / (body.eval_duration / 1e9)).toFixed(1) : null
+        };
+      } catch (err) {
+        return { label, error: (err && err.message) || String(err) };
+      }
+    }
+
+    const warm = await one('warmup (model load)', 'Return {"ok":true}', 16);
+    const real = await one('production chartStructure prompt',
+      buildOllamaPrompt('chartStructure', {
+        symbol: 'NSE:NIFTY50-INDEX', timeframe: '15',
+        candles: [{ time: 0, open: 24100, high: 24160, low: 24080, close: 24140, volume: 100000 }],
+        deterministic: {
+          swings: [{ type: 'high', index: 170, price: 24160 }, { type: 'low', index: 162, price: 24080 }],
+          structureEvents: [{ type: 'BOS', direction: 'bullish', index: 171, level: 24155 }],
+          orderBlocks: [{ subtype: 'bullish', priceLow: 24090, priceHigh: 24115 }],
+          fvgs: [{ subtype: 'bullish', index: 168, bottom: 24100, top: 24125 }],
+          liquidity: [{ subtype: 'buyside', price: 24175 }],
+          premiumDiscount: { rangeHighPrice: 24160, rangeLowPrice: 24080, equilibriumPrice: 24120 },
+          tradeLevels: null
+        }
+      }), OLLAMA_NUM_PREDICT);
+
+    const verdict = (real.wallClockSec == null || real.error)
+      ? 'Could not measure — see error.'
+      : real.wallClockSec < OLLAMA_TIMEOUT_MS / 1000
+        ? `PASS — ${real.wallClockSec}s against a ${OLLAMA_TIMEOUT_MS / 1000}s timeout.`
+        : `FAIL — ${real.wallClockSec}s exceeds the ${OLLAMA_TIMEOUT_MS / 1000}s timeout. This hardware needs a smaller model.`;
+
+    const out = { model: OLLAMA_MODEL, numCtx: OLLAMA_NUM_CTX, numPredict: OLLAMA_NUM_PREDICT,
+      timeoutSec: OLLAMA_TIMEOUT_MS / 1000, runs: [warm, real], verdict };
+    console.info('[AIService/Ollama] benchmark', out);
+    return out;
+  }
+  AIService.benchmarkOllama = benchmarkOllama;
+
   /* Test-only surface (mirrors the pattern already used by
      assets/js/chart/ollama-provider.js). Not used by any UI code. */
   AIService.__ollamaInternals = {
     ollamaNum, ollamaEnum, ollamaStr,
     ollamaNormalizeDecision, ollamaNormalizeTradeLevels,
     ollamaNormalizePremiumDiscount, ollamaCoerceChartStructure,
-    ollamaJsonFromResponse, OLLAMA_NUM_CTX
+    ollamaJsonFromResponse, buildOllamaPrompt, ollamaDeterministicDigest,
+    OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_TIMEOUT_MS
   };
 
   setProviderName('gemini'); // Gemini remains the default AI provider — unchanged external behavior.
