@@ -28,23 +28,96 @@
     catch(err){ console.warn('[AiConnections] localStorage write failed:', err.message); }
   }
 
+  /* Ollama connection states. The old version of this function returned
+     a bare boolean, which collapsed three completely different
+     situations — "Ollama is stopped", "Ollama is running but the
+     browser is not allowed to talk to it", and "Ollama is running but
+     qwen2.5:1.5b is not installed" — into one grey, unclickable row
+     with no message and nothing to click. These states exist so the UI
+     can say which one it actually is. */
+  const OLLAMA_STATE = {
+    CHECKING: 'checking',
+    CONNECTED: 'connected',
+    MODEL_MISSING: 'model_missing',
+    UNREACHABLE: 'unreachable'
+  };
+
+  function pageOrigin(){
+    try{ return window.location.origin; } catch(_e){ return '<this site>'; }
+  }
+
+  /** Why "curl works but the page does not" is the normal case here:
+      curl is not a browser and ignores both of the checks below.
+      1. CORS — Ollama only answers browser requests whose Origin is in
+         its allow-list. The defaults are localhost/127.0.0.1/0.0.0.0
+         plus app:// file:// tauri:// schemes. A page served from
+         Cloudflare Pages is NOT on that list, so Ollama's reply has no
+         Access-Control-Allow-Origin header and the browser discards it
+         before this code ever sees it. Fixed by setting OLLAMA_ORIGINS.
+      2. Local Network Access — Chromium 142+ blocks requests from a
+         public HTTPS origin to a loopback/private address until the
+         user grants the local-network permission prompt.
+      Neither is visible to JavaScript: both surface as the same bare
+      TypeError with no status and no reason. This function therefore
+      names both instead of guessing one. */
   async function checkOllama(){
+    const base = { model: OLLAMA_MODEL, local: true, origin: pageOrigin() };
+    let res;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
     try{
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2500);
-      try{
-        const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { method: 'GET', signal: controller.signal });
-        if(!res.ok) return { configured: false, model: OLLAMA_MODEL, local: true };
-        const json = await res.json();
-        const models = Array.isArray(json.models) ? json.models : [];
-        const found = models.some(m => m && (m.name === OLLAMA_MODEL || String(m.name || '').startsWith(OLLAMA_MODEL + ':')));
-        return { configured: found, model: OLLAMA_MODEL, local: true, server: true };
-      } finally {
-        clearTimeout(timer);
-      }
+      res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { method: 'GET', cache: 'no-store', signal: controller.signal });
     } catch(err){
-      return { configured: false, model: OLLAMA_MODEL, local: true, server: false };
+      const timedOut = err && err.name === 'AbortError';
+      return Object.assign({}, base, {
+        configured: false,
+        state: OLLAMA_STATE.UNREACHABLE,
+        message: timedOut
+          ? `No reply from ${OLLAMA_BASE_URL} within 2.5s.`
+          : `Blocked or not running. Start Ollama, then set OLLAMA_ORIGINS=${pageOrigin()} and restart it. If Chrome shows a local-network prompt, click Allow.`
+      });
+    } finally {
+      clearTimeout(timer);
     }
+
+    if(!res.ok){
+      return Object.assign({}, base, {
+        configured: false,
+        state: OLLAMA_STATE.UNREACHABLE,
+        message: `Ollama answered HTTP ${res.status} on /api/tags.`
+      });
+    }
+
+    let names = [];
+    try{
+      const json = await res.json();
+      names = (Array.isArray(json && json.models) ? json.models : [])
+        .map(m => String((m && m.name) || '')).filter(Boolean);
+    } catch(_e){
+      return Object.assign({}, base, {
+        configured: false, state: OLLAMA_STATE.UNREACHABLE,
+        message: 'Ollama replied to /api/tags with something that was not JSON.'
+      });
+    }
+
+    // Exact tag first; then the same base tag with a quantisation
+    // suffix (e.g. "qwen2.5:1.5b-instruct-q4_0"), which is still the
+    // requested model. Never matches an unrelated model.
+    const found = names.some(n => n === OLLAMA_MODEL || n.startsWith(OLLAMA_MODEL + '-'));
+    if(!found){
+      return Object.assign({}, base, {
+        configured: false,
+        state: OLLAMA_STATE.MODEL_MISSING,
+        models: names,
+        message: `Ollama is reachable, but ${OLLAMA_MODEL} is not installed. Run: ollama pull ${OLLAMA_MODEL}` +
+          (names.length ? ` (installed: ${names.join(', ')})` : '')
+      });
+    }
+
+    return Object.assign({}, base, {
+      configured: true, server: true, state: OLLAMA_STATE.CONNECTED, models: names,
+      message: `Ollama connected — ${OLLAMA_MODEL} is installed.`
+    });
   }
 
   async function checkStatus(){
@@ -126,10 +199,11 @@
           (isActive ? 'background:rgba(212,175,106,0.12);' : '');
 
         const dot = document.createElement('span');
-        const dotColor = providerStatus.configured ? '#3fb950' : '#8b8b8b';
+        let dotColor = providerStatus.configured ? '#3fb950' : '#8b8b8b';
+        if(provider.id === 'ollama' && providerStatus.state === OLLAMA_STATE.MODEL_MISSING) dotColor = '#d29922';
         dot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};`;
         dot.title = provider.id === 'ollama'
-          ? (providerStatus.configured ? 'Ollama is reachable and qwen2.5:1.5b is installed' : 'Local Ollama/model not detected')
+          ? (providerStatus.message || 'Local Ollama status unknown')
           : (providerStatus.configured ? 'Configured' : 'Not configured on this Worker');
         row.appendChild(dot);
 
@@ -149,14 +223,44 @@
           useBtn.style.cssText = 'font-size:0.75rem;padding:0.2rem 0.5rem;cursor:pointer;';
           useBtn.addEventListener('click', () => switchTo(provider.id));
           row.appendChild(useBtn);
+        } else if(provider.id === 'ollama'){
+          // Ollama is the one provider the USER can fix from this
+          // machine, so its unavailable state gets a real, clickable
+          // Retry button. Previously this was an inert <span> reading
+          // "Start Ollama" — nothing to click, no way to re-check
+          // without reloading the page.
+          if(providerStatus.state === OLLAMA_STATE.CHECKING){
+            const tag = document.createElement('span');
+            tag.textContent = 'Checking…';
+            tag.style.cssText = 'font-size:0.75rem;opacity:0.6;';
+            row.appendChild(tag);
+          } else {
+            const retryBtn = document.createElement('button');
+            retryBtn.type = 'button';
+            retryBtn.textContent = 'Retry';
+            retryBtn.style.cssText = 'font-size:0.75rem;padding:0.2rem 0.5rem;cursor:pointer;';
+            retryBtn.addEventListener('click', () => { refreshAndRender(); });
+            row.appendChild(retryBtn);
+          }
         } else {
           const tag = document.createElement('span');
-          tag.textContent = provider.id === 'ollama' ? 'Start Ollama' : 'Not configured';
+          tag.textContent = 'Not configured';
           tag.style.cssText = 'font-size:0.75rem;opacity:0.6;';
           row.appendChild(tag);
         }
 
         list.appendChild(row);
+
+        // Ollama-only status line. Gemini/OpenRouter rendering is
+        // untouched — they are Worker-side and the user cannot act on
+        // their status from here.
+        if(provider.id === 'ollama' && providerStatus.message){
+          const msg = document.createElement('div');
+          msg.textContent = providerStatus.message;
+          msg.style.cssText = 'font-size:0.7rem;line-height:1.35;opacity:0.65;margin:-0.25rem 0 0 1.1rem;' +
+            (providerStatus.state === OLLAMA_STATE.CONNECTED ? 'color:#3fb950;' : '');
+          list.appendChild(msg);
+        }
       });
 
       container.appendChild(list);
@@ -166,7 +270,8 @@
       render({
         gemini: { configured: true },
         openrouter: { configured: false, model: null },
-        ollama: { configured: false, model: OLLAMA_MODEL, local: true }
+        ollama: { configured: false, model: OLLAMA_MODEL, local: true,
+                  state: OLLAMA_STATE.CHECKING, message: 'Checking Ollama…' }
       });
       const status = await checkStatus();
       render(status);
@@ -182,7 +287,10 @@
       if(providerId === 'ollama'){
         const status = await checkOllama();
         if(!status.configured){
-          console.warn('[AiConnections] Ollama is not reachable or qwen2.5:1.5b is not installed.');
+          // Re-render so the row shows the current, specific reason
+          // rather than silently doing nothing.
+          console.warn('[AiConnections] Ollama not selectable:', status.state, status.message);
+          await refreshAndRender();
           return;
         }
       }
@@ -204,5 +312,5 @@
     return handle;
   }
 
-  window.DannyChart.AIConnections = { resolveInitialProviderId, mount, checkStatus, checkOllama };
+  window.DannyChart.AIConnections = { resolveInitialProviderId, mount, checkStatus, checkOllama, OLLAMA_STATE };
 })();
