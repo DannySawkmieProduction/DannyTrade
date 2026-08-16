@@ -322,6 +322,13 @@
      the comment in studio-bootstrap.js), silently skipping resolveInitialProviderId()
      and stranding the AI Provider UI on ai-service.js's hardcoded 'gemini' default
      regardless of the Worker's reported defaultProvider. -->
+<!-- ollama-provider.js loads BEFORE ai-service.js: ai-service.js's
+     setProviderName('gemini') call at its own bottom doesn't need it, but
+     loading it first means window.DannyChart.OllamaProvider is guaranteed
+     present the moment any code (ai-connections.js, a later setProviderName
+     ('ollama') call) might need it — same "dependency loads first" rule
+     every other script tag on this page already follows. -->
+<script defer src="assets/js/chart/ollama-provider.js"></script>
 <script defer src="assets/js/ai-service.js"></script>
 <script defer src="assets/js/chart/ai-connections.js"></script>
 <script defer src="assets/js/chart/studio-bootstrap.js"></script>
