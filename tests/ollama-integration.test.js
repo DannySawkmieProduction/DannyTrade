@@ -43,7 +43,14 @@ function loadAIService(fetchImpl){
   vm.createContext(sandbox);
   const src = fs.readFileSync(path.join(__dirname, '..', 'assets', 'js', 'ai-service.js'), 'utf8');
   vm.runInContext(src, sandbox);
+  sandbox.AIService.__sandbox = sandbox;
   return sandbox.AIService;
+}
+
+/** Reads the timing object the provider stores on DannyChart. */
+function sandboxTiming(AI){
+  const DC = AI.__sandbox && AI.__sandbox.DannyChart;
+  return (DC && DC.lastOllamaTiming) || null;
 }
 
 /* ---------------------------------------------------------------
@@ -272,11 +279,16 @@ section('[9] ollamaJsonFromResponse — /api/generate envelope handling');
   assert(threw, 'an /api/chat-shaped envelope is rejected (this provider uses /api/generate)');
 }
 
-section('[10] num_ctx is large enough for a real chartStructure prompt');
+section('[10] num_ctx is right-sized for the prompt that is actually sent');
 {
   const AI = loadAIService();
-  assert(AI.__ollamaInternals.OLLAMA_NUM_CTX >= 16384,
-    'num_ctx is 16384+, so a full candle array is not silently truncated away');
+  const I = AI.__ollamaInternals;
+  // Superseded by section [17]. Phase 1 raised num_ctx to 16384 because
+  // the prompt carried a 180-candle JSON array. Phase 2 removed that
+  // array, so the correct value is now the small one — reserving 16k of
+  // KV cache for a ~500-token prompt was wasted RAM on this laptop.
+  assert(I.OLLAMA_NUM_CTX === 4096, 'num_ctx is 4096, matching the post-Phase-2 prompt size');
+  assert(I.OLLAMA_NUM_CTX > 500 + I.OLLAMA_NUM_PREDICT, 'num_ctx still comfortably exceeds prompt + generation');
 }
 
 section('[11] testOllama() self-test reports browser-level reachability');
@@ -319,6 +331,196 @@ section('[13] A stopped Ollama degrades to status:error, it does not crash');
   assert(/OLLAMA_ORIGINS/.test(resp.message), 'the surfaced message tells the user how to fix it');
   const back = AI.setProviderName('gemini');
   assert(back === 'gemini', 'the app can still switch back to Gemini afterwards');
+}
+
+/* =================================================================
+   Phase 2 — inference path. The 180s timeout was caused by the
+   chartStructure prompt shipping the raw candle array and asking the
+   model to rediscover geometry whose output studio-bootstrap.js
+   discards, with no cap on generated tokens.
+   ================================================================= */
+
+function makeCandles(n){
+  const out = []; let t = 1755300000, p = 24150.25;
+  for(let i = 0; i < n; i++){
+    const o = p, h = +(p + 30).toFixed(2), l = +(p - 30).toFixed(2), c = +(p + 5).toFixed(2);
+    out.push({ time: t + i*900, open: +o.toFixed(2), high: h, low: l, close: c, volume: 120000 });
+    p = c;
+  }
+  return out;
+}
+const DETERMINISTIC = {
+  version: '1.0', timeframe: '15',
+  swings: Array.from({length:22},(_,i)=>({ type: i%2?'high':'low', index: i*8, price: 24100+i })),
+  structureEvents: Array.from({length:7},(_,i)=>({ type:['BOS','CHOCH','MSS'][i%3], index:20+i*22, direction:i%2?'bullish':'bearish', level:24100+i })),
+  orderBlocks: Array.from({length:9},(_,i)=>({ subtype:i%2?'bullish':'bearish', priceHigh:24140+i, priceLow:24110+i })),
+  fvgs: Array.from({length:14},(_,i)=>({ subtype:i%2?'bullish':'bearish', index:i*12, top:24140+i, bottom:24120+i })),
+  liquidity: Array.from({length:11},(_,i)=>({ subtype:['buyside','sellside','sweep','equal_highs'][i%4], index:i*15, price:24100+i })),
+  premiumDiscount: { rangeHighIndex:171, rangeHighPrice:24192.4, rangeLowIndex:44, rangeLowPrice:24061.8, equilibriumPrice:24127.1, confidence:0.72 },
+  tradeLevels: null, decision: null
+};
+const FULL_PAYLOAD = { symbol:'NSE:NIFTY50-INDEX', timeframe:'15', candles: makeCandles(180), deterministic: DETERMINISTIC };
+
+section('[14] chartStructure prompt no longer ships the raw candle array');
+{
+  const AI = loadAIService();
+  const p = AI.__ollamaInternals.buildOllamaPrompt('chartStructure', FULL_PAYLOAD);
+  assert(p.length < 4000, `prompt is ${p.length} chars, under 4000 (was ~19,400)`);
+  assert(!/"volume"/.test(p) && !/"time"\s*:/.test(p), 'no serialized candle objects in the prompt');
+  assert(!/\[\{.*\},\{.*\}\]/.test(p), 'no raw JSON candle array');
+  assert(p.includes('Candles analysed: 180'), 'the candle count is still stated');
+  assert(p.includes('Window high') && p.includes('Latest close'), 'current price context is preserved');
+}
+
+section('[15] The prompt no longer asks for arrays the caller discards');
+{
+  const AI = loadAIService();
+  const p = AI.__ollamaInternals.buildOllamaPrompt('chartStructure', FULL_PAYLOAD);
+  assert(!/Return exactly these top-level keys.*swings/.test(p), 'no longer requests swings/structureEvents/orderBlocks/fvgs/liquidity output');
+  assert(p.includes('finalDecision') && p.includes('reasoningSummary'), 'still requests every Decision Panel field');
+  ['tradeGrade','marketPhase','trapRisk','liquidityTarget','tradeQuality','confidence',
+   'riskReward','trend','structureSummary','lastStructureEvent','invalidationLevel','educationalNotes']
+    .forEach(k => assert(p.includes(k), `decision field "${k}" is still requested`));
+  assert(/do NOT invent levels/i.test(p), 'the model is told not to invent levels');
+  assert(/WAIT or NO_TRADE/.test(p), 'NO_TRADE remains a first-class outcome');
+}
+
+section('[16] Deterministic findings reach the model without being invented');
+{
+  const AI = loadAIService();
+  const digest = AI.__ollamaInternals.ollamaDeterministicDigest(FULL_PAYLOAD);
+  assert(digest.includes('7 total'), 'structure-event count is reported');
+  assert(digest.includes('BOS') || digest.includes('CHOCH') || digest.includes('MSS'), 'real structure events are named');
+  assert(digest.includes('9 total'), 'order block count is reported');
+  assert(digest.includes('14 total'), 'FVG count is reported');
+  assert(digest.includes('11 total'), 'liquidity count is reported');
+  assert(digest.includes('24192.4') && digest.includes('24061.8'), 'premium/discount edges are passed through verbatim');
+  assert(/Deterministic trade levels: none/.test(digest), 'an absent setup is stated as absent, not omitted');
+}
+{
+  const AI = loadAIService();
+  // Engines found nothing: the digest must say so rather than go silent.
+  const empty = AI.__ollamaInternals.ollamaDeterministicDigest({
+    symbol:'X', timeframe:'5', candles: makeCandles(10),
+    deterministic: { swings:[], structureEvents:[], orderBlocks:[], fvgs:[], liquidity:[], premiumDiscount:null, tradeLevels:null }
+  });
+  assert(/Market structure events: none detected/.test(empty), 'empty structure events are stated explicitly');
+  assert(/Order blocks: none detected/.test(empty), 'empty order blocks are stated explicitly');
+  assert(/Fair value gaps: none detected/.test(empty), 'empty FVGs are stated explicitly');
+}
+{
+  const AI = loadAIService();
+  // No deterministic analysis supplied at all (e.g. engines threw).
+  const none = AI.__ollamaInternals.ollamaDeterministicDigest({ symbol:'X', timeframe:'5', candles: makeCandles(5) });
+  assert(/No deterministic analysis was supplied/.test(none), 'a missing deterministic block is declared, never faked');
+}
+
+section('[17] Generation is bounded and the context is right-sized');
+{
+  const AI = loadAIService();
+  const I = AI.__ollamaInternals;
+  assert(I.OLLAMA_NUM_PREDICT > 0 && I.OLLAMA_NUM_PREDICT <= 1200, `num_predict is capped at ${I.OLLAMA_NUM_PREDICT} (was unbounded)`);
+  assert(I.OLLAMA_NUM_CTX === 4096, 'num_ctx right-sized to 4096 (~115MB KV cache, not ~460MB)');
+  const p = I.buildOllamaPrompt('chartStructure', FULL_PAYLOAD);
+  assert((p.length/4) + I.OLLAMA_NUM_PREDICT < I.OLLAMA_NUM_CTX * 0.85,
+    'prompt + max generation fits inside num_ctx with headroom (no silent truncation)');
+  assert(I.OLLAMA_TIMEOUT_MS === 120000, 'timeout lowered to 120s');
+}
+
+section('[18] The request actually sends num_predict');
+{
+  let captured = null;
+  const AI = loadAIService((url, opts) => { captured = JSON.parse(opts.body); return Promise.reject(new TypeError('stop')); });
+  AI.setProviderName('ollama');
+  await AI.analyzeChartStructure(FULL_PAYLOAD);
+  assert(captured.options.num_predict === AI.__ollamaInternals.OLLAMA_NUM_PREDICT, 'num_predict is sent in options');
+  assert(captured.options.num_ctx === 4096, 'num_ctx 4096 is sent in options');
+  assert(captured.stream === false, 'stream stays false (one complete response object)');
+  assert(captured.format === 'json', 'format:json still forces syntactically valid JSON');
+  assert(captured.prompt.length < 4000, 'the wire prompt is the small one');
+}
+
+section('[19] A bare decision object is accepted (the new output shape)');
+{
+  const AI = loadAIService();
+  const c = AI.__ollamaInternals.ollamaCoerceChartStructure;
+  // What the new prompt asks for: decision fields at the top level.
+  const flat = c({ finalDecision:'WAIT', tradeGrade:'C', trend:'sideways', reasoningSummary:'Mid-range chop.' });
+  assert(flat.decision !== null, 'top-level decision fields are recognised');
+  assert(flat.decision.finalDecision === 'WAIT', 'finalDecision read from the flat shape');
+  assert(flat.decision.trend === 'Sideways', 'trend normalized from the flat shape');
+  // A model that wraps them anyway must still work.
+  const wrapped = c({ decision: { finalDecision:'BUY', reasoningSummary:'Swept lows then BOS.' } });
+  assert(wrapped.decision.finalDecision === 'BUY', 'a wrapped decision object still works');
+  // Structural arrays come back empty — the caller discards them regardless.
+  assert(flat.swings.length === 0 && flat.fvgs.length === 0, 'structural arrays are empty, engines own them');
+  assert(flat.tradeLevels === null, 'Ollama no longer supplies tradeLevels — deterministic levels are preserved');
+}
+
+section('[20] Timing diagnostics are recorded from Ollama\'s own counters');
+{
+  let call = 0;
+  const AI = loadAIService(() => {
+    call++;
+    return jsonResponse({
+      response: JSON.stringify({ finalDecision:'WAIT', reasoningSummary:'Chop.', trend:'Sideways' }),
+      prompt_eval_count: 512, prompt_eval_duration: 3.2e9,
+      eval_count: 240, eval_duration: 12e9,
+      load_duration: 1.5e9, total_duration: 16.7e9
+    });
+  });
+  AI.setProviderName('ollama');
+  const resp20 = await AI.analyzeChartStructure(FULL_PAYLOAD);
+  assert(resp20.status === 'ok', 'a fast response resolves ok');
+  assert(resp20.data.decision.finalDecision === 'WAIT', 'the decision reaches the panel');
+  const timing = sandboxTiming(AI);
+  assert(timing !== null, 'timing is recorded on DannyChart.lastOllamaTiming');
+  assert(timing.promptTokensActual === 512, 'prompt token count comes from Ollama\'s prompt_eval_count, not an estimate');
+  assert(timing.outputTokens === 240, 'output token count comes from Ollama\'s eval_count');
+  assert(timing.generateSec === 12, 'generation duration read from eval_duration (ns -> s)');
+  assert(timing.tokensPerSec === 20, 'tokens/sec is measured (240 tokens / 12s), not guessed');
+  assert(timing.totalSec === 16.7, 'total duration read from total_duration');
+  assert(timing.hitPredictCap === false, 'the generation did not hit the num_predict cap');
+  assert(timing.numCtx === 4096 && timing.numPredict === 800, 'the effective limits are recorded alongside');
+}
+
+section('[21] End-to-end: a realistic Qwen answer populates the Decision Panel fields');
+{
+  const AI = loadAIService(() => jsonResponse({
+    // Deliberately sloppy, the way a 1.5B model actually answers.
+    response: '```json\n' + JSON.stringify({
+      finalDecision: 'NO TRADE',
+      tradeGrade: 'C',
+      marketPhase: 'Ranging',
+      trapRisk: 'moderate',
+      liquidityTarget: 'Equal highs near 24177',
+      tradeQuality: 'Low',
+      confidence: 35,
+      reasoningSummary: 'Price sits near equilibrium after a bearish BOS with no clean displacement.',
+      riskReward: '1:1.5',
+      trend: 'sideways',
+      structureSummary: 'Mixed BOS and CHOCH across the window.',
+      lastStructureEvent: 'BOS bearish at index 152',
+      invalidationLevel: '24192.4',
+      educationalNotes: ['Mid-range entries carry poor risk-to-reward.']
+    }) + '\n```',
+    prompt_eval_count: 505, eval_count: 210, eval_duration: 9e9, total_duration: 12e9
+  }));
+  AI.setProviderName('ollama');
+  const resp21 = await AI.analyzeChartStructure(FULL_PAYLOAD);
+  {
+    assert(resp21.status === 'ok', 'status ok');
+    const d = resp21.data.decision;
+    assert(d !== null, 'decision object survives');
+    assert(d.finalDecision === 'NO_TRADE', 'REASONING/DECISION: NO_TRADE (was "Not available")');
+    assert(d.tradeQuality === 'Low', 'TRADE QUALITY populated');
+    assert(d.tradeGrade === 'C', 'TRADE GRADE populated');
+    assert(d.riskReward === +(1/1.5).toFixed(10) || Math.abs(d.riskReward - 0.6667) < 0.001, 'RISK & REWARD parsed from "1:1.5"');
+    assert(d.marketPhase === 'Ranging', 'MARKET PHASE populated');
+    assert(d.confidence === 0.35, 'confidence 35 read as 0.35');
+    assert(d.trapRisk === 'Moderate' && d.trend === 'Sideways', 'enum casing repaired');
+    assert(resp21.data.tradeLevels === null, 'no fabricated trade levels came back');
+  }
 }
 
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
