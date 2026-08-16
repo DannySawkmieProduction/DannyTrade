@@ -64,7 +64,9 @@ const TYPE_TO_LAYER = {
   SWING_HIGH:'marketStructure', SWING_LOW:'marketStructure',
   BOS:'marketStructure', CHOCH:'marketStructure', MSS:'marketStructure',
   PREMIUM_DISCOUNT:'premiumDiscount', ORDER_BLOCK:'orderBlocks',
-  FVG:'fvg', LIQUIDITY:'liquidity', TRADE_LEVEL:'tradeLevels'
+  FVG:'fvg', LIQUIDITY:'liquidity', TRADE_LEVEL:'tradeLevels',
+  // Phase 3 — must match chart-renderer.js's real TYPE_TO_LAYER exactly.
+  SUPPORT_RESISTANCE:'supportResistance', VOLUME_EVENT:'volume'
 };
 
 const DC = loadModules();
