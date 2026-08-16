@@ -37,6 +37,17 @@
     if(seconds < 60) return seconds + 's ago';
     return Math.round(seconds / 60) + 'm ago';
   }
+  // Pure display formatting only — reads the already-normalized
+  // YYYY-MM-DD `.date` (see option-chain-provider.js's normalizeExpiry())
+  // and renders it as "18 Aug 2026". Never computes or alters the
+  // expiry date itself — classifyExpirySession()'s calculation is
+  // completely untouched and reads the same `.date` field.
+  function fmtExpiryDate(expiry){
+    if(!expiry || !expiry.date) return 'DATA UNAVAILABLE';
+    const d = new Date(expiry.date + 'T00:00:00Z');
+    if(isNaN(d.getTime())) return expiry.date; // fall back to the raw string rather than hide it
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  }
 
   const DECISION_DISPLAY = {
     CALL_BIAS: { label: 'CALL BIAS', color: '#35D399' },
@@ -164,7 +175,7 @@
           `<div style="margin-top:6px;padding:10px 12px;border:1px dashed var(--red,#FF5C6C);border-radius:8px;background:rgba(255,92,108,0.08);font-size:12px;color:var(--text-dim,#8D93A6)">${esc((oc && oc.reason) || 'No option-chain data source is currently connected.')}</div>`;
       }
       return sectionTitle('OPTIONS SNAPSHOT') + `<div style="margin-top:6px">
-        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Expiry</span><span style="font-family:var(--font-mono,monospace)">${oc.expiry ? esc(oc.expiry.expiry || oc.expiry.date) : 'DATA UNAVAILABLE'}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Expiry</span><span style="font-family:var(--font-mono,monospace)">${esc(fmtExpiryDate(oc.expiry))}</span></div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">ATM Strike</span><span style="font-family:var(--font-mono,monospace)">${atmStrike != null ? esc(String(atmStrike)) : 'DATA UNAVAILABLE'}</span></div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft,#1B2030);font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Call OI (aggregate)</span><span style="font-family:var(--font-mono,monospace)">${oc.aggregate.callOi != null ? esc(String(oc.aggregate.callOi)) : 'DATA UNAVAILABLE'}</span></div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:12.5px"><span style="color:var(--text-dim,#8D93A6)">Put OI (aggregate)</span><span style="font-family:var(--font-mono,monospace)">${oc.aggregate.putOi != null ? esc(String(oc.aggregate.putOi)) : 'DATA UNAVAILABLE'}</span></div>
