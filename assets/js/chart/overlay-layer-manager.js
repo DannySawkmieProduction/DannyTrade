@@ -43,11 +43,18 @@
       { key: 'fvg',              label: 'Fair Value Gaps',      rendererLayer: 'fvg',                color: STYLES.FVG ? STYLES.FVG.subtypeColor.bullish : '#35D399', dataAvailable: true },
       { key: 'premiumDiscount',  label: 'Premium / Discount',   rendererLayer: 'premiumDiscount',    color: '#D4AF6A', dataAvailable: true },
       { key: 'tradeLevels',      label: 'Trade Levels',         rendererLayer: 'tradeLevels',         color: STYLES.TRADE_LEVEL ? STYLES.TRADE_LEVEL.subtypeColor.entry : '#D4AF6A', dataAvailable: true },
-      // Pending — real, independently-toggleable layers with no data
-      // source yet (their Analysis Engines are still Phase 5A work).
-      { key: 'volume',           label: 'Volume',               rendererLayer: 'volume',             color: PENDING_COLOR, dataAvailable: false },
-      { key: 'trend',            label: 'Trend',                rendererLayer: 'trend',              color: PENDING_COLOR, dataAvailable: false },
-      { key: 'supportResistance',label: 'Support & Resistance', rendererLayer: 'supportResistance',  color: PENDING_COLOR, dataAvailable: false }
+      // Phase 3 — volume and supportResistance now have real
+      // annotations feeding their (previously empty) canvas layers via
+      // analysis-context-adapter.js -> annotation-model.js. 'trend' is
+      // deliberately different: TrendEngine's output has no price
+      // anchor, so it is represented as a chart-level DOM badge (see
+      // trend-badge.js) rather than forced into this canvas layer,
+      // which stays real-but-empty; the toggle still does something
+      // meaningful because studio-bootstrap.js wires this SAME
+      // visibility event to trendBadgeInstance.setVisible().
+      { key: 'volume',           label: 'Volume',               rendererLayer: 'volume',             color: STYLES.VOLUME_EVENT ? STYLES.VOLUME_EVENT.subtypeColor.spike : '#FFA53C', dataAvailable: true },
+      { key: 'trend',            label: 'Trend',                rendererLayer: 'trend',              color: PENDING_COLOR, dataAvailable: true },
+      { key: 'supportResistance',label: 'Support & Resistance', rendererLayer: 'supportResistance',  color: STYLES.SUPPORT_RESISTANCE ? STYLES.SUPPORT_RESISTANCE.subtypeColor.support : '#4FD1E8', dataAvailable: true }
     ];
   }
 

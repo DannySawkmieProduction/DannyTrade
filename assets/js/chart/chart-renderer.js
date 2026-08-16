@@ -145,6 +145,20 @@
       shape: 'line-h', legend: 'Trade Levels',
       subtypeColor: { entry: '#D4AF6A', stop_loss: '#FF5C6C', target_1: '#35D399', target_2: '#35D399', target_3: '#35D399', invalidation: '#FFA53C' },
       subtypeDash: { entry: [], stop_loss: [], target_1: [], target_2: [4,3], target_3: [1,3], invalidation: [6,3] }
+    },
+    // Phase 3 — the two additions below reuse EXISTING shapes verbatim
+    // ('line-h' already drawn for TRADE_LEVEL; 'liquidity' already drawn
+    // for LIQUIDITY). No new paint() branch, no new coordinate math, no
+    // new shape. Only a STYLES entry + a TYPE_TO_LAYER mapping (below) —
+    // exactly the "zero further changes to this file" path the original
+    // 'volume'/'trend'/'supportResistance' comment already anticipated.
+    SUPPORT_RESISTANCE: {
+      shape: 'line-h', legend: 'Support / Resistance',
+      subtypeColor: { support: '#4FD1E8', resistance: '#FF8AD8' }
+    },
+    VOLUME_EVENT: {
+      shape: 'liquidity', legend: 'Volume Events',
+      subtypeColor: { spike: '#FFA53C', climax: '#FF5C6C' }
     }
   };
 
@@ -165,7 +179,13 @@
     ORDER_BLOCK: 'orderBlocks',
     FVG: 'fvg',
     LIQUIDITY: 'liquidity',
-    TRADE_LEVEL: 'tradeLevels'
+    TRADE_LEVEL: 'tradeLevels',
+    // Phase 3 — these two layers existed, empty, since Phase 5B
+    // specifically so this pairing could be added later with "zero
+    // further changes to this file" beyond this mapping + the STYLES
+    // entries above. No layer was renamed or repurposed.
+    SUPPORT_RESISTANCE: 'supportResistance',
+    VOLUME_EVENT: 'volume'
   };
 
   // 'volume'/'trend'/'supportResistance' are intentionally empty today —
@@ -301,7 +321,7 @@
         ctx.globalAlpha = alpha*0.35; ctx.fillStyle = color; ctx.fillRect(rx,ry,rw,rh);
         ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = 1;
         ctx.setLineDash([3,3]); ctx.strokeRect(rx,ry,rw,rh); ctx.setLineDash([]);
-        dc.queueLabel(ann.label, rx+6, ry+14, color, 'left');
+        dc.queueLabel(ann.label, rx+6, ry+14, color, 'left', ann.strength);
         dc.registerHit(ann, rx, ry, rw, rh);
         recordDiag({ x: rx, y: ry, painted: true, insideViewport: isInsideViewport(rx, ry, dc) || isInsideViewport(rx+rw, ry+rh, dc) });
       }
@@ -316,7 +336,7 @@
         ctx.lineWidth = ann.type === 'TRADE_LEVEL' ? 1.6 : 1.4;
         ctx.setLineDash(styleDef.subtypeDash ? (styleDef.subtypeDash[ann.subtype]||[]) : (styleDef.dash||[]));
         ctx.beginPath(); ctx.moveTo(x1,y); ctx.lineTo(x2,y); ctx.stroke(); ctx.setLineDash([]);
-        dc.queueLabel(ann.label, x2-6, y-8, color, 'right');
+        dc.queueLabel(ann.label, x2-6, y-8, color, 'right', ann.strength);
         dc.registerHit(ann, Math.min(x1,x2)-4, y-8, Math.abs(x2-x1)+8, 16);
         recordDiag({ x: x1, y: y, painted: true, insideViewport: isInsideViewport(x1, y, dc) || isInsideViewport(x2, y, dc) });
       }
@@ -330,7 +350,7 @@
         ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = 1.2;
         ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(x1,y); ctx.lineTo(x2,y); ctx.stroke(); ctx.setLineDash([]);
         ctx.beginPath(); ctx.arc(x2,y,3,0,Math.PI*2); ctx.fillStyle = color; ctx.fill();
-        dc.queueLabel(ann.label, x2+6, y-6, color, 'left');
+        dc.queueLabel(ann.label, x2+6, y-6, color, 'left', ann.strength);
         dc.registerHit(ann, x1-4, y-10, 60, 20);
         recordDiag({ x: x1, y: y, painted: true, insideViewport: isInsideViewport(x1, y, dc) || isInsideViewport(x2, y, dc) });
       }
@@ -562,7 +582,14 @@
         layerName: null,
         timeToX: t => timeScale.timeToCoordinate(t),
         priceToY: p => series.priceToCoordinate(p),
-        queueLabel: (text,x,y,color,align) => { if(text) labelQueue.push({text,x,y,color,align}); },
+        // Phase 3 — `priority` is a new, optional 6th argument (existing
+        // call sites without it default to 0, identical to before). It
+        // is read from the annotation's own already-existing 0-1
+        // `strength` field (order-block quality score, S/R persistence
+        // score, FVG freshness, etc. — each already computed by its
+        // engine) — no new trading signal, no new threshold, purely a
+        // presentation-ordering value for the collision pass below.
+        queueLabel: (text,x,y,color,align,priority) => { if(text) labelQueue.push({text,x,y,color,align,priority: typeof priority === 'number' ? priority : 0}); },
         registerHit: (ann,x,y,w,h) => hitRegions.push({ ann, x, y, w, h })
       };
 
@@ -572,7 +599,29 @@
       });
 
       // Layer 7: labels painted last, always on top of every zone/line.
-      labelQueue.forEach(({text,x,y,color,align}) => drawLabel(text,x,y,color,align));
+      // Phase 3 — VISUAL DENSITY FIX: this suppresses OVERLAPPING TEXT
+      // only. It never removes, hides, or resizes a shape/zone/line —
+      // every Drawable painted above is completely unaffected; only
+      // whether ITS LABEL gets text drawn on top of it. Ordering is by
+      // `priority` (the annotation's own existing 0-1 `strength` field,
+      // set above at each queueLabel() call site) descending, so the
+      // strongest/freshest structure's label wins a shared position and
+      // a weaker one silently keeps its shape but loses its label rather
+      // than drawing illegible overlapping text. Ties keep paint order
+      // (unchanged behavior for any annotation that doesn't carry a
+      // priority — the array is already stable-sorted by construction).
+      const placedLabelRects = [];
+      const sortedLabels = labelQueue.slice().sort((a, b) => (b.priority || 0) - (a.priority || 0));
+      sortedLabels.forEach(entry => {
+        const w = measureLabelWidth(entry.text);
+        const bx = entry.align === 'right' ? entry.x - w : entry.x;
+        const rect = { x: bx, y: entry.y - 11, w, h: 15 };
+        const overlaps = placedLabelRects.some(r =>
+          rect.x < r.x + r.w && rect.x + rect.w > r.x && rect.y < r.y + r.h && rect.y + rect.h > r.y);
+        if(overlaps) return; // shape/zone/line for this annotation was already painted above — only the text is skipped
+        placedLabelRects.push(rect);
+        drawLabel(entry.text, entry.x, entry.y, entry.color, entry.align);
+      });
 
       lastHitRegions = hitRegions;
       paintHistory.push({
@@ -594,9 +643,19 @@
       };
     }
 
+    const LABEL_FONT = '600 10.5px "JetBrains Mono", monospace';
+    const LABEL_PAD_X = 5;
+    /** Same font/padding drawLabel() uses, exposed standalone so the
+     *  Phase 3 collision pass can compute a label's rect BEFORE deciding
+     *  whether to draw it, without duplicating the font string. */
+    function measureLabelWidth(text){
+      ctx.font = LABEL_FONT;
+      return ctx.measureText(text).width + LABEL_PAD_X*2;
+    }
+
     function drawLabel(text, x, y, color, align){
-      ctx.font = '600 10.5px "JetBrains Mono", monospace';
-      const padX = 5;
+      ctx.font = LABEL_FONT;
+      const padX = LABEL_PAD_X;
       const w = ctx.measureText(text).width + padX*2;
       const bx = align === 'right' ? x - w : x;
       ctx.fillStyle = 'rgba(18,22,31,0.85)';

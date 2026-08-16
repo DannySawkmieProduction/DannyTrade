@@ -57,13 +57,23 @@
      - No DOM, no network, no globals besides its own export, no state.
      - Pure: same context + same candles => same output.
 
+   PHASE 3 UPDATE — supportResistance, volumeEvents, and oteZones are now
+   translated (see toSupportResistance/toVolumeEvents/toOteZones below).
+   Each required one small, additive, justified change to a protected
+   file — SUPPORT_RESISTANCE and VOLUME_EVENT were added to
+   annotation-model.js and chart-renderer.js by REUSING existing shapes
+   ('line-h', 'liquidity') with zero new drawing code; OTE zones reuse
+   the existing PREMIUM_DISCOUNT type/layer/shape entirely (new subtypes
+   'oteBullish'/'oteBearish' only) and required NO chart-renderer.js
+   change at all. See PHASE_3_ROOT_CAUSES.md for the full justification.
+
    NOT TRANSLATED, DELIBERATELY:
-     - supportResistance, volume, trend — annotation-model.js has no
-       annotation type for these and chart-renderer.js's TYPE_TO_LAYER
-       has no entry for them. Both are protected files. Emitting them
-       here would produce annotations the renderer silently drops.
-       Their overlay buttons therefore stay correctly empty until those
-       two contracts are extended (see the report's "remaining work").
+     - trend — the engine's output (bullish/bearish state + strength per
+       resolution, with segments/transitions) has no natural price
+       anchor; it describes the WHOLE window, not a point or a zone. Per
+       the brief's own guidance, this is represented as a chart-level
+       state (see assets/js/chart/trend-badge.js), not forced into a
+       price annotation it doesn't semantically fit.
      - tradeLevels — no deterministic engine produces an entry/stop/
        target set. It stays null here and is merged in from the AI
        response by the caller ONLY if the AI actually returned one.
@@ -228,6 +238,61 @@
     };
   }
 
+  /** Phase 3 — supportResistance.levels -> analysis.supportResistance.
+   *  Field names already align 1:1 (type/price/startIndex/extendToIndex/
+   *  status/touchCount); only strengthScore -> strength (0-100 -> 0-1)
+   *  needs converting, same as order blocks above. */
+  function toSupportResistance(sr){
+    const list = sr && Array.isArray(sr.levels) ? sr.levels : [];
+    return list
+      .filter(l => l && isNum(l.price) && isNum(l.startIndex) && (l.type === 'support' || l.type === 'resistance'))
+      .map(l => ({
+        type: l.type,
+        price: l.price,
+        startIndex: l.startIndex,
+        extendToIndex: isNum(l.extendToIndex) ? l.extendToIndex : l.startIndex,
+        status: l.status || null,
+        touchCount: isNum(l.touchCount) ? l.touchCount : 0,
+        strength: score01(l.strengthScore),
+        observation: `${l.type === 'support' ? 'Support' : 'Resistance'} at ${l.price}${l.status ? ' (' + l.status + ')' : ''}, strength ${isNum(l.strengthScore) ? l.strengthScore : '\u2014'}/100.`,
+        evidence: isNum(l.touchCount) ? `Touched ${l.touchCount} time${l.touchCount === 1 ? '' : 's'}${isNum(l.firstTouchIndex) ? ' since candle ' + l.firstTouchIndex : ''}.` : ''
+      }));
+  }
+
+  /** Phase 3 — volume.events -> analysis.volumeEvents. The engine gives
+   *  an index/time but no price (a volume event isn't a price level) —
+   *  the candle's own high at that index is used as the marker's anchor,
+   *  a real value read from the candle the engine analyzed, not invented. */
+  function toVolumeEvents(vol, candles){
+    const list = vol && Array.isArray(vol.events) ? vol.events : [];
+    return list
+      .filter(v => v && isNum(v.index) && (v.type === 'spike' || v.type === 'climax') && candles && candles[v.index])
+      .map(v => {
+        const rvol = v.metadata && isNum(v.metadata.rvol) ? v.metadata.rvol : null;
+        return {
+          type: v.type,
+          index: v.index,
+          price: candles[v.index].high,
+          strength: rvol !== null ? Math.max(0, Math.min(1, rvol / 5)) : 0.5,
+          observation: rvol !== null ? `Volume ${v.type}: ${rvol.toFixed(1)}\u00d7 average.` : `Volume ${v.type}.`,
+          evidence: v.metadata && isNum(v.metadata.volume) && isNum(v.metadata.averageVolume)
+            ? `Volume ${Math.round(v.metadata.volume)} vs average ${Math.round(v.metadata.averageVolume)}.` : ''
+        };
+      });
+  }
+
+  /** Phase 3 — premiumDiscount.zones (the oteBullish/oteBearish entries
+   *  the range/premium/discount/equilibrium translator above does not
+   *  use) -> analysis.oteZones. Same zones array, a different filter —
+   *  no second computation, no new engine call. */
+  function toOteZones(pd){
+    const zones = pd && Array.isArray(pd.zones) ? pd.zones : [];
+    return zones
+      .filter(z => z && (z.type === 'oteBullish' || z.type === 'oteBearish') &&
+                   isNum(z.top) && isNum(z.bottom) && isNum(z.startIndex) && isNum(z.endIndex))
+      .map(z => ({ type: z.type, top: z.top, bottom: z.bottom, startIndex: z.startIndex, endIndex: z.endIndex }));
+  }
+
   /* ---------------------------------------------------------------
      Public entry point
   --------------------------------------------------------------- */
@@ -253,7 +318,8 @@
       return {
         version: STRUCTURED_ANALYSIS_VERSION, timeframe,
         swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
-        premiumDiscount: null, tradeLevels: null, decision: null
+        premiumDiscount: null, tradeLevels: null, decision: null,
+        supportResistance: [], volumeEvents: [], oteZones: []
       };
     }
 
@@ -267,7 +333,11 @@
       liquidity: toLiquidity(context.liquidity),
       premiumDiscount: toPremiumDiscount(context.premiumDiscount, candles),
       tradeLevels: null, // no deterministic engine produces these — see file header
-      decision: null     // owned by the AI layer / decision-panel.js
+      decision: null,    // owned by the AI layer / decision-panel.js
+      // Phase 3
+      supportResistance: toSupportResistance(context.supportResistance),
+      volumeEvents: toVolumeEvents(context.volume, candles),
+      oteZones: toOteZones(context.premiumDiscount)
     };
   }
 
@@ -287,7 +357,8 @@
                         len(context && context.liquidity && context.liquidity.sellSideLiquidity),
         sweeps: len(context && context.liquidity && context.liquidity.sweeps),
         premiumDiscountZones: len(context && context.premiumDiscount && context.premiumDiscount.zones),
-        supportResistanceLevels: len(context && context.supportResistance && context.supportResistance.levels)
+        supportResistanceLevels: len(context && context.supportResistance && context.supportResistance.levels),
+        volumeEvents: len(context && context.volume && context.volume.events)
       },
       structured: {
         swings: len(structured && structured.swings),
@@ -296,7 +367,10 @@
         fvgs: len(structured && structured.fvgs),
         liquidity: len(structured && structured.liquidity),
         premiumDiscount: (structured && structured.premiumDiscount) ? 1 : 0,
-        tradeLevels: (structured && structured.tradeLevels) ? 1 : 0
+        tradeLevels: (structured && structured.tradeLevels) ? 1 : 0,
+        supportResistance: len(structured && structured.supportResistance),
+        volumeEvents: len(structured && structured.volumeEvents),
+        oteZones: len(structured && structured.oteZones)
       },
       // annotation-model.js builds liquidity ids as `liq_<subtype>_<index>`
       // with no direction component, so a buy-side and a sell-side sweep
@@ -311,10 +385,12 @@
         });
         return dup;
       })(),
+      // Phase 3 — supportResistance, volumeEvents, and oteZones are now
+      // rendered (SUPPORT_RESISTANCE / VOLUME_EVENT / PREMIUM_DISCOUNT
+      // types added to annotation-model.js + chart-renderer.js). Trend
+      // is deliberately NOT a canvas annotation — see trend-badge.js.
       notRendered: {
-        supportResistance: 'no annotation type in annotation-model.js / TYPE_TO_LAYER (both protected)',
-        volume: 'same',
-        trend: 'same'
+        trend: 'chart-level state, not a price annotation — see assets/js/chart/trend-badge.js'
       }
     };
   }

@@ -99,6 +99,13 @@
        observation, evidence, reasoning, tradingImplication
      } | null,
 
+     // Phase 3 — all three OPTIONAL. Absent/undefined is identical to [].
+     // See the fromSupportResistance/fromVolumeEvents/fromOteZones doc
+     // comments below for the full per-item shape.
+     supportResistance: [ { type, price, startIndex, extendToIndex, status, touchCount, strength } ] | undefined,
+     volumeEvents: [ { type: 'spike'|'climax', index, price, strength } ] | undefined,
+     oteZones: [ { type: 'oteBullish'|'oteBearish', top, bottom, startIndex, endIndex } ] | undefined,
+
      // Not converted into a chart Annotation — read directly by the
      // AI Decision Panel (decision-panel.js) instead.
      decision: {
@@ -111,22 +118,6 @@
 
 (function initAnnotationModel(){
   window.DannyChart = window.DannyChart || {};
-
-  /* ---------------------------------------------------------------
-     Shared enum constants — the single source of truth for each
-     section's valid string values, used by BOTH the real fromX()
-     filters below AND the diagnostic explainXRejection() functions
-     (see buildAnnotations()). Previously each fromX() declared its
-     own local `validTypes`/`validSubtypes` array; hoisting them here
-     means the diagnostics can never silently drift out of sync with
-     the actual accept/reject logic — there is exactly one array per
-     enum, referenced from both places.
-  --------------------------------------------------------------- */
-  const SWING_TYPES = ['high', 'low'];
-  const STRUCTURE_EVENT_TYPES = ['BOS', 'CHOCH', 'MSS'];
-  const ORDER_BLOCK_SUBTYPES = ['bullish', 'bearish', 'breaker', 'mitigation'];
-  const FVG_SUBTYPES = ['bullish', 'bearish', 'filled', 'unfilled'];
-  const LIQUIDITY_SUBTYPES = ['buyside', 'sellside', 'equal_highs', 'equal_lows', 'sweep', 'stop_hunt', 'liquidity_target'];
 
   /* ---------------------------------------------------------------
      Versioning — bump CURRENT_VERSION whenever the Structured
@@ -209,7 +200,7 @@
 
   function fromSwings(candles, timeframe, swings){
     return (swings || [])
-      .filter(s => s && SWING_TYPES.includes(s.type) && isNum(s.price) && isNum(s.index))
+      .filter(s => s && (s.type === 'high' || s.type === 'low') && isNum(s.price) && isNum(s.index))
       .map(s => createAnnotation({
       id: makeId('swing', s.type, s.index),
       type: s.type === 'high' ? 'SWING_HIGH' : 'SWING_LOW',
@@ -231,8 +222,9 @@
   }
 
   function fromStructureEvents(candles, timeframe, events){
+    const validTypes = ['BOS','CHOCH','MSS'];
     return (events || [])
-      .filter(e => e && STRUCTURE_EVENT_TYPES.includes(e.type) && isNum(e.level) && isNum(e.index) && (e.direction === 'bullish' || e.direction === 'bearish'))
+      .filter(e => e && validTypes.includes(e.type) && isNum(e.level) && isNum(e.index) && (e.direction === 'bullish' || e.direction === 'bearish'))
       .map(e => createAnnotation({
       id: makeId(e.type.toLowerCase(), e.index),
       type: e.type, // 'BOS' | 'CHOCH' | 'MSS'
@@ -254,8 +246,9 @@
   }
 
   function fromOrderBlocks(candles, timeframe, orderBlocks){
+    const validSubtypes = ['bullish','bearish','breaker','mitigation'];
     return (orderBlocks || [])
-      .filter(ob => ob && ORDER_BLOCK_SUBTYPES.includes(ob.subtype) && isNum(ob.priceHigh) && isNum(ob.priceLow) && isNum(ob.startIndex) && isNum(ob.endIndex))
+      .filter(ob => ob && validSubtypes.includes(ob.subtype) && isNum(ob.priceHigh) && isNum(ob.priceLow) && isNum(ob.startIndex) && isNum(ob.endIndex))
       .map(ob => createAnnotation({
       id: makeId('ob', ob.subtype, ob.startIndex),
       type: 'ORDER_BLOCK',
@@ -280,8 +273,9 @@
   }
 
   function fromFVGs(candles, timeframe, fvgs){
+    const validSubtypes = ['bullish','bearish','filled','unfilled'];
     return (fvgs || [])
-      .filter(f => f && FVG_SUBTYPES.includes(f.subtype) && isNum(f.top) && isNum(f.bottom) && isNum(f.index))
+      .filter(f => f && validSubtypes.includes(f.subtype) && isNum(f.top) && isNum(f.bottom) && isNum(f.index))
       .map(f => createAnnotation({
       id: makeId('fvg', f.subtype, f.index),
       type: 'FVG',
@@ -306,8 +300,9 @@
   }
 
   function fromLiquidity(candles, timeframe, liquidity){
+    const validSubtypes = ['buyside','sellside','equal_highs','equal_lows','sweep','stop_hunt','liquidity_target'];
     return (liquidity || [])
-      .filter(l => l && LIQUIDITY_SUBTYPES.includes(l.subtype) && isNum(l.price) && isNum(l.index))
+      .filter(l => l && validSubtypes.includes(l.subtype) && isNum(l.price) && isNum(l.index))
       .map(l => createAnnotation({
       id: makeId('liq', l.subtype, l.index),
       type: 'LIQUIDITY',
@@ -443,55 +438,99 @@
   function capitalize(s){ return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
   /* ---------------------------------------------------------------
-     Diagnostics-only "why would this item be rejected" functions —
-     added to close the exact gap that caused annotations to vanish
-     silently: a fromX() filter dropping items produced NO signal
-     anywhere. These NEVER influence what buildAnnotations() returns;
-     they re-check the SAME shared enum constants (SWING_TYPES etc.)
-     and the SAME isNum() used by the real filters above, so they
-     cannot drift into reporting a different accept/reject outcome
-     than the real filter actually applied. Each returns a human-
-     readable reason string, or null if the item would have passed
-     (i.e. it's not actually rejected).
+     PHASE 3 — three new OPTIONAL Structured Analysis sections. Each
+     follows the exact pattern every section above already uses:
+     filter first, map to createAnnotation(), degrade to [] on absent/
+     malformed input via safeSection() in buildAnnotations() below.
+     Adding an optional field to the input contract does not change
+     any existing field or any existing annotation this file already
+     produces — a caller that never sets these three fields (every
+     caller before Phase 3) gets byte-identical output to before.
+
+     supportResistance: [
+       { type: 'support'|'resistance', price, startIndex, extendToIndex,
+         status, touchCount, strength, observation, evidence }
+     ]
+     volumeEvents: [
+       { type: 'spike'|'climax', index, price, observation, evidence }
+     ]
+     oteZones: [
+       { type: 'oteBullish'|'oteBearish', top, bottom, startIndex, endIndex }
+     ]
   --------------------------------------------------------------- */
-  function explainSwingRejection(s){
-    if(!s || typeof s !== 'object') return 'item is not an object';
-    if(!SWING_TYPES.includes(s.type)) return `type must be exactly one of ${SWING_TYPES.join('/')} (case-sensitive) — got ${JSON.stringify(s.type)}`;
-    if(!isNum(s.price)) return `price must be a finite number — got ${JSON.stringify(s.price)}`;
-    if(!isNum(s.index)) return `index must be a finite number — got ${JSON.stringify(s.index)}`;
-    return null;
+
+  function fromSupportResistance(candles, timeframe, levels){
+    return (levels || [])
+      .filter(l => l && (l.type === 'support' || l.type === 'resistance') && isNum(l.price) && isNum(l.startIndex))
+      .map(l => createAnnotation({
+      id: makeId('sr', l.type, l.startIndex),
+      type: 'SUPPORT_RESISTANCE',
+      subtype: l.type,
+      timeframe,
+      startTime: timeAt(candles, l.startIndex),
+      endTime: timeAt(candles, isNum(l.extendToIndex) ? l.extendToIndex : candles.length - 1),
+      price1: l.price,
+      direction: l.type === 'support' ? 'bullish' : 'bearish',
+      strength: l.strength,
+      confidence: l.strength,
+      label: l.type === 'support' ? 'S' : 'R',
+      tooltip: {
+        observation: l.observation || `${capitalize(l.type)} at ${l.price}${l.status ? ' (' + l.status + ')' : ''}.`,
+        evidence: l.evidence || (isNum(l.touchCount) ? `Touched ${l.touchCount} time${l.touchCount === 1 ? '' : 's'}.` : ''),
+        reasoning: 'A level that has repeatedly held or repelled price is treated as more significant the longer it persists.',
+        tradingImplication: l.type === 'support' ? 'A defended support level is often used as a long entry or stop-placement reference.' : 'A defended resistance level is often used as a short entry or target reference.'
+      },
+      metadata: { startIndex: l.startIndex, touchCount: l.touchCount || 0, status: l.status || null }
+    }));
   }
-  function explainStructureEventRejection(e){
-    if(!e || typeof e !== 'object') return 'item is not an object';
-    if(!STRUCTURE_EVENT_TYPES.includes(e.type)) return `type must be exactly one of ${STRUCTURE_EVENT_TYPES.join('/')} (case-sensitive) — got ${JSON.stringify(e.type)}`;
-    if(!isNum(e.level)) return `level must be a finite number — got ${JSON.stringify(e.level)}`;
-    if(!isNum(e.index)) return `index must be a finite number — got ${JSON.stringify(e.index)}`;
-    if(!(e.direction === 'bullish' || e.direction === 'bearish')) return `direction must be exactly "bullish"/"bearish" (case-sensitive) — got ${JSON.stringify(e.direction)}`;
-    return null;
+
+  function fromVolumeEvents(candles, timeframe, events){
+    const validTypes = ['spike','climax'];
+    return (events || [])
+      .filter(v => v && validTypes.includes(v.type) && isNum(v.index) && isNum(v.price))
+      .map(v => createAnnotation({
+      id: makeId('vol', v.type, v.index),
+      type: 'VOLUME_EVENT',
+      subtype: v.type,
+      timeframe,
+      startTime: timeAt(candles, v.index),
+      price1: v.price,
+      direction: 'neutral',
+      strength: v.strength,
+      confidence: v.strength,
+      label: v.type === 'spike' ? 'Vol\u2191' : 'Climax',
+      tooltip: {
+        observation: v.observation || `Volume ${v.type} at candle ${v.index}.`,
+        evidence: v.evidence || 'Volume significantly exceeded its recent average on this candle.',
+        reasoning: v.type === 'climax' ? 'A volume climax often marks exhaustion of the current move.' : 'A volume spike often marks the start of a displacement or a reaction to news.',
+        tradingImplication: 'Context (where price is relative to structure) matters more than the volume event alone.'
+      },
+      metadata: { index: v.index }
+    }));
   }
-  function explainOrderBlockRejection(ob){
-    if(!ob || typeof ob !== 'object') return 'item is not an object';
-    if(!ORDER_BLOCK_SUBTYPES.includes(ob.subtype)) return `subtype must be exactly one of ${ORDER_BLOCK_SUBTYPES.join('/')} (case-sensitive) — got ${JSON.stringify(ob.subtype)}`;
-    if(!isNum(ob.priceHigh)) return `priceHigh must be a finite number — got ${JSON.stringify(ob.priceHigh)}`;
-    if(!isNum(ob.priceLow)) return `priceLow must be a finite number — got ${JSON.stringify(ob.priceLow)}`;
-    if(!isNum(ob.startIndex)) return `startIndex must be a finite number — got ${JSON.stringify(ob.startIndex)}`;
-    if(!isNum(ob.endIndex)) return `endIndex must be a finite number — got ${JSON.stringify(ob.endIndex)}`;
-    return null;
-  }
-  function explainFVGRejection(f){
-    if(!f || typeof f !== 'object') return 'item is not an object';
-    if(!FVG_SUBTYPES.includes(f.subtype)) return `subtype must be exactly one of ${FVG_SUBTYPES.join('/')} (case-sensitive) — got ${JSON.stringify(f.subtype)}`;
-    if(!isNum(f.top)) return `top must be a finite number — got ${JSON.stringify(f.top)}`;
-    if(!isNum(f.bottom)) return `bottom must be a finite number — got ${JSON.stringify(f.bottom)}`;
-    if(!isNum(f.index)) return `index must be a finite number — got ${JSON.stringify(f.index)}`;
-    return null;
-  }
-  function explainLiquidityRejection(l){
-    if(!l || typeof l !== 'object') return 'item is not an object';
-    if(!LIQUIDITY_SUBTYPES.includes(l.subtype)) return `subtype must be exactly one of ${LIQUIDITY_SUBTYPES.join('/')} (case-sensitive) — got ${JSON.stringify(l.subtype)}`;
-    if(!isNum(l.price)) return `price must be a finite number — got ${JSON.stringify(l.price)}`;
-    if(!isNum(l.index)) return `index must be a finite number — got ${JSON.stringify(l.index)}`;
-    return null;
+
+  function fromOteZones(candles, timeframe, zones){
+    const validTypes = ['oteBullish','oteBearish'];
+    return (zones || [])
+      .filter(z => z && validTypes.includes(z.type) && isNum(z.top) && isNum(z.bottom) && isNum(z.startIndex) && isNum(z.endIndex))
+      .map(z => createAnnotation({
+      id: makeId('ote', z.type, z.startIndex),
+      type: 'PREMIUM_DISCOUNT', // same layer/shape as premium/discount/equilibrium — see chart-renderer.js's 'auto' shape resolver
+      subtype: z.type,
+      timeframe,
+      startTime: timeAt(candles, z.startIndex),
+      endTime: timeAt(candles, z.endIndex),
+      price1: z.top, price2: z.bottom,
+      direction: z.type === 'oteBullish' ? 'bullish' : 'bearish',
+      strength: 0.5, confidence: 0.5,
+      label: 'OTE',
+      tooltip: {
+        observation: `${z.type === 'oteBullish' ? 'Bullish' : 'Bearish'} Optimal Trade Entry zone, ${z.bottom}\u2013${z.top}.`,
+        evidence: 'The 61.8%\u201379% (bearish) or 21%\u201338.2% (bullish) retracement of the current dealing range.',
+        reasoning: 'A deeper discount/premium sub-zone within the wider Premium/Discount range, commonly used to time entries.',
+        tradingImplication: `Favours looking for ${z.type === 'oteBullish' ? 'longs' : 'shorts'} within this zone rather than anywhere in the wider range.`
+      }
+    }));
   }
 
   /* ---------------------------------------------------------------
@@ -503,61 +542,31 @@
 
     const timeframe = analysis.timeframe;
 
-    // Dev-mode diagnostics — ADDITIVE ONLY. Records, per section, the
-    // raw item count, the accepted (post-filter) count, and a specific
-    // reason for every item that did not make it through — without
-    // changing which items are included in the returned array in any
-    // way. This is what makes "raw count non-zero, accepted count
-    // zero" (previously invisible) into a one-line, per-item-reasoned
-    // signal. Exposed as window.DannyChart.__lastAnnotationDiagnostics,
-    // mirroring the existing window.DannyChart.__lastDiagnostics
-    // pattern already used by studio-chart-init.js.
-    const diagnostics = {};
-
     // Each section runs in isolation: if one AI-provided section is
     // malformed enough to throw during conversion, we log it and skip
     // just that section rather than losing every other annotation.
-    function safeSection(name, fn, rawList, explainFn){
-      const raw = Array.isArray(rawList) ? rawList : (rawList ? [rawList] : []);
-      try{
-        const result = fn();
-        const entry = { raw: raw.length, accepted: result.length, rejections: [] };
-        if(explainFn && result.length < raw.length){
-          raw.forEach(item => {
-            const reason = explainFn(item);
-            if(reason) entry.rejections.push({ reason, item });
-          });
-        }
-        diagnostics[name] = entry;
-        return result;
-      }
+    function safeSection(name, fn){
+      try{ return fn(); }
       catch(err){
-        diagnostics[name] = { raw: raw.length, accepted: 0, rejections: [{ reason: 'threw during conversion: ' + err.message, item: null }] };
         console.warn(`[AnnotationModel] Skipping "${name}" section — malformed input:`, err.message);
         return [];
       }
     }
 
-    const result = [
-      ...safeSection('swings', () => fromSwings(candles, timeframe, analysis.swings), analysis.swings, explainSwingRejection),
-      ...safeSection('structureEvents', () => fromStructureEvents(candles, timeframe, analysis.structureEvents), analysis.structureEvents, explainStructureEventRejection),
-      ...safeSection('orderBlocks', () => fromOrderBlocks(candles, timeframe, analysis.orderBlocks), analysis.orderBlocks, explainOrderBlockRejection),
-      ...safeSection('fvgs', () => fromFVGs(candles, timeframe, analysis.fvgs), analysis.fvgs, explainFVGRejection),
-      ...safeSection('liquidity', () => fromLiquidity(candles, timeframe, analysis.liquidity), analysis.liquidity, explainLiquidityRejection),
-      // premiumDiscount/tradeLevels are single objects (not arrays) that
-      // already console.warn with a specific reason on incomplete input
-      // (see fromPremiumDiscount/fromTradeLevels above) — that existing,
-      // already-specific diagnostic is left as-is; no explainFn needed.
-      ...safeSection('premiumDiscount', () => fromPremiumDiscount(candles, timeframe, analysis.premiumDiscount), analysis.premiumDiscount, null),
-      ...safeSection('tradeLevels', () => fromTradeLevels(candles, timeframe, analysis.tradeLevels), analysis.tradeLevels, null)
+    return [
+      ...safeSection('swings', () => fromSwings(candles, timeframe, analysis.swings)),
+      ...safeSection('structureEvents', () => fromStructureEvents(candles, timeframe, analysis.structureEvents)),
+      ...safeSection('orderBlocks', () => fromOrderBlocks(candles, timeframe, analysis.orderBlocks)),
+      ...safeSection('fvgs', () => fromFVGs(candles, timeframe, analysis.fvgs)),
+      ...safeSection('liquidity', () => fromLiquidity(candles, timeframe, analysis.liquidity)),
+      ...safeSection('premiumDiscount', () => fromPremiumDiscount(candles, timeframe, analysis.premiumDiscount)),
+      ...safeSection('tradeLevels', () => fromTradeLevels(candles, timeframe, analysis.tradeLevels)),
+      // Phase 3 — optional; absent on any pre-Phase-3 caller, so this
+      // always contributes [] for them, changing nothing.
+      ...safeSection('supportResistance', () => fromSupportResistance(candles, timeframe, analysis.supportResistance)),
+      ...safeSection('volumeEvents', () => fromVolumeEvents(candles, timeframe, analysis.volumeEvents)),
+      ...safeSection('oteZones', () => fromOteZones(candles, timeframe, analysis.oteZones))
     ];
-
-    if(typeof window !== 'undefined'){
-      window.DannyChart = window.DannyChart || {};
-      window.DannyChart.__lastAnnotationDiagnostics = diagnostics;
-    }
-
-    return result;
   }
 
   /** Lightweight shape check — useful in dev, not required at runtime. */
