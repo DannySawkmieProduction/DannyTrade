@@ -65,6 +65,13 @@
       DataAdapter: window.DannyChart.DataAdapters,
       ChartRenderer: window.DannyChart.ChartRenderer,
       AnnotationModel: window.DannyChart.AnnotationModel,
+      // Normalization boundary (new) — sits between getStructuredAnalysis()'s
+      // raw AI response and AnnotationModel.buildAnnotations(). Optional by
+      // the same DI pattern as everything else here: if the script isn't
+      // loaded (older bundle, a test that doesn't need it), analysis passes
+      // through unchanged and buildAnnotations() behaves exactly as before —
+      // see resolveAnnotations()/loadAnalysis() below.
+      AnnotationNormalizer: window.DannyChart.AnnotationNormalizer,
       Legend: window.DannyChart.Legend,
       ReplayEngine: window.DannyChart.ReplayEngine,
       TimeframeManager: window.DannyChart.TimeframeManager,
@@ -228,7 +235,13 @@
           symbol: symbol
         });
       }
-      const annotations = config.AnnotationModel ? config.AnnotationModel.buildAnnotations(candles, analysis) : [];
+      // Normalize BEFORE buildAnnotations() — the one controlled boundary
+      // for legitimate AI-provider formatting variation (case, numeric
+      // strings). Never fabricates or invents anything; annotation-model.js's
+      // own validation remains the sole, unchanged authority on what's
+      // actually valid. See annotation-normalizer.js.
+      const normalizedAnalysis = config.AnnotationNormalizer ? config.AnnotationNormalizer.normalize(analysis) : analysis;
+      const annotations = config.AnnotationModel ? config.AnnotationModel.buildAnnotations(candles, normalizedAnalysis) : [];
       logDiagnostics(candles, analysis, annotations);
       return annotations;
     }
@@ -520,7 +533,8 @@
      *  switch. Pure composition, same as resolveAnnotations() above. */
     async function loadAnalysis(analysis){
       state.lastAnalysis = analysis;
-      const annotations = config.AnnotationModel ? config.AnnotationModel.buildAnnotations(state.lastCandles, analysis) : [];
+      const normalizedAnalysis = config.AnnotationNormalizer ? config.AnnotationNormalizer.normalize(analysis) : analysis;
+      const annotations = config.AnnotationModel ? config.AnnotationModel.buildAnnotations(state.lastCandles, normalizedAnalysis) : [];
       if(state.renderer) state.renderer.setAnnotations(annotations);
       if(state.decisionPanel) state.decisionPanel.update(analysis, {
         rendererState: state.renderer ? state.renderer.getState() : null,

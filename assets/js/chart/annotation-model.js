@@ -113,6 +113,22 @@
   window.DannyChart = window.DannyChart || {};
 
   /* ---------------------------------------------------------------
+     Shared enum constants — the single source of truth for each
+     section's valid string values, used by BOTH the real fromX()
+     filters below AND the diagnostic explainXRejection() functions
+     (see buildAnnotations()). Previously each fromX() declared its
+     own local `validTypes`/`validSubtypes` array; hoisting them here
+     means the diagnostics can never silently drift out of sync with
+     the actual accept/reject logic — there is exactly one array per
+     enum, referenced from both places.
+  --------------------------------------------------------------- */
+  const SWING_TYPES = ['high', 'low'];
+  const STRUCTURE_EVENT_TYPES = ['BOS', 'CHOCH', 'MSS'];
+  const ORDER_BLOCK_SUBTYPES = ['bullish', 'bearish', 'breaker', 'mitigation'];
+  const FVG_SUBTYPES = ['bullish', 'bearish', 'filled', 'unfilled'];
+  const LIQUIDITY_SUBTYPES = ['buyside', 'sellside', 'equal_highs', 'equal_lows', 'sweep', 'stop_hunt', 'liquidity_target'];
+
+  /* ---------------------------------------------------------------
      Versioning — bump CURRENT_VERSION whenever the Structured
      Analysis shape gains new required fields. buildAnnotations()
      never throws on a version mismatch; it warns and still tries to
@@ -193,7 +209,7 @@
 
   function fromSwings(candles, timeframe, swings){
     return (swings || [])
-      .filter(s => s && (s.type === 'high' || s.type === 'low') && isNum(s.price) && isNum(s.index))
+      .filter(s => s && SWING_TYPES.includes(s.type) && isNum(s.price) && isNum(s.index))
       .map(s => createAnnotation({
       id: makeId('swing', s.type, s.index),
       type: s.type === 'high' ? 'SWING_HIGH' : 'SWING_LOW',
@@ -215,9 +231,8 @@
   }
 
   function fromStructureEvents(candles, timeframe, events){
-    const validTypes = ['BOS','CHOCH','MSS'];
     return (events || [])
-      .filter(e => e && validTypes.includes(e.type) && isNum(e.level) && isNum(e.index) && (e.direction === 'bullish' || e.direction === 'bearish'))
+      .filter(e => e && STRUCTURE_EVENT_TYPES.includes(e.type) && isNum(e.level) && isNum(e.index) && (e.direction === 'bullish' || e.direction === 'bearish'))
       .map(e => createAnnotation({
       id: makeId(e.type.toLowerCase(), e.index),
       type: e.type, // 'BOS' | 'CHOCH' | 'MSS'
@@ -239,9 +254,8 @@
   }
 
   function fromOrderBlocks(candles, timeframe, orderBlocks){
-    const validSubtypes = ['bullish','bearish','breaker','mitigation'];
     return (orderBlocks || [])
-      .filter(ob => ob && validSubtypes.includes(ob.subtype) && isNum(ob.priceHigh) && isNum(ob.priceLow) && isNum(ob.startIndex) && isNum(ob.endIndex))
+      .filter(ob => ob && ORDER_BLOCK_SUBTYPES.includes(ob.subtype) && isNum(ob.priceHigh) && isNum(ob.priceLow) && isNum(ob.startIndex) && isNum(ob.endIndex))
       .map(ob => createAnnotation({
       id: makeId('ob', ob.subtype, ob.startIndex),
       type: 'ORDER_BLOCK',
@@ -266,9 +280,8 @@
   }
 
   function fromFVGs(candles, timeframe, fvgs){
-    const validSubtypes = ['bullish','bearish','filled','unfilled'];
     return (fvgs || [])
-      .filter(f => f && validSubtypes.includes(f.subtype) && isNum(f.top) && isNum(f.bottom) && isNum(f.index))
+      .filter(f => f && FVG_SUBTYPES.includes(f.subtype) && isNum(f.top) && isNum(f.bottom) && isNum(f.index))
       .map(f => createAnnotation({
       id: makeId('fvg', f.subtype, f.index),
       type: 'FVG',
@@ -293,9 +306,8 @@
   }
 
   function fromLiquidity(candles, timeframe, liquidity){
-    const validSubtypes = ['buyside','sellside','equal_highs','equal_lows','sweep','stop_hunt','liquidity_target'];
     return (liquidity || [])
-      .filter(l => l && validSubtypes.includes(l.subtype) && isNum(l.price) && isNum(l.index))
+      .filter(l => l && LIQUIDITY_SUBTYPES.includes(l.subtype) && isNum(l.price) && isNum(l.index))
       .map(l => createAnnotation({
       id: makeId('liq', l.subtype, l.index),
       type: 'LIQUIDITY',
@@ -431,6 +443,58 @@
   function capitalize(s){ return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
   /* ---------------------------------------------------------------
+     Diagnostics-only "why would this item be rejected" functions —
+     added to close the exact gap that caused annotations to vanish
+     silently: a fromX() filter dropping items produced NO signal
+     anywhere. These NEVER influence what buildAnnotations() returns;
+     they re-check the SAME shared enum constants (SWING_TYPES etc.)
+     and the SAME isNum() used by the real filters above, so they
+     cannot drift into reporting a different accept/reject outcome
+     than the real filter actually applied. Each returns a human-
+     readable reason string, or null if the item would have passed
+     (i.e. it's not actually rejected).
+  --------------------------------------------------------------- */
+  function explainSwingRejection(s){
+    if(!s || typeof s !== 'object') return 'item is not an object';
+    if(!SWING_TYPES.includes(s.type)) return `type must be exactly one of ${SWING_TYPES.join('/')} (case-sensitive) — got ${JSON.stringify(s.type)}`;
+    if(!isNum(s.price)) return `price must be a finite number — got ${JSON.stringify(s.price)}`;
+    if(!isNum(s.index)) return `index must be a finite number — got ${JSON.stringify(s.index)}`;
+    return null;
+  }
+  function explainStructureEventRejection(e){
+    if(!e || typeof e !== 'object') return 'item is not an object';
+    if(!STRUCTURE_EVENT_TYPES.includes(e.type)) return `type must be exactly one of ${STRUCTURE_EVENT_TYPES.join('/')} (case-sensitive) — got ${JSON.stringify(e.type)}`;
+    if(!isNum(e.level)) return `level must be a finite number — got ${JSON.stringify(e.level)}`;
+    if(!isNum(e.index)) return `index must be a finite number — got ${JSON.stringify(e.index)}`;
+    if(!(e.direction === 'bullish' || e.direction === 'bearish')) return `direction must be exactly "bullish"/"bearish" (case-sensitive) — got ${JSON.stringify(e.direction)}`;
+    return null;
+  }
+  function explainOrderBlockRejection(ob){
+    if(!ob || typeof ob !== 'object') return 'item is not an object';
+    if(!ORDER_BLOCK_SUBTYPES.includes(ob.subtype)) return `subtype must be exactly one of ${ORDER_BLOCK_SUBTYPES.join('/')} (case-sensitive) — got ${JSON.stringify(ob.subtype)}`;
+    if(!isNum(ob.priceHigh)) return `priceHigh must be a finite number — got ${JSON.stringify(ob.priceHigh)}`;
+    if(!isNum(ob.priceLow)) return `priceLow must be a finite number — got ${JSON.stringify(ob.priceLow)}`;
+    if(!isNum(ob.startIndex)) return `startIndex must be a finite number — got ${JSON.stringify(ob.startIndex)}`;
+    if(!isNum(ob.endIndex)) return `endIndex must be a finite number — got ${JSON.stringify(ob.endIndex)}`;
+    return null;
+  }
+  function explainFVGRejection(f){
+    if(!f || typeof f !== 'object') return 'item is not an object';
+    if(!FVG_SUBTYPES.includes(f.subtype)) return `subtype must be exactly one of ${FVG_SUBTYPES.join('/')} (case-sensitive) — got ${JSON.stringify(f.subtype)}`;
+    if(!isNum(f.top)) return `top must be a finite number — got ${JSON.stringify(f.top)}`;
+    if(!isNum(f.bottom)) return `bottom must be a finite number — got ${JSON.stringify(f.bottom)}`;
+    if(!isNum(f.index)) return `index must be a finite number — got ${JSON.stringify(f.index)}`;
+    return null;
+  }
+  function explainLiquidityRejection(l){
+    if(!l || typeof l !== 'object') return 'item is not an object';
+    if(!LIQUIDITY_SUBTYPES.includes(l.subtype)) return `subtype must be exactly one of ${LIQUIDITY_SUBTYPES.join('/')} (case-sensitive) — got ${JSON.stringify(l.subtype)}`;
+    if(!isNum(l.price)) return `price must be a finite number — got ${JSON.stringify(l.price)}`;
+    if(!isNum(l.index)) return `index must be a finite number — got ${JSON.stringify(l.index)}`;
+    return null;
+  }
+
+  /* ---------------------------------------------------------------
      Public entry point — the ONLY function other modules should call.
   --------------------------------------------------------------- */
   function buildAnnotations(candles, analysis){
@@ -439,26 +503,61 @@
 
     const timeframe = analysis.timeframe;
 
+    // Dev-mode diagnostics — ADDITIVE ONLY. Records, per section, the
+    // raw item count, the accepted (post-filter) count, and a specific
+    // reason for every item that did not make it through — without
+    // changing which items are included in the returned array in any
+    // way. This is what makes "raw count non-zero, accepted count
+    // zero" (previously invisible) into a one-line, per-item-reasoned
+    // signal. Exposed as window.DannyChart.__lastAnnotationDiagnostics,
+    // mirroring the existing window.DannyChart.__lastDiagnostics
+    // pattern already used by studio-chart-init.js.
+    const diagnostics = {};
+
     // Each section runs in isolation: if one AI-provided section is
     // malformed enough to throw during conversion, we log it and skip
     // just that section rather than losing every other annotation.
-    function safeSection(name, fn){
-      try{ return fn(); }
+    function safeSection(name, fn, rawList, explainFn){
+      const raw = Array.isArray(rawList) ? rawList : (rawList ? [rawList] : []);
+      try{
+        const result = fn();
+        const entry = { raw: raw.length, accepted: result.length, rejections: [] };
+        if(explainFn && result.length < raw.length){
+          raw.forEach(item => {
+            const reason = explainFn(item);
+            if(reason) entry.rejections.push({ reason, item });
+          });
+        }
+        diagnostics[name] = entry;
+        return result;
+      }
       catch(err){
+        diagnostics[name] = { raw: raw.length, accepted: 0, rejections: [{ reason: 'threw during conversion: ' + err.message, item: null }] };
         console.warn(`[AnnotationModel] Skipping "${name}" section — malformed input:`, err.message);
         return [];
       }
     }
 
-    return [
-      ...safeSection('swings', () => fromSwings(candles, timeframe, analysis.swings)),
-      ...safeSection('structureEvents', () => fromStructureEvents(candles, timeframe, analysis.structureEvents)),
-      ...safeSection('orderBlocks', () => fromOrderBlocks(candles, timeframe, analysis.orderBlocks)),
-      ...safeSection('fvgs', () => fromFVGs(candles, timeframe, analysis.fvgs)),
-      ...safeSection('liquidity', () => fromLiquidity(candles, timeframe, analysis.liquidity)),
-      ...safeSection('premiumDiscount', () => fromPremiumDiscount(candles, timeframe, analysis.premiumDiscount)),
-      ...safeSection('tradeLevels', () => fromTradeLevels(candles, timeframe, analysis.tradeLevels))
+    const result = [
+      ...safeSection('swings', () => fromSwings(candles, timeframe, analysis.swings), analysis.swings, explainSwingRejection),
+      ...safeSection('structureEvents', () => fromStructureEvents(candles, timeframe, analysis.structureEvents), analysis.structureEvents, explainStructureEventRejection),
+      ...safeSection('orderBlocks', () => fromOrderBlocks(candles, timeframe, analysis.orderBlocks), analysis.orderBlocks, explainOrderBlockRejection),
+      ...safeSection('fvgs', () => fromFVGs(candles, timeframe, analysis.fvgs), analysis.fvgs, explainFVGRejection),
+      ...safeSection('liquidity', () => fromLiquidity(candles, timeframe, analysis.liquidity), analysis.liquidity, explainLiquidityRejection),
+      // premiumDiscount/tradeLevels are single objects (not arrays) that
+      // already console.warn with a specific reason on incomplete input
+      // (see fromPremiumDiscount/fromTradeLevels above) — that existing,
+      // already-specific diagnostic is left as-is; no explainFn needed.
+      ...safeSection('premiumDiscount', () => fromPremiumDiscount(candles, timeframe, analysis.premiumDiscount), analysis.premiumDiscount, null),
+      ...safeSection('tradeLevels', () => fromTradeLevels(candles, timeframe, analysis.tradeLevels), analysis.tradeLevels, null)
     ];
+
+    if(typeof window !== 'undefined'){
+      window.DannyChart = window.DannyChart || {};
+      window.DannyChart.__lastAnnotationDiagnostics = diagnostics;
+    }
+
+    return result;
   }
 
   /** Lightweight shape check — useful in dev, not required at runtime. */
