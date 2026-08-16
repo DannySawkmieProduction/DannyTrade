@@ -43,6 +43,19 @@
     PUT_BIAS:  { label: 'PUT BIAS',  color: '#FF5C6C' },
     NO_TRADE:  { label: 'NO TRADE',  color: '#8D93A6' }
   };
+  // Priority 6/11 — the FINAL STATE line combines state + entryState
+  // exactly as specified: "CALL BIAS — WAIT" / "CALL ENTRY CONFIRMED" /
+  // "PUT BIAS — WAIT" / "PUT ENTRY CONFIRMED" / "NO TRADE".
+  function finalStateLabel(decision){
+    if(decision.state === 'NO_TRADE') return 'NO TRADE';
+    const base = decision.state === 'CALL_BIAS' ? 'CALL' : 'PUT';
+    return decision.entryState === 'CONFIRMED' ? `${base} ENTRY CONFIRMED` : `${base} BIAS — WAIT`;
+  }
+  function confidenceLabel(confidence){
+    if(confidence >= 0.75) return 'HIGH';
+    if(confidence >= 0.5) return 'MODERATE';
+    return 'LOW';
+  }
 
   /**
    * @param {object} opts
@@ -190,11 +203,14 @@
         `</div><div style="margin-top:4px;font-size:9.5px;color:var(--text-faint,#565C70)">◀ strongest Call OI (resistance-leaning) · ▶ strongest Put OI (support-leaning) · gold row = ATM</div>`;
     }
 
-    function renderOiBuildup(bullish, bearish){
+    function renderOiBuildup(bullish, bearish, snapshotStatus){
       const items = bullish.concat(bearish).filter(e => e.source === 'optionsOiChange');
-      if(!items.length) return sectionTitle('OI BUILDUP / UNWINDING') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">No previous snapshot yet this session — comparison available after the next refresh (~${REFRESH_MS/1000}s).</div>`;
+      const statusLine = snapshotStatus === 'WAITING_FOR_SECOND_SNAPSHOT'
+        ? `<div style="margin-top:4px;font-family:var(--font-mono,monospace);font-size:10px;color:var(--text-faint,#565C70)">WAITING FOR SECOND SNAPSHOT (~${REFRESH_MS/1000}s)</div>`
+        : `<div style="margin-top:4px;font-family:var(--font-mono,monospace);font-size:10px;color:var(--mint,#35D399)">2+ snapshots available</div>`;
+      if(!items.length) return sectionTitle('OI BUILDUP / UNWINDING') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">No aggregate OI change detected this run.</div>` + statusLine;
       return sectionTitle('OI BUILDUP / UNWINDING') + `<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">` +
-        items.map(e => `<div style="font-size:12px;color:var(--text-dim,#8D93A6)">${esc(e.signal)}</div>`).join('') + `</div>`;
+        items.map(e => `<div style="font-size:12px;color:var(--text-dim,#8D93A6)">${esc(e.signal)}</div>`).join('') + `</div>` + statusLine;
     }
 
     function renderIvGreeks(oc){
@@ -204,16 +220,37 @@
         (label !== 'AVAILABLE' ? `<div style="margin-top:2px;font-size:10.5px;color:var(--text-faint,#565C70)">Greeks/IV were not present in this response — this reduces decision confidence rather than blocking it (see Decision below).</div>` : '');
     }
 
+    function renderBreakoutQuality(ma){
+      const b = ma.breakout;
+      if(!b) return sectionTitle('BREAKOUT QUALITY') + `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">No structural break to grade this run.</div>`;
+      const qualityColor = { CONFIRMED: '#35D399', WEAK: '#D4AF6A', UNCONFIRMED: '#8D93A6', FAILED: '#FF5C6C', TRAP: '#FF5C6C' }[b.quality] || '#8D93A6';
+      return sectionTitle('BREAKOUT QUALITY') +
+        `<div style="margin-top:6px;display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:16px;background:${qualityColor}22;border:1px solid ${qualityColor}55;font-family:var(--font-mono,monospace);font-weight:700;font-size:12px;color:${qualityColor}">${esc(b.direction.toUpperCase())} ${esc(b.quality)}</div>
+        <div style="margin-top:6px;font-size:11.5px;color:var(--text-dim,#8D93A6)">Confirmations: ${b.confirmations.length ? esc(b.confirmations.join(', ')) : 'none'}</div>
+        ${b.retested ? `<div style="margin-top:2px;font-size:11px;color:var(--mint,#35D399)">Retest held</div>` : ''}`;
+    }
+
+    function renderExpirySection(ma){
+      const label = ma.expirySession || 'EXPIRY_STATUS_UNKNOWN';
+      const color = label === 'EXPIRY_SESSION' ? '#FF5C6C' : (label === 'PRE_EXPIRY' ? '#D4AF6A' : '#8D93A6');
+      const warnings = label === 'EXPIRY_SESSION'
+        ? ['Rapid premium decay possible', 'Increased false-breakout risk', 'Rapid OI transitions possible', 'Increased volatility possible', 'Late entries carry asymmetric risk']
+        : [];
+      return sectionTitle('SESSION') +
+        `<div style="margin-top:6px;font-family:var(--font-mono,monospace);font-size:12px;font-weight:700;color:${color}">${esc(label.replace(/_/g, ' '))}</div>` +
+        (warnings.length ? `<div style="margin-top:6px;display:flex;flex-direction:column;gap:2px;font-size:11px;color:var(--text-dim,#8D93A6)">${warnings.map(w => `<div>⚠ ${esc(w)}</div>`).join('')}</div>` : '');
+    }
+
     function renderDecision(decision){
       // Always immediately visible — never hidden behind an expandable section.
       const disp = DECISION_DISPLAY[decision.state] || DECISION_DISPLAY.NO_TRADE;
-      return `<div style="margin-top:16px;font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">DECISION</div>
+      return `<div style="margin-top:16px;font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">FINAL STATE</div>
       <div style="margin-top:6px;padding:14px;border:1px solid ${disp.color}55;border-radius:12px;background:${disp.color}14">
         <div style="display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:20px;background:${disp.color}22;border:1px solid ${disp.color}55">
           <span style="width:9px;height:9px;border-radius:50%;background:${disp.color};display:inline-block"></span>
-          <span style="font-family:var(--font-mono,monospace);font-weight:700;font-size:14px;letter-spacing:.03em;color:${disp.color}">${disp.label}</span>
+          <span style="font-family:var(--font-mono,monospace);font-weight:700;font-size:14px;letter-spacing:.03em;color:${disp.color}">${esc(finalStateLabel(decision))}</span>
         </div>
-        <div style="margin-top:8px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-dim,#8D93A6)">Confidence: ${(decision.confidence * 100).toFixed(0)}% <span style="color:var(--text-faint,#565C70)">(deterministic — evidence agreement, not AI-estimated)</span></div>
+        <div style="margin-top:8px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-dim,#8D93A6)">Confidence: ${esc(confidenceLabel(decision.confidence))} <span style="color:var(--text-faint,#565C70)">(${(decision.confidence * 100).toFixed(0)}% — deterministic evidence agreement, not AI-estimated)</span></div>
         <div style="margin-top:8px;font-size:10.5px;color:var(--text-faint,#565C70);letter-spacing:.04em">REASONS</div>
         <div style="margin-top:2px;display:flex;flex-direction:column;gap:2px;font-size:11.5px;color:var(--text-dim,#8D93A6)">${decision.reasons.map(r => `<div>${esc(r)}</div>`).join('')}</div>
       </div>
@@ -231,16 +268,40 @@
       return sectionTitle('RISK FLAGS') + `<div style="margin-top:6px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--red,#FF5C6C)">${esc(decision.blockers.join(', '))}</div>`;
     }
 
-    function renderAiInterpretation(){
-      // Deliberately NOT implemented this phase — the decision engine
-      // above is fully deterministic and does not use AI. Adding a
-      // real AI explanation layer would touch worker/openrouter.js /
-      // the existing AI pipeline, which this phase was told not to
-      // modify unless absolutely necessary — it isn't, for a
-      // decision engine that already explains itself via REASONS
-      // above. Labeled honestly rather than silently omitted.
-      return sectionTitle('AI INTERPRETATION') +
-        `<div style="margin-top:6px;color:var(--text-faint,#565C70);font-size:12.5px">Not enabled for Pre-Close in this phase — the DECISION and its REASONS above are fully deterministic (no AI). A future phase may add an AI explanation layer reading these same evidence fields, without changing how the decision itself is computed.</div>`;
+    // Priority 10 — a DETERMINISTIC TEMPLATE composer, explicitly NOT a
+    // live AI/LLM call (no network request, no worker/openrouter.js
+    // involvement — that pipeline was deliberately left untouched).
+    // It only paraphrases fields the deterministic engine already
+    // computed (underlyingState, breakout quality, decision
+    // state/entryState, evidence signals) into one readable sentence.
+    // It cannot invent OI, PCR, Greeks, or price levels because it
+    // never receives raw data — only the already-final structured
+    // decision. Labeled honestly as template-based below, not "AI".
+    function composeInterpretation(evidence, decision){
+      const ma = evidence.marketAnalysis;
+      const parts = [];
+      parts.push(`DannyTrade reads the underlying as ${(ma.underlyingState || 'NEUTRAL').toLowerCase()}${ma.breakout ? ` with a ${ma.breakout.direction} breakout graded ${ma.breakout.quality}` : ''}.`);
+      const optionsBullish = evidence.bullish.filter(e => e.group === 'options').length;
+      const optionsBearish = evidence.bearish.filter(e => e.group === 'options').length;
+      if(optionsBullish || optionsBearish){
+        parts.push(`Options positioning leans ${optionsBullish > optionsBearish ? 'bullish' : (optionsBearish > optionsBullish ? 'bearish' : 'mixed')} (${optionsBullish} supporting, ${optionsBearish} opposing signal${optionsBullish + optionsBearish === 1 ? '' : 's'}).`);
+      }
+      if(ma.trap) parts.push(`A ${ma.trap.replace('_', ' ').toLowerCase()} was detected — this argues against chasing the direction that got trapped.`);
+      if(decision.state === 'NO_TRADE'){
+        parts.push(`Because ${decision.blockers.includes('GROUPS_DISAGREE') ? 'underlying and options evidence disagree' : (decision.blockers[0] || 'the required evidence is not yet sufficient').toString().toLowerCase().replace(/_/g, ' ')}, the system refuses to produce a directional entry. Current state: NO TRADE.`);
+      } else {
+        const dirWord = decision.state === 'CALL_BIAS' ? 'CALL' : 'PUT';
+        parts.push(decision.entryState === 'CONFIRMED'
+          ? `The system has reached ${dirWord} BIAS with a confirmed structural trigger — current state: ${dirWord} ENTRY CONFIRMED. Still verify current conditions before acting.`
+          : `The system leans ${dirWord} BIAS, but is waiting for stronger confirmation before treating this as an entry — current state: ${dirWord} BIAS — WAIT.`);
+      }
+      return parts.join(' ');
+    }
+
+    function renderAiInterpretation(evidence, decision){
+      return sectionTitle('AI INTERPRETATION', '(template-based paraphrase of the deterministic result — not a live AI call)') +
+        `<div style="margin-top:6px;font-size:12.5px;color:var(--text-dim,#8D93A6);line-height:1.6">${esc(composeInterpretation(evidence, decision))}</div>
+        <div style="margin-top:6px;font-size:10px;color:var(--text-faint,#565C70)">This text only paraphrases fields the deterministic engine already computed. It cannot invent OI, PCR, Greeks, or price levels, and cannot override the DECISION above.</div>`;
     }
 
     function renderBody(result){
@@ -260,13 +321,15 @@
         `<div style="margin-top:20px;font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.08em;color:var(--gold,#D4AF6A);border-top:2px solid rgba(212,175,106,0.3);padding-top:4px">ENGINE ANALYSIS <span style="color:var(--text-faint,#565C70)">(deterministic — no AI)</span></div>` +
         renderUnderlyingAnalysis(evidence.marketAnalysis) +
         renderTrapAnalysis(evidence.marketAnalysis) +
-        renderOiBuildup(evidence.bullish, evidence.bearish) +
+        renderBreakoutQuality(evidence.marketAnalysis) +
+        renderExpirySection(evidence.marketAnalysis) +
+        renderOiBuildup(evidence.bullish, evidence.bearish, evidence.marketAnalysis.snapshotStatus) +
         renderShortCoveringSection(evidence.marketAnalysis) +
         renderEvidenceList('BULLISH EVIDENCE', evidence.bullish, '#35D399') +
         renderEvidenceList('BEARISH EVIDENCE', evidence.bearish, '#FF5C6C') +
         renderEvidenceList('CONFLICTS', evidence.conflicting, '#D4AF6A') +
         renderRiskFlags(decision) +
-        renderAiInterpretation() +
+        renderAiInterpretation(evidence, decision) +
         sectionTitle('DATA TIMESTAMP') +
         `<div style="margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-dim,#8D93A6)">Option chain: ${optionChain && optionChain.timestamp ? esc(optionChain.timestamp) : 'unavailable'}</div>` +
         `<div style="margin-top:16px;font-size:10.5px;color:var(--text-faint,#565C70);line-height:1.6">FACTUAL DATA = candles + option-chain fields from FYERS. ENGINE ANALYSIS = the deterministic Analysis Engine + evidence model (no AI). This panel performs no automatic AI interpretation and never places orders — decision support only.</div>`;
