@@ -54,6 +54,49 @@
     vega: ['vega']
   };
 
+  // Real-response finding (this debugging session): FYERS's expiryData[]
+  // entries were observed with a numeric-looking `expiry` field
+  // (e.g. "1787047800") — a Unix epoch in SECONDS, not a formatted date
+  // string. `date` may or may not also be present/usable; neither is
+  // assumed. This normalizer derives a reliable YYYY-MM-DD `date` from
+  // WHICHEVER field is actually parseable, so
+  // preclose-evidence-model.js's classifyExpirySession() (unchanged,
+  // still reads `.date`) gets a correct value regardless of which raw
+  // field FYERS populated — while the original epoch is preserved
+  // (never discarded) as `epochSeconds`, so a real timestamp remains
+  // available for anything that later needs exact time, not just the
+  // calendar date. Returns null (never fabricated) if NEITHER field
+  // yields a valid date.
+  function looksLikeEpochSeconds(v){
+    const n = typeof v === 'number' ? v : (typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null);
+    // Plausible range: year 2000 to year 2100 in epoch seconds.
+    return (n != null && n >= 946684800 && n <= 4102444800) ? n : null;
+  }
+  function looksLikeDateString(v){
+    return (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) ? v.slice(0, 10) : null;
+  }
+  function normalizeExpiry(rawExpiryEntry){
+    if(!rawExpiryEntry) return null;
+    const epochFromExpiry = looksLikeEpochSeconds(rawExpiryEntry.expiry);
+    const epochFromDate = looksLikeEpochSeconds(rawExpiryEntry.date);
+    const dateStrFromDate = looksLikeDateString(rawExpiryEntry.date);
+    const dateStrFromExpiry = looksLikeDateString(rawExpiryEntry.expiry);
+
+    let dateStr = null, epochSeconds = null;
+    if(dateStrFromDate){ dateStr = dateStrFromDate; epochSeconds = epochFromExpiry; }
+    else if(dateStrFromExpiry){ dateStr = dateStrFromExpiry; epochSeconds = epochFromDate; }
+    else if(epochFromExpiry != null){ epochSeconds = epochFromExpiry; dateStr = new Date(epochFromExpiry * 1000).toISOString().slice(0, 10); }
+    else if(epochFromDate != null){ epochSeconds = epochFromDate; dateStr = new Date(epochFromDate * 1000).toISOString().slice(0, 10); }
+
+    if(!dateStr) return null; // neither field was parseable — never guessed
+
+    return {
+      date: dateStr,                 // always YYYY-MM-DD when non-null — what classifyExpirySession() reads, unchanged
+      epochSeconds: epochSeconds,    // the original Unix timestamp, preserved, never discarded — null if neither field was numeric
+      raw: { date: rawExpiryEntry.date != null ? rawExpiryEntry.date : null, expiry: rawExpiryEntry.expiry != null ? rawExpiryEntry.expiry : null } // untouched original values, for reference/debugging only
+    };
+  }
+
   function pick(obj, candidates){
     if(!obj) return null;
     for(let i = 0; i < candidates.length; i++){
@@ -150,7 +193,7 @@
       available: true,
       reason: null,
       underlying: { symbol },
-      expiry: nearestExpiry ? { date: nearestExpiry.date || null, expiry: nearestExpiry.expiry || null } : null,
+      expiry: normalizeExpiry(nearestExpiry),
       strikes,
       aggregate: { callOi, putOi, pcr },
       indiaVix: (raw.indiavixData && typeof raw.indiavixData.ltp === 'number') ? raw.indiavixData.ltp : null,
@@ -176,5 +219,5 @@
     };
   }
 
-  window.DannyChart.OptionChainProvider = { getOptionChain: getOptionChain, FIELD_CANDIDATES: FIELD_CANDIDATES };
+  window.DannyChart.OptionChainProvider = { getOptionChain: getOptionChain, FIELD_CANDIDATES: FIELD_CANDIDATES, normalizeExpiry: normalizeExpiry };
 })();
