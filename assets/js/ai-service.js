@@ -380,6 +380,215 @@
     };
   }
 
+
+  /* ---------------------------------------------------------------
+     Local Ollama provider
+
+     This provider is deliberately browser-local. It talks to the
+     Ollama HTTP API exposed by the same machine:
+       http://127.0.0.1:11434
+
+     It never sends an API key and never changes the Cloudflare Worker.
+     Gemini/OpenRouter remain untouched and Gemini remains the default.
+
+     IMPORTANT: Qwen 2.5 1.5B is a small local model. For chartStructure
+     requests the response is validated before it is allowed into the
+     existing AnnotationModel/DecisionPanel pipeline. A malformed local
+     response becomes an AI error rather than fabricated chart objects.
+  --------------------------------------------------------------- */
+  const OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
+  const OLLAMA_MODEL = 'qwen2.5:1.5b';
+  const OLLAMA_TIMEOUT_MS = 180000;
+
+  function ollamaJsonFromResponse(body) {
+    if (!body || typeof body.response !== 'string') {
+      throw new Error('Ollama returned no text response.');
+    }
+    let text = body.response.trim();
+    if (text.startsWith('```')) {
+      text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    }
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first >= 0 && last > first) text = text.slice(first, last + 1);
+    try { return JSON.parse(text); }
+    catch { throw new Error('Ollama returned text that was not valid JSON.'); }
+  }
+
+  function ollamaFiniteNumber(v) {
+    return typeof v === 'number' && Number.isFinite(v);
+  }
+
+  function ollamaValidateDecision(d) {
+    if (d === null) return true;
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
+    if (!['BUY','SELL','WAIT','NO_TRADE'].includes(d.finalDecision)) return false;
+    if (!['A+','A','B','C','D'].includes(d.tradeGrade)) return false;
+    if (!['Very High','High','Moderate','Low'].includes(d.trapRisk)) return false;
+    if (!['Bullish','Bearish','Sideways'].includes(d.trend)) return false;
+    if (typeof d.marketPhase !== 'string' ||
+        typeof d.liquidityTarget !== 'string' ||
+        typeof d.tradeQuality !== 'string' ||
+        typeof d.reasoningSummary !== 'string' ||
+        typeof d.structureSummary !== 'string' ||
+        typeof d.lastStructureEvent !== 'string' ||
+        typeof d.invalidationLevel !== 'string') return false;
+    if (!ollamaFiniteNumber(d.confidence) || !ollamaFiniteNumber(d.riskReward)) return false;
+    if (!Array.isArray(d.educationalNotes) || !d.educationalNotes.every(v => typeof v === 'string')) return false;
+    return true;
+  }
+
+  function ollamaValidateTradeLevels(t) {
+    if (t === null) return true;
+    if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
+    if (!['bullish','bearish'].includes(t.direction)) return false;
+    if (!ollamaFiniteNumber(t.confidence) || !ollamaFiniteNumber(t.riskReward)) return false;
+    if (!t.entry || !ollamaFiniteNumber(t.entry.index) || !ollamaFiniteNumber(t.entry.price)) return false;
+    if (!t.stopLoss || !ollamaFiniteNumber(t.stopLoss.price)) return false;
+    if (!t.target1 || !ollamaFiniteNumber(t.target1.price)) return false;
+    for (const k of ['target2','target3','invalidation']) {
+      if (t[k] != null && (!t[k] || !ollamaFiniteNumber(t[k].price))) return false;
+    }
+    for (const k of ['observation','evidence','reasoning','tradingImplication']) {
+      if (typeof t[k] !== 'string') return false;
+    }
+    return true;
+  }
+
+  function ollamaValidatePremiumDiscount(p) {
+    if (p === null) return true;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+    return ['rangeHighIndex','rangeHighPrice','rangeLowIndex','rangeLowPrice','equilibriumPrice','confidence']
+      .every(k => ollamaFiniteNumber(p[k]));
+  }
+
+  function ollamaCoerceChartStructure(parsed) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Ollama chart analysis was not a JSON object.');
+    }
+    const out = {
+      version: typeof parsed.version === 'string' ? parsed.version : '1.0',
+      timeframe: typeof parsed.timeframe === 'string' ? parsed.timeframe : '',
+      swings: Array.isArray(parsed.swings) ? parsed.swings : [],
+      structureEvents: Array.isArray(parsed.structureEvents) ? parsed.structureEvents : [],
+      orderBlocks: Array.isArray(parsed.orderBlocks) ? parsed.orderBlocks : [],
+      fvgs: Array.isArray(parsed.fvgs) ? parsed.fvgs : [],
+      liquidity: Array.isArray(parsed.liquidity) ? parsed.liquidity : [],
+      premiumDiscount: parsed.premiumDiscount === undefined ? null : parsed.premiumDiscount,
+      tradeLevels: parsed.tradeLevels === undefined ? null : parsed.tradeLevels,
+      decision: parsed.decision === undefined ? null : parsed.decision
+    };
+    if (!ollamaValidatePremiumDiscount(out.premiumDiscount)) {
+      throw new Error('Ollama returned an invalid premiumDiscount object.');
+    }
+    if (!ollamaValidateTradeLevels(out.tradeLevels)) {
+      throw new Error('Ollama returned an invalid tradeLevels object.');
+    }
+    if (!ollamaValidateDecision(out.decision)) {
+      throw new Error('Ollama returned an invalid decision object.');
+    }
+    return out;
+  }
+
+  function buildOllamaPrompt(type, payload) {
+    const candles = Array.isArray(payload && payload.candles) ? payload.candles : [];
+    const base = `You are DannyTrade's local trading-analysis assistant. Apply ICT and Smart Money Concepts. ` +
+      `Be conservative and never invent price data. Respond ONLY with one valid JSON object. `;
+
+    if (type === 'chartStructure') {
+      return base +
+        `Return exactly these top-level keys: version, timeframe, swings, structureEvents, orderBlocks, fvgs, liquidity, ` +
+        `premiumDiscount, tradeLevels, decision. ` +
+        `Every index must be an actual candle-array index from 0 to ${Math.max(candles.length - 1, 0)}. ` +
+        `Every price must be supported by the supplied candle data; never invent or interpolate prices. ` +
+        `If there is no genuine pattern, return an empty array. If evidence is weak, use null for tradeLevels and decision, ` +
+        `or set decision.finalDecision to WAIT/NO_TRADE. ` +
+        `strength and confidence are numbers from 0 to 1. ` +
+        `If decision is non-null it MUST contain: finalDecision (BUY, SELL, WAIT, or NO_TRADE), tradeGrade (A+, A, B, C, D), ` +
+        `marketPhase, trapRisk (Very High, High, Moderate, Low), liquidityTarget, tradeQuality, confidence, reasoningSummary, ` +
+        `riskReward, trend (Bullish, Bearish, Sideways), structureSummary, lastStructureEvent, invalidationLevel, educationalNotes (array). ` +
+        `If tradeLevels is non-null it MUST contain direction (bullish/bearish), confidence, riskReward, entry(index,price), ` +
+        `stopLoss(price), target1(price), observation, evidence, reasoning, tradingImplication; target2, target3 and invalidation may be null. ` +
+        `If premiumDiscount is non-null it MUST contain rangeHighIndex, rangeHighPrice, rangeLowIndex, rangeLowPrice, equilibriumPrice, confidence. ` +
+        `Timeframe: ${payload.timeframe || 'unspecified'}. Symbol: ${payload.symbol || 'unspecified'}. ` +
+        `Candle array oldest first: ${JSON.stringify(candles)}`;
+    }
+
+    const keys = [
+      'executiveSummary','marketStructure','smartMoneyConcepts','ictAnalysis','liquidityAnalysis',
+      'orderBlocks','fairValueGaps','trendAnalysis','volumeAnalysis','supportResistance',
+      'entry','stopLoss','target1','target2','target3','riskReward','confidence','verdict',
+      'explanation','riskWarnings','premiumDiscountZone','trapDetection','marketPhase',
+      'invalidationLevel','confirmationRequired','tradeQualityGrade','tradeQualityReasoning','educationalNotes'
+    ];
+    return base +
+      `Return exactly these keys: ${keys.join(', ')}. All values are strings except confidence, which is a number 0-1. ` +
+      `verdict must be BUY, SELL, WAIT, or NO TRADE. tradeQualityGrade must be A+, A, B, C, or D. ` +
+      `Use null or empty strings when evidence is insufficient. ` +
+      `Analysis payload: ${JSON.stringify(payload || {})}`;
+  }
+
+  function createOllamaAIProvider() {
+    async function call(type, payload) {
+      if (type === 'chartImage' || type === 'pdf') {
+        throw new Error('Local Ollama provider currently supports structured/text analysis, not image/PDF vision.');
+      }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+      try {
+        const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: OLLAMA_MODEL,
+            prompt: buildOllamaPrompt(type, payload || {}),
+            stream: false,
+            format: 'json',
+            options: { temperature: 0.1, num_ctx: 4096 }
+          }),
+          signal: controller.signal
+        });
+        let body = null;
+        try { body = await res.json(); } catch {}
+        if (!res.ok) {
+          throw new Error((body && body.error) || `Ollama request failed (${res.status}).`);
+        }
+        const parsed = ollamaJsonFromResponse(body);
+        if (type === 'chartStructure') return ollamaCoerceChartStructure(parsed);
+
+        const normalized = {};
+        [
+          'executiveSummary','marketStructure','smartMoneyConcepts','ictAnalysis','liquidityAnalysis',
+          'orderBlocks','fairValueGaps','trendAnalysis','volumeAnalysis','supportResistance',
+          'entry','stopLoss','target1','target2','target3','riskReward','confidence','verdict',
+          'explanation','riskWarnings','premiumDiscountZone','trapDetection','marketPhase',
+          'invalidationLevel','confirmationRequired','tradeQualityGrade','tradeQualityReasoning','educationalNotes'
+        ].forEach(k => { normalized[k] = parsed[k] !== undefined ? parsed[k] : null; });
+        if (normalized.verdict != null && !['BUY','SELL','WAIT','NO TRADE'].includes(normalized.verdict)) normalized.verdict = null;
+        if (normalized.tradeQualityGrade != null && !['A+','A','B','C','D'].includes(normalized.tradeQualityGrade)) normalized.tradeQualityGrade = null;
+        return normalized;
+      } catch (err) {
+        if (err && err.name === 'AbortError') {
+          throw new Error(`Local Ollama request timed out after ${Math.round(OLLAMA_TIMEOUT_MS/1000)} seconds.`);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    return {
+      analyzeChartImage(payload) { return call('chartImage', payload); },
+      analyzePDF(payload) { return call('pdf', payload); },
+      analyzeCSV(payload) { return call('csv', payload); },
+      analyzeExcel(payload) { return call('excel', payload); },
+      generateTradingSignal(payload) { return call('tradingSignal', payload); },
+      analyzeMarketContext(payload) { return call('marketContext', payload); },
+      analyzeChartStructure(payload) { return call('chartStructure', payload); }
+    };
+  }
+
   /* ---------------------------------------------------------------
      AI provider (backend) switching, distinct from the PROVIDER
      OBJECT configured via AIService.configure() above. This tracks
@@ -395,24 +604,11 @@
   const SUPPORTED_AI_PROVIDER_NAMES = ['gemini', 'openrouter', 'ollama'];
   let activeAiProviderName = 'gemini';
 
-  /** ollama is fundamentally different from gemini/openrouter: it is
-   *  never routed through the Cloudflare Worker (see ollama-
-   *  provider.js's header comment for why a Worker proxy can't reach
-   *  the user's laptop). Selecting it configures the browser-side
-   *  OllamaProvider object instead of createWorkerAIProvider() — the
-   *  gemini/openrouter branch below is completely unchanged from
-   *  before this addition. */
   function setProviderName(name) {
     const resolved = SUPPORTED_AI_PROVIDER_NAMES.includes(name) ? name : 'gemini';
     activeAiProviderName = resolved;
     if (resolved === 'ollama') {
-      const OllamaProvider = (typeof window !== 'undefined' && window.DannyChart && window.DannyChart.OllamaProvider) || null;
-      if (OllamaProvider && typeof OllamaProvider.createProvider === 'function') {
-        configure(OllamaProvider.createProvider());
-      } else {
-        console.error('[AIService] "ollama" selected but ollama-provider.js is not loaded — staying disconnected.');
-        configure(null);
-      }
+      configure(createOllamaAIProvider());
     } else {
       configure(createWorkerAIProvider('/api/analyze', resolved));
     }
@@ -456,38 +652,20 @@
           configured: !!(json.openrouter && json.openrouter.configured),
           model: (json.openrouter && json.openrouter.model) || null
         },
+        ollama: { configured: false, model: OLLAMA_MODEL, local: true },
         defaultProvider: (json.defaultProvider === 'openrouter') ? 'openrouter' : 'gemini'
       };
     } catch (err) {
-      return { gemini: { configured: false }, openrouter: { configured: false, model: null }, defaultProvider: 'gemini' };
+      return { gemini: { configured: false }, openrouter: { configured: false, model: null }, ollama: { configured: false, model: OLLAMA_MODEL, local: true }, defaultProvider: 'gemini' };
     }
-  }
-
-  /** Ollama status is fundamentally different from getProviderStatus()
-   *  above (which reports SERVER-side secret configuration for
-   *  gemini/openrouter) — Ollama has no server-side concept at all, so
-   *  this is a separate, client-side-only check that delegates to
-   *  ollama-provider.js's testConnection(). Kept as its own method
-   *  rather than folded into getProviderStatus() so the "server
-   *  providers vs local provider" distinction stays explicit in the
-   *  API surface, not just in a comment. */
-  async function getOllamaStatus(opts) {
-    const OllamaProvider = (typeof window !== 'undefined' && window.DannyChart && window.DannyChart.OllamaProvider) || null;
-    if (!OllamaProvider) return { status: 'OLLAMA_NOT_RUNNING_OR_BLOCKED', message: 'ollama-provider.js is not loaded.', models: [] };
-    return OllamaProvider.testConnection(opts);
   }
 
   async function isProviderAvailable(name) {
-    if (name === 'ollama') {
-      const result = await getOllamaStatus();
-      return result.status === 'OLLAMA_CONNECTED';
-    }
     const status = await getProviderStatus();
     return !!(status[name] && status[name].configured);
   }
 
   AIService.getProviderStatus = getProviderStatus;
-  AIService.getOllamaStatus = getOllamaStatus;
   AIService.getActiveProvider = getProviderName;
   AIService.setProvider = setProviderName;
   AIService.isProviderAvailable = isProviderAvailable;
