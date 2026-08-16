@@ -392,13 +392,30 @@
      captured the old value), so switching never interrupts an
      in-progress analysis.
   --------------------------------------------------------------- */
-  const SUPPORTED_AI_PROVIDER_NAMES = ['gemini', 'openrouter'];
+  const SUPPORTED_AI_PROVIDER_NAMES = ['gemini', 'openrouter', 'ollama'];
   let activeAiProviderName = 'gemini';
 
+  /** ollama is fundamentally different from gemini/openrouter: it is
+   *  never routed through the Cloudflare Worker (see ollama-
+   *  provider.js's header comment for why a Worker proxy can't reach
+   *  the user's laptop). Selecting it configures the browser-side
+   *  OllamaProvider object instead of createWorkerAIProvider() — the
+   *  gemini/openrouter branch below is completely unchanged from
+   *  before this addition. */
   function setProviderName(name) {
     const resolved = SUPPORTED_AI_PROVIDER_NAMES.includes(name) ? name : 'gemini';
     activeAiProviderName = resolved;
-    configure(createWorkerAIProvider('/api/analyze', resolved));
+    if (resolved === 'ollama') {
+      const OllamaProvider = (typeof window !== 'undefined' && window.DannyChart && window.DannyChart.OllamaProvider) || null;
+      if (OllamaProvider && typeof OllamaProvider.createProvider === 'function') {
+        configure(OllamaProvider.createProvider());
+      } else {
+        console.error('[AIService] "ollama" selected but ollama-provider.js is not loaded — staying disconnected.');
+        configure(null);
+      }
+    } else {
+      configure(createWorkerAIProvider('/api/analyze', resolved));
+    }
     return resolved;
   }
 
@@ -446,12 +463,31 @@
     }
   }
 
+  /** Ollama status is fundamentally different from getProviderStatus()
+   *  above (which reports SERVER-side secret configuration for
+   *  gemini/openrouter) — Ollama has no server-side concept at all, so
+   *  this is a separate, client-side-only check that delegates to
+   *  ollama-provider.js's testConnection(). Kept as its own method
+   *  rather than folded into getProviderStatus() so the "server
+   *  providers vs local provider" distinction stays explicit in the
+   *  API surface, not just in a comment. */
+  async function getOllamaStatus(opts) {
+    const OllamaProvider = (typeof window !== 'undefined' && window.DannyChart && window.DannyChart.OllamaProvider) || null;
+    if (!OllamaProvider) return { status: 'OLLAMA_NOT_RUNNING_OR_BLOCKED', message: 'ollama-provider.js is not loaded.', models: [] };
+    return OllamaProvider.testConnection(opts);
+  }
+
   async function isProviderAvailable(name) {
+    if (name === 'ollama') {
+      const result = await getOllamaStatus();
+      return result.status === 'OLLAMA_CONNECTED';
+    }
     const status = await getProviderStatus();
     return !!(status[name] && status[name].configured);
   }
 
   AIService.getProviderStatus = getProviderStatus;
+  AIService.getOllamaStatus = getOllamaStatus;
   AIService.getActiveProvider = getProviderName;
   AIService.setProvider = setProviderName;
   AIService.isProviderAvailable = isProviderAvailable;
