@@ -316,5 +316,92 @@ console.log('\n[22] underlyingState surfaces correctly in marketAnalysis for the
   assert(evidence.marketAnalysis.underlyingState === 'BULLISH', 'marketAnalysis.underlyingState correctly BULLISH given one bullish structure signal');
 }
 
+console.log('\n[23] classifyBreakout() — CONFIRMED requires 3+ real confirmations, never a bare BOS/CHoCH alone');
+{
+  const now0 = Math.floor(Date.now() / 1000) - 20 * 60;
+  const candles = [];
+  for(let i = 0; i <= 20; i++) candles.push(candle(now0 + i * 60, 100, 500)); // flat, low volume
+  candles[15] = candle(now0 + 15 * 60, 105, 3000); // breakout candle: big volume spike
+  const msData = { external: { structureEvents: [{ index: 15, direction: 'bullish', type: 'BOS', level: 100, time: candles[15].time }] } };
+  const liqData = { sweeps: [{ direction: 'sellSide', sweepIndex: 14 }] }; // supportive liquidity context
+
+  const confirmed = EM.classifyBreakout(msData, liqData, candles, true, 2, null); // momentum true, optionsNet bullish(2), no trap
+  assert(confirmed.quality === 'CONFIRMED', 'volume spike + momentum + liquidity context + options agreement (4 confirmations) -> CONFIRMED: ' + JSON.stringify(confirmed));
+
+  const weak = EM.classifyBreakout(msData, { sweeps: [] }, candles, false, 0, null); // no momentum, no liquidity context, no options agreement — only volume
+  assert(weak.quality === 'UNCONFIRMED' || weak.quality === 'WEAK', 'A bare structural break with only 1 real confirmation is NOT labeled CONFIRMED: ' + weak.quality);
+}
+
+console.log('\n[24] classifyBreakout() — an opposing trap ALWAYS overrides to TRAP, regardless of other confirmations');
+{
+  const now0 = Math.floor(Date.now() / 1000) - 10 * 60;
+  const candles = [];
+  for(let i = 0; i <= 10; i++) candles.push(candle(now0 + i * 60, 100, 3000));
+  const msData = { external: { structureEvents: [{ index: 8, direction: 'bullish', type: 'BOS', level: 100, time: candles[8].time }] } };
+  const result = EM.classifyBreakout(msData, { sweeps: [] }, candles, true, 2, { type: 'BULL_TRAP' });
+  assert(result.quality === 'TRAP', 'An opposing BULL_TRAP always wins, even with momentum+options seemingly supportive');
+}
+
+console.log('\n[25] classifyBreakout() — FAILED when the latest candle has already closed back through the broken level');
+{
+  const now0 = Math.floor(Date.now() / 1000) - 10 * 60;
+  const candles = [];
+  for(let i = 0; i <= 10; i++) candles.push(candle(now0 + i * 60, 100, 1000));
+  candles[10] = candle(now0 + 10 * 60, 95, 1000); // LAST candle closed BELOW the broken level (100) — bullish break failed
+  const msData = { external: { structureEvents: [{ index: 5, direction: 'bullish', type: 'BOS', level: 100, time: candles[5].time }] } };
+  const result = EM.classifyBreakout(msData, { sweeps: [] }, candles, true, 2, null);
+  assert(result.quality === 'FAILED', 'Latest candle closing back below the broken level -> FAILED, not CONFIRMED');
+}
+
+console.log('\n[26] classifyBreakout() — null when there is no structure event to classify at all');
+{
+  assert(EM.classifyBreakout({ external: { structureEvents: [] } }, { sweeps: [] }, [candle(1, 100, 100)], false, 0, null) === null, 'No structureEvents -> null, nothing to grade');
+  assert(EM.classifyBreakout(null, null, [], false, 0, null) === null, 'Null/empty inputs handled safely');
+}
+
+console.log('\n[27] classifyExpirySession() — derived ONLY from the real expiry date the option chain itself returned, no hardcoded calendar');
+{
+  const now = new Date('2026-08-20T10:00:00Z');
+  const todayExpiry = optionChainFixture({ expiry: { date: '2026-08-20', expiry: 'today' } });
+  assert(EM.classifyExpirySession(todayExpiry, now) === 'EXPIRY_SESSION', 'Expiry date === today -> EXPIRY_SESSION');
+
+  const tomorrowExpiry = optionChainFixture({ expiry: { date: '2026-08-21', expiry: 'tomorrow' } });
+  assert(EM.classifyExpirySession(tomorrowExpiry, now) === 'PRE_EXPIRY', 'Expiry date = tomorrow -> PRE_EXPIRY');
+
+  const farExpiry = optionChainFixture({ expiry: { date: '2026-08-27', expiry: 'next week' } });
+  assert(EM.classifyExpirySession(farExpiry, now) === 'NORMAL_SESSION', 'Expiry date well in the future -> NORMAL_SESSION');
+
+  assert(EM.classifyExpirySession(optionChainFixture({ expiry: null }), now) === 'EXPIRY_STATUS_UNKNOWN', 'No expiry date returned -> EXPIRY_STATUS_UNKNOWN, never guessed');
+  assert(EM.classifyExpirySession(OPTION_UNAVAILABLE, now) === 'EXPIRY_STATUS_UNKNOWN', 'Option chain unavailable -> EXPIRY_STATUS_UNKNOWN');
+}
+
+console.log('\n[28] EXPIRY_SESSION_RISK end-to-end — surfaces as a real risk flag via buildEvidence() when the option chain\'s own expiry is today');
+{
+  const now = new Date('2026-08-20T10:00:00Z');
+  const oc = optionChainFixture({ expiry: { date: '2026-08-20', expiry: 'today' }, aggregate: { callOi: 100, putOi: 100, pcr: 1 } });
+  const evidence = EM.buildEvidence(baseAnalysisContext(), oc, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(), now });
+  assert(evidence.marketAnalysis.expirySession === 'EXPIRY_SESSION', 'marketAnalysis.expirySession correctly EXPIRY_SESSION');
+  assert(evidence.riskFlags.some(f => f.code === 'EXPIRY_SESSION_RISK'), 'EXPIRY_SESSION_RISK risk flag present');
+}
+
+console.log('\n[29] Snapshot status — WAITING_FOR_SECOND_SNAPSHOT vs SECOND_SNAPSHOT_OR_LATER, never a false buildup claim on the first read');
+{
+  const oc = optionChainFixture({ aggregate: { callOi: 100, putOi: 100, pcr: 1 } });
+  const evNoPrev = EM.buildEvidence(baseAnalysisContext(), oc, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles() });
+  assert(evNoPrev.marketAnalysis.snapshotStatus === 'WAITING_FOR_SECOND_SNAPSHOT', 'No previous snapshot -> WAITING_FOR_SECOND_SNAPSHOT, not a false buildup claim');
+
+  const evWithPrev = EM.buildEvidence(baseAnalysisContext(), oc, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(), previousOptionSnapshot: { callOi: 90, putOi: 90, strikes: {} } });
+  assert(evWithPrev.marketAnalysis.snapshotStatus === 'SECOND_SNAPSHOT_OR_LATER', 'A real previous snapshot -> SECOND_SNAPSHOT_OR_LATER');
+}
+
+console.log('\n[30] STALE_OPTION_DATA — the option chain\'s OWN timestamp determines its freshness, separate from candle freshness');
+{
+  const staleTimestamp = new Date(Date.now() - 20 * 60 * 1000).toISOString(); // 20 minutes old
+  const oc = optionChainFixture({ aggregate: { callOi: 100, putOi: 100, pcr: 1 }, timestamp: staleTimestamp });
+  const evidence = EM.buildEvidence(baseAnalysisContext(), oc, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(), staleSeconds: 900 });
+  assert(evidence.riskFlags.some(f => f.code === 'STALE_OPTION_DATA'), 'A 20-minute-old option chain (over the 15-minute threshold) triggers STALE_OPTION_DATA');
+  assert(evidence.marketAnalysis.optionChainDataQuality === 'STALE', 'marketAnalysis.optionChainDataQuality correctly STALE');
+}
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 process.exit(failed > 0 ? 1 : 0);

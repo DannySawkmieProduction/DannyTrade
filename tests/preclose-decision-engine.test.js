@@ -250,5 +250,57 @@ console.log('\n[20] Phase 2 — CALL_BIAS/PUT_BIAS include entry/invalidation/no
   assert(typeof noTrade.noTradeCondition === 'string' && noTrade.noTradeCondition.includes('STALE_DATA'), 'noTradeCondition lists the actual blocker(s)');
 }
 
+console.log('\n[21] Phase 4 — entryState: BIAS without a CONFIRMED breakout is WAIT, never auto-upgraded to CONFIRMED');
+{
+  const result = DE.decide(bundle({
+    bullish: [groupedItem('marketStructure', 'bullish', 'a', 'underlying'), groupedItem('trend', 'bullish', 'b', 'underlying'), groupedItem('optionsPCR', 'bullish', 'c', 'options')],
+    marketAnalysis: {} // no breakout info at all
+  }));
+  assert(result.state === 'CALL_BIAS', 'CALL_BIAS reached on evidence agreement');
+  assert(result.entryState === 'WAIT', 'entryState is WAIT when no breakout classification exists — never silently CONFIRMED');
+}
+
+console.log('\n[22] Phase 4 — entryState CONFIRMED only when a matching-direction CONFIRMED breakout exists, with no opposing trap');
+{
+  const resultConfirmed = DE.decide(bundle({
+    bullish: [groupedItem('marketStructure', 'bullish', 'a', 'underlying'), groupedItem('trend', 'bullish', 'b', 'underlying'), groupedItem('optionsPCR', 'bullish', 'c', 'options')],
+    marketAnalysis: { breakout: { direction: 'bullish', quality: 'CONFIRMED', confirmations: ['volume', 'momentum', 'liquidityContext'], retested: true }, trap: null }
+  }));
+  assert(resultConfirmed.entryState === 'CONFIRMED', 'entryState CONFIRMED when breakout matches direction and is graded CONFIRMED, no opposing trap');
+  assert(/retest held/.test(resultConfirmed.entryCondition), 'entryCondition text reflects the confirmed retest');
+
+  const resultWeak = DE.decide(bundle({
+    bullish: [groupedItem('marketStructure', 'bullish', 'a', 'underlying'), groupedItem('trend', 'bullish', 'b', 'underlying'), groupedItem('optionsPCR', 'bullish', 'c', 'options')],
+    marketAnalysis: { breakout: { direction: 'bullish', quality: 'WEAK', confirmations: ['volume'], retested: false }, trap: null }
+  }));
+  assert(resultWeak.entryState === 'WAIT', 'A WEAK breakout does NOT count as confirmed entry — still WAIT');
+
+  // A CONFIRMED breakout in the OPPOSITE direction from the bias must not confirm entry.
+  const resultMismatch = DE.decide(bundle({
+    bullish: [groupedItem('marketStructure', 'bullish', 'a', 'underlying'), groupedItem('trend', 'bullish', 'b', 'underlying'), groupedItem('optionsPCR', 'bullish', 'c', 'options')],
+    marketAnalysis: { breakout: { direction: 'bearish', quality: 'CONFIRMED', confirmations: ['volume', 'momentum', 'liquidityContext'] }, trap: null }
+  }));
+  assert(resultMismatch.entryState === 'WAIT', 'A CONFIRMED breakout in the WRONG direction does not confirm this bias\'s entry');
+}
+
+console.log('\n[23] Phase 4 — trap-first: an opposing trap PREVENTS entry confirmation even if breakout looks confirmed');
+{
+  const result = DE.decide(bundle({
+    bullish: [groupedItem('marketStructure', 'bullish', 'a', 'underlying'), groupedItem('trend', 'bullish', 'b', 'underlying'), groupedItem('optionsPCR', 'bullish', 'c', 'options')],
+    marketAnalysis: { breakout: { direction: 'bullish', quality: 'CONFIRMED', confirmations: ['volume', 'momentum', 'liquidityContext'] }, trap: 'BULL_TRAP' }
+  }));
+  assert(result.entryState === 'WAIT', 'A BULL_TRAP flag overrides an otherwise-CONFIRMED bullish breakout — entry stays WAIT, trap-first thinking');
+}
+
+console.log('\n[24] Phase 4 — EXPIRY_SESSION_RISK is a SOFT flag (reduces confidence, does not force NO_TRADE) and NEVER stacks silently with GREEKS_UNAVAILABLE');
+{
+  const result = DE.decide(bundle({
+    bullish: [groupedItem('marketStructure', 'bullish', 'a', 'underlying'), groupedItem('trend', 'bullish', 'b', 'underlying'), groupedItem('optionsPCR', 'bullish', 'c', 'options')],
+    riskFlags: [{ code: 'EXPIRY_SESSION_RISK', message: 'expiry today' }, { code: 'GREEKS_UNAVAILABLE', message: 'no greeks' }]
+  }));
+  assert(result.state === 'CALL_BIAS', 'Both soft flags together still allow CALL_BIAS (neither is a hard blocker)');
+  assert(Math.abs(result.confidence - (1 * DE.GREEKS_CONFIDENCE_PENALTY * DE.EXPIRY_CONFIDENCE_PENALTY)) < 1e-9, 'Confidence correctly reflects BOTH penalty factors multiplied together, not just one: ' + result.confidence);
+}
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 process.exit(failed > 0 ? 1 : 0);
