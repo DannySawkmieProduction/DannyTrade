@@ -403,5 +403,28 @@ console.log('\n[30] STALE_OPTION_DATA — the option chain\'s OWN timestamp dete
   assert(evidence.marketAnalysis.optionChainDataQuality === 'STALE', 'marketAnalysis.optionChainDataQuality correctly STALE');
 }
 
-console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
-process.exit(failed > 0 ? 1 : 0);
+console.log('\n[31] REAL-RESPONSE FIX end-to-end — the exact production expiry shape (numeric epoch string, no .date) now classifies correctly instead of silently failing');
+{
+  const sandbox2 = { window: {}, console, Intl, Date };
+  sandbox2.global = sandbox2;
+  const ctx2 = require('vm').createContext(sandbox2);
+  const providerSrc = fs.readFileSync(path.join(__dirname, '..', 'assets', 'js', 'preclose', 'option-chain-provider.js'), 'utf8');
+  require('vm').runInContext(providerSrc, ctx2, { filename: 'option-chain-provider.js' });
+  sandbox2.window.DannyChart.FyersService = {
+    getOptionChain: async () => ({
+      callOi: 151490170, putOi: 133964675,
+      expiryData: [{ date: null, expiry: '1787047800' }], // the EXACT real value observed in production
+      optionsChain: [{ symbol: 'x', option_type: 'CE', strike_price: 24350, ltp: 1, oi: 1, volume: 1 }]
+    })
+  };
+  return sandbox2.window.DannyChart.OptionChainProvider.getOptionChain('NIFTY', {}).then(oc => {
+    assert(oc.expiry.date === '2026-08-18', 'Provider correctly normalizes the real production value to 2026-08-18');
+    const nowBeforeExpiry = new Date('2026-08-17T10:00:00Z'); // 1 day before the 2026-08-18 expiry
+    const session = EM.classifyExpirySession(oc, nowBeforeExpiry);
+    assert(session === 'PRE_EXPIRY', 'classifyExpirySession() (UNCHANGED code) now correctly classifies PRE_EXPIRY using the fixed .date — previously this would have returned EXPIRY_STATUS_UNKNOWN because .date was null in the real response');
+
+    console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
+    process.exit(failed > 0 ? 1 : 0);
+  });
+}
+

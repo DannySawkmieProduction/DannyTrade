@@ -43,7 +43,7 @@ async function run(){
     assert(result.aggregate.callOi === 1000 && result.aggregate.putOi === 1500, 'Real aggregate callOi/putOi passed through unmodified');
     assert(Math.abs(result.aggregate.pcr - 1.5) < 1e-9, 'PCR = putOi/callOi computed correctly (1500/1000=1.5)');
     assert(result.indiaVix === 13.5, 'India VIX passed through');
-    assert(result.expiry.expiry === '27AUG26', 'Nearest expiry surfaced from expiryData[0]');
+    assert(result.expiry.date === '2026-08-27', 'Nearest expiry surfaced from expiryData[0] as a correct YYYY-MM-DD date: got ' + result.expiry.date);
   }
 
   console.log('\n[2] Missing/unconfirmed fields (bid/ask/greeks/oiChange) normalize to null, never fabricated');
@@ -126,6 +126,51 @@ async function run(){
     const provider = loadProvider(null);
     const result = await provider.getOptionChain('NIFTY', {});
     assert(result.available === false, 'Missing FyersService handled safely');
+  }
+
+  console.log('\n[9] REAL-RESPONSE FIX — expiry field observed in production as a numeric epoch-seconds string (e.g. "1787047800") is normalized to a correct YYYY-MM-DD date, not shown raw');
+  {
+    const provider = loadProvider({
+      getOptionChain: async () => ({
+        callOi: 1, putOi: 1,
+        expiryData: [{ date: null, expiry: '1787047800' }], // the exact real-world shape observed: date missing/null, expiry holds the epoch as a string
+        optionsChain: [rawOption(24500, 'CE', 1, 1, 1)]
+      })
+    });
+    const result = await provider.getOptionChain('NIFTY', {});
+    assert(result.expiry !== null, 'expiry is normalized, not null, even though .date was missing');
+    assert(result.expiry.date === '2026-08-18', 'The epoch 1787047800 correctly normalizes to 2026-08-18 (verify: 1787047800s = 18 Aug 2026 UTC): got ' + result.expiry.date);
+    assert(result.expiry.epochSeconds === 1787047800, 'The original epoch is preserved, never discarded: ' + result.expiry.epochSeconds);
+    assert(result.expiry.raw.expiry === '1787047800', 'The original raw value is preserved untouched for reference');
+  }
+
+  console.log('\n[10] Expiry normalization — a proper YYYY-MM-DD .date field (if FYERS ever supplies one) is used directly, untouched');
+  {
+    const provider = loadProvider({
+      getOptionChain: async () => ({
+        callOi: 1, putOi: 1,
+        expiryData: [{ date: '2026-08-20', expiry: '27AUG26' }], // a real date string in .date, a non-numeric label in .expiry
+        optionsChain: [rawOption(24500, 'CE', 1, 1, 1)]
+      })
+    });
+    const result = await provider.getOptionChain('NIFTY', {});
+    assert(result.expiry.date === '2026-08-20', 'A valid YYYY-MM-DD in .date is used as-is: got ' + result.expiry.date);
+  }
+
+  console.log('\n[11] Expiry normalization — neither field parseable -> null, never guessed');
+  {
+    const provider = loadProvider({
+      getOptionChain: async () => ({ callOi: 1, putOi: 1, expiryData: [{ date: null, expiry: 'not-a-date-or-epoch' }], optionsChain: [rawOption(24500, 'CE', 1, 1, 1)] })
+    });
+    const result = await provider.getOptionChain('NIFTY', {});
+    assert(result.expiry === null, 'Neither field parseable -> expiry is null, never a fabricated date');
+  }
+
+  console.log('\n[12] Expiry normalization — empty expiryData -> expiry null (unchanged from before this fix)');
+  {
+    const provider = loadProvider({ getOptionChain: async () => ({ callOi: 1, putOi: 1, expiryData: [], optionsChain: [rawOption(24500, 'CE', 1, 1, 1)] }) });
+    const result = await provider.getOptionChain('NIFTY', {});
+    assert(result.expiry === null, 'No expiryData entries -> expiry null');
   }
 
   console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
