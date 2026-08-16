@@ -277,7 +277,6 @@
 <script defer src="assets/js/chart/instrument-selector.js"></script>
 <script defer src="assets/js/chart/data-adapter.js"></script>
 <script defer src="assets/js/chart/annotation-model.js"></script>
-<script defer src="assets/js/chart/annotation-normalizer.js"></script>
 <script defer src="assets/js/chart/chart-renderer.js"></script>
 <script defer src="assets/js/chart/legend.js"></script>
 <script defer src="assets/js/chart/replay-engine.js"></script>
@@ -299,6 +298,11 @@
 <script defer src="assets/js/analysis/trend-engine.js"></script>
 <script defer src="assets/js/analysis/support-resistance-engine.js"></script>
 <script defer src="assets/js/analysis/analysis-engine.js"></script>
+<!-- ROOT-CAUSE FIX: the translation layer between the deterministic
+     Analysis Engine's "Analysis Context" and annotation-model.js's
+     "Structured Analysis". MUST load after analysis-engine.js and
+     before studio-bootstrap.js, which calls it. -->
+<script defer src="assets/js/chart/analysis-context-adapter.js"></script>
 <script defer src="assets/js/preclose/option-chain-provider.js"></script>
 <script defer src="assets/js/preclose/preclose-evidence-model.js"></script>
 <script defer src="assets/js/preclose/preclose-decision-engine.js"></script>
@@ -322,13 +326,6 @@
      the comment in studio-bootstrap.js), silently skipping resolveInitialProviderId()
      and stranding the AI Provider UI on ai-service.js's hardcoded 'gemini' default
      regardless of the Worker's reported defaultProvider. -->
-<!-- ollama-provider.js loads BEFORE ai-service.js: ai-service.js's
-     setProviderName('gemini') call at its own bottom doesn't need it, but
-     loading it first means window.DannyChart.OllamaProvider is guaranteed
-     present the moment any code (ai-connections.js, a later setProviderName
-     ('ollama') call) might need it — same "dependency loads first" rule
-     every other script tag on this page already follows. -->
-<script defer src="assets/js/chart/ollama-provider.js"></script>
 <script defer src="assets/js/ai-service.js"></script>
 <script defer src="assets/js/chart/ai-connections.js"></script>
 <script defer src="assets/js/chart/studio-bootstrap.js"></script>
