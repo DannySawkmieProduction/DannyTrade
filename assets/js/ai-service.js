@@ -399,6 +399,25 @@
   const OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
   const OLLAMA_MODEL = 'qwen2.5:1.5b';
   const OLLAMA_TIMEOUT_MS = 180000;
+  /* Qwen 2.5 1.5B supports a 32k context. The previous value here was
+     4096, which a full chartStructure prompt (system rules + a JSON
+     candle array) overflows easily — Ollama then silently drops the
+     front of the prompt, so the model never sees the JSON-shape rules
+     and returns prose. That is a truncation bug, not a model bug.
+     16384 fits a realistic candle window with headroom and costs only
+     KV-cache memory on a 1.5B model. Deliberately NOT solved by
+     trimming the candle array: tradeLevels/entry are index-anchored
+     into that exact array, so truncating it would silently shift every
+     index the model returns and draw levels at wrong prices. */
+  const OLLAMA_NUM_CTX = 16384;
+
+  /** The exact origin string the user must put in OLLAMA_ORIGINS. Read
+   *  from the live page so the message is always correct for whichever
+   *  Cloudflare Pages / preview / custom domain they are on. */
+  function ollamaPageOrigin() {
+    try { return (global.location && global.location.origin) || '<this site>'; }
+    catch (_e) { return '<this site>'; }
+  }
 
   function ollamaJsonFromResponse(body) {
     if (!body || typeof body.response !== 'string') {
@@ -415,58 +434,148 @@
     catch { throw new Error('Ollama returned text that was not valid JSON.'); }
   }
 
+  /* -----------------------------------------------------------------
+     Ollama response normalization — FIELD-LEVEL, not all-or-nothing.
+
+     The previous implementation validated the whole chartStructure
+     response and threw if ANY single field was off-spec. A 1.5B local
+     model reliably gets some field off-spec ("NO TRADE" instead of
+     "NO_TRADE", "moderate" instead of "Moderate", riskReward as
+     "1:2.5"), so one bad field discarded a response that was otherwise
+     fully usable, and the AI Decision Panel stayed empty even though
+     Ollama had answered correctly.
+
+     decision-panel.js already documents every decision field as
+     OPTIONAL and renders a missing one as "Not available", so the
+     strict gate was stricter than its own consumer required.
+
+     These helpers therefore normalize what is recoverable (casing,
+     separators, numeric strings) and DROP what is not. Dropping is not
+     fabricating: an unusable field becomes null and renders as
+     "Not available". Nothing is ever invented, substituted, or
+     defaulted to a tradeable value.
+  ----------------------------------------------------------------- */
   function ollamaFiniteNumber(v) {
     return typeof v === 'number' && Number.isFinite(v);
   }
 
-  function ollamaValidateDecision(d) {
-    if (d === null) return true;
-    if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
-    if (!['BUY','SELL','WAIT','NO_TRADE'].includes(d.finalDecision)) return false;
-    if (!['A+','A','B','C','D'].includes(d.tradeGrade)) return false;
-    if (!['Very High','High','Moderate','Low'].includes(d.trapRisk)) return false;
-    if (!['Bullish','Bearish','Sideways'].includes(d.trend)) return false;
-    if (typeof d.marketPhase !== 'string' ||
-        typeof d.liquidityTarget !== 'string' ||
-        typeof d.tradeQuality !== 'string' ||
-        typeof d.reasoningSummary !== 'string' ||
-        typeof d.structureSummary !== 'string' ||
-        typeof d.lastStructureEvent !== 'string' ||
-        typeof d.invalidationLevel !== 'string') return false;
-    if (!ollamaFiniteNumber(d.confidence) || !ollamaFiniteNumber(d.riskReward)) return false;
-    if (!Array.isArray(d.educationalNotes) || !d.educationalNotes.every(v => typeof v === 'string')) return false;
-    return true;
+  /** number | "2.5" | "1:2.5" -> number, else null. Never guesses. */
+  function ollamaNum(v) {
+    if (ollamaFiniteNumber(v)) return v;
+    if (typeof v !== 'string') return null;
+    const s = v.trim();
+    if (!s) return null;
+    const ratio = s.match(/^(-?\d+(?:\.\d+)?)\s*:\s*(-?\d+(?:\.\d+)?)$/);
+    if (ratio) {
+      const a = parseFloat(ratio[1]), b = parseFloat(ratio[2]);
+      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+      return null;
+    }
+    const n = Number(s.replace(/[, ]/g, ''));
+    return Number.isFinite(n) ? n : null;
   }
 
-  function ollamaValidateTradeLevels(t) {
-    if (t === null) return true;
-    if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
-    if (!['bullish','bearish'].includes(t.direction)) return false;
-    if (!ollamaFiniteNumber(t.confidence) || !ollamaFiniteNumber(t.riskReward)) return false;
-    if (!t.entry || !ollamaFiniteNumber(t.entry.index) || !ollamaFiniteNumber(t.entry.price)) return false;
-    if (!t.stopLoss || !ollamaFiniteNumber(t.stopLoss.price)) return false;
-    if (!t.target1 || !ollamaFiniteNumber(t.target1.price)) return false;
-    for (const k of ['target2','target3','invalidation']) {
-      if (t[k] != null && (!t[k] || !ollamaFiniteNumber(t[k].price))) return false;
+  /** Case/separator-insensitive enum match. Returns the CANONICAL
+   *  spelling from `allowed`, or null. Does not fall back to a default. */
+  function ollamaEnum(v, allowed) {
+    if (typeof v !== 'string') return null;
+    const key = v.trim().toLowerCase().replace(/[\s_\-]+/g, '');
+    if (!key) return null;
+    for (const a of allowed) {
+      if (a.toLowerCase().replace(/[\s_\-]+/g, '') === key) return a;
     }
-    for (const k of ['observation','evidence','reasoning','tradingImplication']) {
-      if (typeof t[k] !== 'string') return false;
-    }
-    return true;
+    return null;
   }
 
-  function ollamaValidatePremiumDiscount(p) {
-    if (p === null) return true;
-    if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
-    return ['rangeHighIndex','rangeHighPrice','rangeLowIndex','rangeLowPrice','equilibriumPrice','confidence']
-      .every(k => ollamaFiniteNumber(p[k]));
+  function ollamaStr(v) {
+    if (typeof v === 'string') return v.trim() ? v : null;
+    if (ollamaFiniteNumber(v)) return String(v);
+    return null;
+  }
+
+  /** Every field independent. Returns null only if NOTHING survived. */
+  function ollamaNormalizeDecision(d) {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return null;
+    const out = {
+      finalDecision:     ollamaEnum(d.finalDecision, ['BUY','SELL','WAIT','NO_TRADE']),
+      tradeGrade:        ollamaEnum(d.tradeGrade, ['A+','A','B','C','D']),
+      trapRisk:          ollamaEnum(d.trapRisk, ['Very High','High','Moderate','Low']),
+      trend:             ollamaEnum(d.trend, ['Bullish','Bearish','Sideways']),
+      marketPhase:       ollamaStr(d.marketPhase),
+      liquidityTarget:   ollamaStr(d.liquidityTarget),
+      tradeQuality:      ollamaStr(d.tradeQuality),
+      reasoningSummary:  ollamaStr(d.reasoningSummary),
+      structureSummary:  ollamaStr(d.structureSummary),
+      lastStructureEvent:ollamaStr(d.lastStructureEvent),
+      invalidationLevel: ollamaStr(d.invalidationLevel),
+      confidence:        ollamaNum(d.confidence),
+      riskReward:        ollamaNum(d.riskReward),
+      educationalNotes:  Array.isArray(d.educationalNotes)
+        ? d.educationalNotes.map(ollamaStr).filter(s => s !== null)
+        : []
+    };
+    if (out.confidence !== null && (out.confidence < 0 || out.confidence > 1)) {
+      // A model that reports 0-100 instead of 0-1 is a scale mistake we
+      // can read, not a value we invent. Anything else is dropped.
+      out.confidence = (out.confidence > 1 && out.confidence <= 100) ? out.confidence / 100 : null;
+    }
+    const survived = Object.keys(out).some(k =>
+      k === 'educationalNotes' ? out[k].length > 0 : out[k] !== null);
+    return survived ? out : null;
+  }
+
+  /** tradeLevels drives DRAWN geometry, so its anchors are all-or-
+   *  nothing: without a real direction + entry index/price + stopLoss +
+   *  target1 there is nothing safe to plot, and a partial level set
+   *  would be a fabricated level. Descriptive strings around those
+   *  anchors stay optional. */
+  function ollamaNormalizeTradeLevels(t) {
+    if (!t || typeof t !== 'object' || Array.isArray(t)) return null;
+    const direction = ollamaEnum(t.direction, ['bullish','bearish']);
+    const entryIndex = t.entry ? ollamaNum(t.entry.index) : null;
+    const entryPrice = t.entry ? ollamaNum(t.entry.price) : null;
+    const stopPrice  = t.stopLoss ? ollamaNum(t.stopLoss.price) : null;
+    const t1Price    = t.target1 ? ollamaNum(t.target1.price) : null;
+    if (direction === null || entryIndex === null || entryPrice === null ||
+        stopPrice === null || t1Price === null) return null;
+
+    const out = {
+      direction,
+      confidence: ollamaNum(t.confidence),
+      riskReward: ollamaNum(t.riskReward),
+      entry: { index: entryIndex, price: entryPrice },
+      stopLoss: { price: stopPrice },
+      target1: { price: t1Price },
+      target2: null, target3: null, invalidation: null,
+      observation: ollamaStr(t.observation),
+      evidence: ollamaStr(t.evidence),
+      reasoning: ollamaStr(t.reasoning),
+      tradingImplication: ollamaStr(t.tradingImplication)
+    };
+    ['target2','target3','invalidation'].forEach(k => {
+      const p = t[k] ? ollamaNum(t[k].price) : null;
+      if (p !== null) out[k] = { price: p };
+    });
+    return out;
+  }
+
+  function ollamaNormalizePremiumDiscount(p) {
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+    const keys = ['rangeHighIndex','rangeHighPrice','rangeLowIndex','rangeLowPrice','equilibriumPrice','confidence'];
+    const out = {};
+    for (const k of keys) {
+      const n = ollamaNum(p[k]);
+      if (n === null) return null; // a zone with a missing edge is not drawable
+      out[k] = n;
+    }
+    return out;
   }
 
   function ollamaCoerceChartStructure(parsed) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('Ollama chart analysis was not a JSON object.');
     }
-    const out = {
+    return {
       version: typeof parsed.version === 'string' ? parsed.version : '1.0',
       timeframe: typeof parsed.timeframe === 'string' ? parsed.timeframe : '',
       swings: Array.isArray(parsed.swings) ? parsed.swings : [],
@@ -474,20 +583,10 @@
       orderBlocks: Array.isArray(parsed.orderBlocks) ? parsed.orderBlocks : [],
       fvgs: Array.isArray(parsed.fvgs) ? parsed.fvgs : [],
       liquidity: Array.isArray(parsed.liquidity) ? parsed.liquidity : [],
-      premiumDiscount: parsed.premiumDiscount === undefined ? null : parsed.premiumDiscount,
-      tradeLevels: parsed.tradeLevels === undefined ? null : parsed.tradeLevels,
-      decision: parsed.decision === undefined ? null : parsed.decision
+      premiumDiscount: ollamaNormalizePremiumDiscount(parsed.premiumDiscount),
+      tradeLevels: ollamaNormalizeTradeLevels(parsed.tradeLevels),
+      decision: ollamaNormalizeDecision(parsed.decision)
     };
-    if (!ollamaValidatePremiumDiscount(out.premiumDiscount)) {
-      throw new Error('Ollama returned an invalid premiumDiscount object.');
-    }
-    if (!ollamaValidateTradeLevels(out.tradeLevels)) {
-      throw new Error('Ollama returned an invalid tradeLevels object.');
-    }
-    if (!ollamaValidateDecision(out.decision)) {
-      throw new Error('Ollama returned an invalid decision object.');
-    }
-    return out;
   }
 
   function buildOllamaPrompt(type, payload) {
@@ -536,16 +635,23 @@
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+      const prompt = buildOllamaPrompt(type, payload || {});
+      // ~4 chars/token is the usual rough ratio; warn (never silently
+      // truncate) if the prompt is close to overflowing the context.
+      if (prompt.length / 4 > OLLAMA_NUM_CTX * 0.85) {
+        console.warn(`[AIService/Ollama] Prompt is ~${Math.round(prompt.length / 4)} tokens against num_ctx ${OLLAMA_NUM_CTX}. ` +
+          'Ollama will drop the front of the prompt and the response is likely to be off-schema. Reduce the candle window.');
+      }
       try {
         const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: OLLAMA_MODEL,
-            prompt: buildOllamaPrompt(type, payload || {}),
+            prompt,
             stream: false,
             format: 'json',
-            options: { temperature: 0.1, num_ctx: 4096 }
+            options: { temperature: 0.1, num_ctx: OLLAMA_NUM_CTX }
           }),
           signal: controller.signal
         });
@@ -571,6 +677,15 @@
       } catch (err) {
         if (err && err.name === 'AbortError') {
           throw new Error(`Local Ollama request timed out after ${Math.round(OLLAMA_TIMEOUT_MS/1000)} seconds.`);
+        }
+        // A browser-level fetch rejection (TypeError, no HTTP status) is
+        // indistinguishable in JS between "Ollama is stopped", "CORS
+        // rejected this origin" and "Chrome Local Network Access denied".
+        // Name all three rather than guessing one.
+        if (err instanceof TypeError) {
+          throw new Error(`Could not reach Ollama at ${OLLAMA_BASE_URL}. Either Ollama is not running, ` +
+            `or it is running but has not been told to accept this site's origin (set OLLAMA_ORIGINS=${ollamaPageOrigin()} and restart Ollama), ` +
+            'or the browser blocked the local-network request (Chrome 142+ Local Network Access permission).');
         }
         throw err;
       } finally {
@@ -669,6 +784,51 @@
   AIService.getActiveProvider = getProviderName;
   AIService.setProvider = setProviderName;
   AIService.isProviderAvailable = isProviderAvailable;
+
+  /* ---------------------------------------------------------------
+     One-call browser-side Ollama self-test, for the DevTools console:
+         await AIService.testOllama()
+     Exercises exactly the two calls the provider makes — GET /api/tags
+     and a tiny POST /api/generate — from the page's own origin, so it
+     proves browser reachability (which `curl` cannot). Returns a plain
+     object; never throws.
+  --------------------------------------------------------------- */
+  async function testOllama() {
+    const out = { origin: ollamaPageOrigin(), baseUrl: OLLAMA_BASE_URL, model: OLLAMA_MODEL, tags: null, generate: null };
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { method: 'GET', cache: 'no-store' });
+      const json = await res.json();
+      const names = (Array.isArray(json && json.models) ? json.models : []).map(m => m && m.name).filter(Boolean);
+      out.tags = { ok: res.ok, status: res.status, models: names, modelInstalled: names.some(n => n === OLLAMA_MODEL) };
+    } catch (err) {
+      out.tags = { ok: false, error: (err && err.message) || String(err),
+        hint: `If curl works but this does not, it is CORS or Local Network Access. Set OLLAMA_ORIGINS=${ollamaPageOrigin()} and restart Ollama, then allow the browser's local-network prompt.` };
+      return out;
+    }
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: OLLAMA_MODEL, prompt: 'Reply with exactly: DANNYTRADE API WORKS', stream: false })
+      });
+      const json = await res.json();
+      out.generate = { ok: res.ok, status: res.status, response: (json && json.response) || null };
+    } catch (err) {
+      out.generate = { ok: false, error: (err && err.message) || String(err),
+        hint: 'GET /api/tags succeeded but POST /api/generate did not — this is the CORS preflight (OPTIONS) being rejected. OLLAMA_ORIGINS must include this exact origin.' };
+    }
+    return out;
+  }
+  AIService.testOllama = testOllama;
+
+  /* Test-only surface (mirrors the pattern already used by
+     assets/js/chart/ollama-provider.js). Not used by any UI code. */
+  AIService.__ollamaInternals = {
+    ollamaNum, ollamaEnum, ollamaStr,
+    ollamaNormalizeDecision, ollamaNormalizeTradeLevels,
+    ollamaNormalizePremiumDiscount, ollamaCoerceChartStructure,
+    ollamaJsonFromResponse, OLLAMA_NUM_CTX
+  };
 
   setProviderName('gemini'); // Gemini remains the default AI provider — unchanged external behavior.
 
