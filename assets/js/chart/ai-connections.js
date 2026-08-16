@@ -31,7 +31,8 @@
 
   const PROVIDERS = [
     { id: 'gemini', label: 'Gemini' },
-    { id: 'openrouter', label: 'OpenRouter' }
+    { id: 'openrouter', label: 'OpenRouter' },
+    { id: 'ollama', label: 'Ollama' }
   ];
 
   function getStoredProviderId(){
@@ -80,6 +81,7 @@
   async function resolveInitialProviderId(){
     const status = await checkStatus();
     const stored = getStoredProviderId();
+    if(stored === 'ollama') return 'ollama'; // local provider — the user's own explicit prior choice; status is tested separately, never assumed
     if(stored === 'openrouter' && status.openrouter.configured) return 'openrouter';
     if(stored === 'gemini') return 'gemini';
     if(status.defaultProvider === 'openrouter' && status.openrouter.configured) return 'openrouter';
@@ -95,6 +97,8 @@
     container._aiConnectionsMounted = true;
 
     let switching = false; // re-entrancy guard
+    let ollamaStatus = null; // last testConnection() result — null means "not tested yet this session"
+    let ollamaModels = [];   // last known installed-model list, from listModels()/testConnection()
     render({ gemini: { configured: true }, openrouter: { configured: false, model: null } }); // optimistic initial paint
     refreshAndRender();
 
@@ -119,6 +123,10 @@
         : 'gemini';
 
       PROVIDERS.forEach(provider => {
+        if(provider.id === 'ollama'){
+          list.appendChild(renderOllamaRow(activeId === 'ollama'));
+          return;
+        }
         const providerStatus = status[provider.id] || { configured: false };
         const isActive = activeId === provider.id;
 
@@ -161,6 +169,159 @@
       });
 
       container.appendChild(list);
+    }
+
+    /* -----------------------------------------------------------------
+       Ollama row + sub-panel — deliberately separate from the generic
+       per-provider row above (SERVER providers vs the LOCAL provider
+       are different enough — URL/model config, an explicit test
+       action, no "configured on this Worker" concept — that forcing
+       them through the same row markup would blur that distinction
+       rather than clarify it, per requirement 8's explicit separation
+       of "SERVER AI PROVIDERS" vs "LOCAL AI PROVIDER"). Never shows
+       "Connected" without an actual testConnection() call completing
+       first — ollamaStatus starts null (not tested), not a guess.
+    ----------------------------------------------------------------- */
+    function renderOllamaRow(isActive){
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'border-radius:6px;padding:0.4rem 0.6rem;' + (isActive ? 'background:rgba(212,175,106,0.12);' : '');
+
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:0.6rem;';
+
+      const dotColor = ollamaStatus && ollamaStatus.status === 'OLLAMA_CONNECTED' ? '#3fb950'
+        : ollamaStatus ? '#e0575b' : '#8b8b8b';
+      const dot = document.createElement('span');
+      dot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};`;
+      dot.title = ollamaStatus ? ollamaStatus.status : 'Not tested yet';
+      row.appendChild(dot);
+
+      const name = document.createElement('span');
+      name.textContent = 'Ollama' + (getModelLabel() ? ` (${getModelLabel()})` : '');
+      name.style.cssText = 'flex:1;font-size:0.85rem;';
+      row.appendChild(name);
+
+      if(isActive){
+        const activeTag = document.createElement('span');
+        activeTag.textContent = 'Active';
+        activeTag.style.cssText = 'font-size:0.75rem;opacity:0.75;';
+        row.appendChild(activeTag);
+      } else {
+        const useBtn = document.createElement('button');
+        useBtn.textContent = 'Use';
+        useBtn.style.cssText = 'font-size:0.75rem;padding:0.2rem 0.5rem;cursor:pointer;';
+        useBtn.addEventListener('click', () => switchTo('ollama'));
+        row.appendChild(useBtn);
+      }
+      wrap.appendChild(row);
+
+      // Sub-panel: URL, model, Test Connection, status — visible
+      // whenever Ollama is the active provider, so the user always has
+      // what they need to fix a connection without hunting for a
+      // separate settings screen. Collapsed (not rendered) otherwise
+      // to keep the panel compact for the common Gemini/OpenRouter case.
+      if(isActive){
+        wrap.appendChild(renderOllamaSubPanel());
+      }
+
+      return wrap;
+    }
+
+    function getModelLabel(){
+      const OllamaProvider = window.DannyChart && window.DannyChart.OllamaProvider;
+      return OllamaProvider ? OllamaProvider.getModel() : '';
+    }
+
+    function renderOllamaSubPanel(){
+      const OllamaProvider = window.DannyChart && window.DannyChart.OllamaProvider;
+      const panel = document.createElement('div');
+      panel.style.cssText = 'margin:0.5rem 0 0.25rem 0;padding:0.5rem;border:1px solid rgba(255,255,255,0.08);border-radius:6px;display:flex;flex-direction:column;gap:0.4rem;';
+
+      if(!OllamaProvider){
+        panel.textContent = 'ollama-provider.js failed to load — Ollama is unavailable.';
+        panel.style.color = '#e0575b';
+        panel.style.fontSize = '0.8rem';
+        return panel;
+      }
+
+      const urlLabel = document.createElement('label');
+      urlLabel.textContent = 'Ollama URL';
+      urlLabel.style.cssText = 'font-size:0.75rem;opacity:0.75;';
+      const urlInput = document.createElement('input');
+      urlInput.type = 'text';
+      urlInput.value = OllamaProvider.getBaseUrl();
+      urlInput.placeholder = OllamaProvider.DEFAULT_BASE_URL;
+      urlInput.style.cssText = 'font-size:0.8rem;padding:0.3rem 0.4rem;border-radius:4px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.03);color:inherit;';
+      urlInput.addEventListener('change', () => {
+        OllamaProvider.setBaseUrl(urlInput.value.trim());
+        ollamaStatus = null; // URL changed — previous test result no longer applies
+        refreshAndRender();
+      });
+
+      const modelLabel = document.createElement('label');
+      modelLabel.textContent = 'Model';
+      modelLabel.style.cssText = 'font-size:0.75rem;opacity:0.75;';
+      const modelSelect = document.createElement('select');
+      modelSelect.style.cssText = 'font-size:0.8rem;padding:0.3rem 0.4rem;border-radius:4px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.03);color:inherit;';
+      const currentModel = OllamaProvider.getModel();
+      const optionSource = ollamaModels.length ? ollamaModels : (currentModel ? [currentModel] : []);
+      if(optionSource.length === 0){
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(no models detected — test connection)';
+        modelSelect.appendChild(opt);
+      } else {
+        optionSource.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m; opt.textContent = m;
+          if(m === currentModel) opt.selected = true;
+          modelSelect.appendChild(opt);
+        });
+      }
+      modelSelect.addEventListener('change', () => {
+        OllamaProvider.setModel(modelSelect.value);
+        ollamaStatus = null;
+        refreshAndRender();
+      });
+
+      const testBtn = document.createElement('button');
+      testBtn.textContent = 'Test Connection';
+      testBtn.style.cssText = 'font-size:0.78rem;padding:0.3rem 0.6rem;cursor:pointer;align-self:flex-start;';
+      const statusEl = document.createElement('div');
+      statusEl.style.cssText = 'font-size:0.75rem;line-height:1.4;';
+
+      function paintStatus(){
+        if(!ollamaStatus){
+          statusEl.textContent = 'Status: not tested yet.';
+          statusEl.style.color = '';
+          return;
+        }
+        const ok = ollamaStatus.status === 'OLLAMA_CONNECTED';
+        statusEl.textContent = (ok ? 'CONNECTED — ' : 'NOT CONNECTED — ') + ollamaStatus.message;
+        statusEl.style.color = ok ? '#3fb950' : '#e0575b';
+      }
+      paintStatus();
+
+      testBtn.addEventListener('click', async () => {
+        testBtn.disabled = true;
+        testBtn.textContent = 'Testing…';
+        try{
+          const result = await OllamaProvider.testConnection({ baseUrl: urlInput.value.trim(), model: modelSelect.value });
+          ollamaStatus = result;
+          ollamaModels = result.models || [];
+        } catch(err){
+          ollamaStatus = { status: 'OLLAMA_REQUEST_FAILED', message: err && err.message ? err.message : String(err), models: [] };
+        } finally {
+          testBtn.disabled = false;
+          testBtn.textContent = 'Test Connection';
+          refreshAndRender();
+        }
+      });
+
+      panel.appendChild(urlLabel); panel.appendChild(urlInput);
+      panel.appendChild(modelLabel); panel.appendChild(modelSelect);
+      panel.appendChild(testBtn);
+      panel.appendChild(statusEl);
+      return panel;
     }
 
     async function switchTo(providerId){
