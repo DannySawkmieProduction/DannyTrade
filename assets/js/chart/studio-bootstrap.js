@@ -192,28 +192,94 @@
       // the AI call failed/isn't configured no longer looks identical to
       // "the toggle button is broken." On success, the banner is cleared
       // and the status is recorded as 'ok' the same way.
+      // =============================================================
+      // ANNOTATION PIPELINE — DETERMINISTIC ENGINES FIRST
+      // =============================================================
+      // ROOT-CAUSE FIX. This function used to have exactly ONE source
+      // of chart structure: the remote AI Worker. The 8 deterministic
+      // engines in assets/js/analysis/ were loaded by studio.html but
+      // were never connected to the chart at all — only preclose-panel
+      // .js consumed them. So whenever the AI call failed, was not
+      // connected, or returned a text-only decision, this returned an
+      // all-empty Structured Analysis, buildAnnotations() correctly
+      // produced zero annotations, and every overlay toggle had
+      // literally nothing to show or hide. That is the "toggles work
+      // but nothing is drawn" symptom.
+      //
+      // They also could not simply be plugged in: the engines emit an
+      // "Analysis Context" (ctx.orderBlocks.orderBlocks[].{direction,
+      // top,bottom}, ctx.fairValueGaps.fvgs[].{direction,startIndex},
+      // ctx.liquidity.{buySideLiquidity,sellSideLiquidity,sweeps},
+      // ctx.premiumDiscount.zones[]) while annotation-model.js consumes
+      // a "Structured Analysis" (orderBlocks[].{subtype,priceHigh,
+      // priceLow}, fvgs[].{subtype,index}, liquidity[].{subtype,index,
+      // price}, premiumDiscount.{rangeHighIndex,...}). Feeding one to
+      // the other yields 0 annotations and two "malformed input"
+      // warnings. assets/js/chart/analysis-context-adapter.js is the
+      // pure field translation between the two; neither the engines nor
+      // annotation-model.js are modified.
+      //
+      // Order of precedence now:
+      //   1. Deterministic engines produce every drawable structure
+      //      (market structure, BOS/CHoCH, order blocks, FVGs,
+      //      liquidity + sweeps, premium/discount). Local, offline,
+      //      reproducible — no network required to draw the chart.
+      //   2. The AI call still runs, unchanged, and still populates the
+      //      Decision Panel via `decision`. If — and only if — it
+      //      returns a tradeLevels object, that is merged in; nothing
+      //      is invented to fill the Trade Levels layer.
+      //   3. If the AI returns structural arrays of its own they are
+      //      ignored for drawing, per the project rule that the
+      //      deterministic engine decides and AI may only explain.
+      // Banner semantics are unchanged: it reports the state of the AI
+      // request, which is now genuinely independent of whether the
+      // chart has overlays to draw.
       getStructuredAnalysis: async function(candles, timeframe, symbol){
+        var Adapter = window.DannyChart && window.DannyChart.AnalysisContextAdapter;
+        var Engine = window.DannyChart && window.DannyChart.Analysis && window.DannyChart.Analysis.AnalysisEngine;
+
+        var structured = null;
+        var engineDiag = null;
+        if(Adapter && Engine && Array.isArray(candles) && candles.length){
+          try{
+            var ctx = Engine.analyze(candles, { symbol: symbol, timeframe: timeframe });
+            structured = Adapter.toStructuredAnalysis(ctx, candles, { timeframe: timeframe });
+            engineDiag = Adapter.describe(ctx, structured);
+            structured.__engineDiagnostics = engineDiag;
+            console.log('[StudioBootstrap] Deterministic Analysis Engine -> Structured Analysis:', engineDiag);
+          } catch(err){
+            console.error('[StudioBootstrap] Deterministic analysis failed:', err);
+            structured = null;
+          }
+        } else if(!Adapter || !Engine){
+          console.error('[StudioBootstrap] Deterministic analysis unavailable — AnalysisContextAdapter or AnalysisEngine did not load. Check the script order in studio.html.');
+        }
+
+        if(!structured){
+          structured = {
+            version: '1.0', timeframe: timeframe,
+            swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
+            premiumDiscount: null, tradeLevels: null, decision: null
+          };
+        }
+
         var status = { status: 'unknown', message: '', at: Date.now() };
         try{
           var resp = await window.AIService.analyzeChartStructure({ symbol: symbol, timeframe: timeframe, candles: candles });
           if(resp && resp.status === 'ok' && resp.data){
             status.status = 'ok';
-            // Distinguish "ok WITH drawable structure" from "ok but the
-            // model returned only a text decision and empty structural
-            // arrays". The latter previously hid the banner and returned
-            // silently, leaving a blank chart with no explanation — now
-            // it's surfaced honestly so it's not mistaken for a broken
-            // toggle or a renderer bug. Either way resp.data is returned
-            // unchanged (never fabricate structures to fill the chart).
-            if(hasDrawableStructure(resp.data)){
-              status.message = 'Analysis received.';
-              hideAnalysisBanner();
-            } else {
-              status.message = 'Analysis received, but it contained no drawable chart structures (all structural arrays empty).';
-              showAnalysisBanner('AI returned a decision but no drawable chart structures — market structure, order blocks, FVGs, liquidity and premium/discount were all empty for this window, so there is nothing to draw. This is an AI/data result, not a chart or toggle bug.');
+            status.message = 'Analysis received.';
+            // The AI contributes reasoning, not geometry: `decision` for
+            // the Decision Panel, and `tradeLevels` only if it actually
+            // returned a real one. Its structural arrays are ignored —
+            // the deterministic engines own those.
+            structured.decision = resp.data.decision || null;
+            if(resp.data.tradeLevels && typeof resp.data.tradeLevels === 'object'){
+              structured.tradeLevels = resp.data.tradeLevels;
             }
+            hideAnalysisBanner();
             window.DannyChart.lastAnalysisStatus = status;
-            return resp.data;
+            return structured;
           }
           if(resp && resp.status === 'not_connected'){
             status.status = 'not_connected';
@@ -232,13 +298,17 @@
           status.message = (err && err.message) ? err.message : 'AI provider request threw an exception.';
           console.error('[StudioBootstrap] getStructuredAnalysis failed:', err);
         }
+
         window.DannyChart.lastAnalysisStatus = status;
-        showAnalysisBanner('Live analysis unavailable (' + status.message + ') — chart shows price only. Overlay toggles have nothing to draw until this resolves.');
-        return {
-          version: '1.0', timeframe: timeframe,
-          swings: [], structureEvents: [], orderBlocks: [], fvgs: [], liquidity: [],
-          premiumDiscount: null, tradeLevels: null, decision: null
-        };
+        // The AI leg failed — but the chart overlays no longer depend on
+        // it, so the banner must say so accurately instead of claiming
+        // there is nothing to draw.
+        if(hasDrawableStructure(structured)){
+          showAnalysisBanner('AI commentary unavailable (' + status.message + '). Chart overlays are drawn from the local deterministic Analysis Engine and are unaffected; only the AI decision text is missing.');
+        } else {
+          showAnalysisBanner('Live analysis unavailable (' + status.message + ') — and the local Analysis Engine found no structures in this window either, so there is nothing to draw.');
+        }
+        return structured;
       }
     });
 
