@@ -54,6 +54,69 @@
   const STATE = Object.freeze({ CALL_BIAS: 'CALL_BIAS', PUT_BIAS: 'PUT_BIAS', NO_TRADE: 'NO_TRADE' });
   const ENTRY_STATE = Object.freeze({ CONFIRMED: 'CONFIRMED', WAIT: 'WAIT', NONE: 'NONE' });
 
+  /* =====================================================================
+     PRESENTATION CATEGORY (additive — Phase 6 stabilization)
+
+     `state` alone cannot explain a NO_TRADE. All six NO_TRADE paths
+     return the identical STATE.NO_TRADE, so the panel rendered a grey
+     "NO TRADE" chip whether the market was closed, the feed had gone
+     stale, or the analysis genuinely found no setup. That reads as a
+     verdict on the MARKET when it is often a verdict on the DATA.
+
+     This category is derived ONLY from `blockers` and `state`, both of
+     which finalize() already receives. No new checks, no new inputs, no
+     change to any veto, threshold, blocker code, reason string,
+     confidence number, or entry/invalidation condition — every existing
+     field keeps its current value. `state` remains the authoritative
+     decision; this is a label for it.
+
+     PRECEDENCE — MARKET_CLOSED > STALE_DATA > NO_SETUP.
+     Deliberate: STALE_DATA and OUTSIDE_TRADING_WINDOW are not
+     independent. Data goes stale BECAUSE the session ended, so after
+     close both fire together (observed live at 17:04 IST: a 108-minute-old
+     candle plus a CLOSED session). Reporting that as STALE_DATA would
+     imply a feed problem where none exists. With MARKET_CLOSED winning,
+     STALE_DATA keeps a precise meaning: the session is OPEN but the feed
+     has fallen behind — a real data-health fault worth alarming about.
+  ===================================================================== */
+  const CATEGORY = Object.freeze({
+    ACTIONABLE: 'ACTIONABLE',       // CALL_BIAS/PUT_BIAS — a real directional read
+    MARKET_CLOSED: 'MARKET_CLOSED', // analysis ran; session has ended — historical snapshot
+    STALE_DATA: 'STALE_DATA',       // session open, but the candle is too old to act on
+    NO_SETUP: 'NO_SETUP',           // market open, data fresh, no actionable setup
+    BLOCKED: 'BLOCKED'              // any other hard blocker (engine/session/option-data failure)
+  });
+
+  /* Blockers that mean "the session is not open for a live decision". */
+  const CLOSED_BLOCKERS = ['OUTSIDE_TRADING_WINDOW'];
+  /* Blockers that mean "the data is not current enough to act on". */
+  const STALE_BLOCKERS = ['STALE_DATA', 'INSUFFICIENT_CANDLES', 'STALE_OPTION_DATA'];
+  /* Blockers that are genuine ANALYSIS outcomes — the pipeline ran fine
+     and simply did not find a tradeable setup. */
+  const NO_SETUP_BLOCKERS = ['CONFLICTING_EVIDENCE', 'INSUFFICIENT_EVIDENCE', 'INSUFFICIENT_NET_EVIDENCE', 'GROUPS_DISAGREE'];
+
+  const CATEGORY_MESSAGE = Object.freeze({
+    ACTIONABLE: null, // the existing bias presentation already explains itself
+    MARKET_CLOSED: 'Historical snapshot — not a live entry signal. The analysis below ran successfully, but the market is closed and the latest candle is historical.',
+    STALE_DATA: 'Market data is too old to safely issue a current entry signal.',
+    NO_SETUP: 'Market is open and data is fresh, but no actionable setup is confirmed.',
+    BLOCKED: 'A data or system condition prevented a safe current assessment — see blockers below.'
+  });
+
+  /** Derives the presentation category. Pure; reads nothing but its args. */
+  function categorize(state, blockers){
+    if(state !== STATE.NO_TRADE) return CATEGORY.ACTIONABLE;
+    const has = codes => codes.some(c => blockers.indexOf(c) !== -1);
+    if(has(CLOSED_BLOCKERS)) return CATEGORY.MARKET_CLOSED;
+    if(has(STALE_BLOCKERS)) return CATEGORY.STALE_DATA;
+    if(has(NO_SETUP_BLOCKERS)) return CATEGORY.NO_SETUP;
+    // A NO_TRADE with no blockers at all cannot occur via any current
+    // rule (every NO_TRADE path pushes one), but categorising it as
+    // NO_SETUP would claim the analysis ran cleanly when an unknown
+    // hard blocker is the more honest reading.
+    return blockers.length ? CATEGORY.BLOCKED : CATEGORY.NO_SETUP;
+  }
+
   function decide(evidenceBundle){
     const bundle = evidenceBundle || { bullish: [], bearish: [], conflicting: [], riskFlags: [] };
     const bullish = Array.isArray(bundle.bullish) ? bundle.bullish : [];
@@ -175,8 +238,24 @@
     const noTradeCondition = blockers.length
       ? blockers.join(', ')
       : 'Conflicting evidence, insufficient evidence, disagreement between underlying and options groups, stale data, or a risk flag.';
-    return { state, entryState, confidence, reasons, blockers, entryCondition, invalidationCondition, noTradeCondition };
+    const noTradeCategory = categorize(state, blockers);
+    return {
+      state, entryState, confidence, reasons, blockers,
+      entryCondition, invalidationCondition, noTradeCondition,
+      // Additive presentation fields — see the CATEGORY block above.
+      // Nothing above this line changed value.
+      noTradeCategory,
+      categoryMessage: CATEGORY_MESSAGE[noTradeCategory] || null,
+      // True when `confidence` was never actually evaluated (a hard
+      // blocker short-circuited before rule 5), so the panel can avoid
+      // rendering "Confidence: 0%" as though zero were a measurement.
+      confidenceEvaluated: state !== STATE.NO_TRADE
+    };
   }
 
-  window.DannyChart.PrecloseDecisionEngine = { decide, STATE, ENTRY_STATE, MIN_DIRECTIONAL_EVIDENCE, GREEKS_CONFIDENCE_PENALTY, EXPIRY_CONFIDENCE_PENALTY, SOFT_RISK_CODES };
+  window.DannyChart.PrecloseDecisionEngine = {
+    decide, STATE, ENTRY_STATE, CATEGORY, CATEGORY_MESSAGE, categorize,
+    MIN_DIRECTIONAL_EVIDENCE, GREEKS_CONFIDENCE_PENALTY, EXPIRY_CONFIDENCE_PENALTY, SOFT_RISK_CODES,
+    CLOSED_BLOCKERS, STALE_BLOCKERS, NO_SETUP_BLOCKERS
+  };
 })();
