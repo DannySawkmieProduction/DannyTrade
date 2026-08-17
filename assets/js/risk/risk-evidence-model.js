@@ -252,13 +252,34 @@
     const resolution = opts.structureResolution || 'external';
     const ctx = (analysisContext && typeof analysisContext === 'object') ? analysisContext : null;
 
-    // With no proposed direction there is nothing to be for or against.
-    // Every source is reported so the panel still shows what ran, but
-    // no stance can be SUPPORTING or CONFLICTING.
+    /* With no proposed direction there is nothing to be for or against,
+       so the eight directional readers are deliberately NOT run (that
+       remains out of scope here) and no stance can be SUPPORTING or
+       CONFLICTING. Every source is still reported so the panel shows
+       what ran.
+
+       PRESENTATION-ONLY DISTINCTION. These are two different facts and
+       were previously collapsed into one:
+
+         ctx absent  -> MISSING. The engines genuinely produced nothing.
+         ctx present -> NEUTRAL. The engines ran and produced their
+                        analysis; there is simply no trade direction to
+                        score it against — the normal state for a valid
+                        WAIT or NO_TRADE.
+
+       Reporting the second case as MISSING misrepresented eight healthy
+       engines as broken, and made a valid WAIT read as a data failure.
+
+       supportingCount and conflictingCount are 0 either way, so no
+       confluence threshold, veto, tradeability or finalDecision changes:
+       risk-decision-engine.js returns from its direction===NONE branch
+       before any tier that reads these tallies. */
     if(dir === 'NONE' || !ctx){
       const confluence = SOURCES.map(s => item(
-        s, STANCE.MISSING,
-        !ctx ? 'No analysis context available.' : 'No trade direction proposed; stance is not applicable.'
+        s,
+        !ctx ? STANCE.MISSING : STANCE.NEUTRAL,
+        !ctx ? 'No analysis context available.'
+             : 'Analysis available; no trade direction proposed to score against.'
       ));
       return summarize(dir, confluence, !!ctx);
     }
