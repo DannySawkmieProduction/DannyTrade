@@ -447,6 +447,28 @@
       if(!DC.InstrumentSelector || typeof DC.InstrumentSelector.mount !== 'function') return;
       var triggerEl = document.getElementById('chartSymbol');
       if(!triggerEl) return;
+
+      // MCX contract resolution — runs BEFORE the selector can be used,
+      // so GOLD MINI / CRUDE OIL / NATURAL GAS are either resolved to a
+      // real current futures ticker or honestly marked non-selectable by
+      // the time the sheet is first opened.
+      //
+      // Deliberately NOT awaited: the selector's render() reads the
+      // registry live each time it opens, so a resolution that lands a
+      // moment later is picked up on the next open without blocking
+      // chart startup for an index instrument (NIFTY is the default and
+      // needs none of this). Never rejects — see resolveMcxContracts().
+      if(DC.FyersService && typeof DC.FyersService.resolveMcxContracts === 'function'){
+        DC.FyersService.resolveMcxContracts().then(function(r){
+          if(r && r.resolved && r.resolved.length){
+            console.info('[StudioBootstrap] MCX contracts resolved:', r.resolved.join(', '));
+          }
+          if(r && r.pending && r.pending.length){
+            console.warn('[StudioBootstrap] MCX contracts still pending (non-selectable):', r.pending.join(', '));
+          }
+        });
+      }
+
       DC.InstrumentSelector.mount({
         triggerEl: triggerEl,
         getCurrentId: function(){

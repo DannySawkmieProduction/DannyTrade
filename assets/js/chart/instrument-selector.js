@@ -73,14 +73,27 @@
         groupsHtml += `<div style="margin-top:16px;font-family:var(--font-mono,monospace);font-size:10.5px;letter-spacing:.06em;color:var(--text-faint,#565C70)">${GROUP_LABEL[groupKey]}</div>`;
         items.forEach(function(inst){
           const isCurrent = inst.id === currentId;
+          // An unresolved MCX contract is NOT selectable. Previously any
+          // row fired onSelect(), so tapping GOLD MINI reached
+          // toFyersSymbol() and threw "requires an active MCX contract
+          // symbol" — the warning was a symptom of the selector letting
+          // the tap through, not of the safety check being wrong.
+          const isSelectable = inst.selectable !== false;
           const pendingTag = inst.contractPending
             ? `<span style="margin-left:6px;font-family:var(--font-mono,monospace);font-size:9.5px;color:var(--gold,#D4AF6A);border:1px solid rgba(212,175,106,0.4);border-radius:10px;padding:1px 6px">CONTRACT PENDING</span>`
             : '';
+          // The real reason, when fyers-service.js recorded one.
+          const reasonLine = (inst.contractPending && inst.contractReason)
+            ? `<div style="font-family:var(--font-mono,monospace);font-size:10px;color:var(--gold,#D4AF6A);margin-top:3px;line-height:1.35">${esc(inst.contractReason)}</div>`
+            : (inst.contractPending
+                ? `<div style="font-family:var(--font-mono,monospace);font-size:10px;color:var(--gold,#D4AF6A);margin-top:3px">Resolving active MCX contract…</div>`
+                : '');
           groupsHtml += `
-            <button type="button" data-instrument-id="${esc(inst.id)}" style="width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center;padding:12px 6px;background:${isCurrent ? 'var(--bg-elev-2,#1A1F2B)' : 'none'};border:none;border-bottom:1px solid var(--border-soft,#1B2030);color:var(--text,#E9EBF1);cursor:pointer">
+            <button type="button" ${isSelectable ? '' : 'disabled aria-disabled="true"'} data-instrument-id="${esc(inst.id)}" data-selectable="${isSelectable ? '1' : '0'}" style="width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center;padding:12px 6px;background:${isCurrent ? 'var(--bg-elev-2,#1A1F2B)' : 'none'};border:none;border-bottom:1px solid var(--border-soft,#1B2030);color:var(--text,#E9EBF1);cursor:${isSelectable ? 'pointer' : 'not-allowed'};opacity:${isSelectable ? '1' : '0.55'}">
               <span>
                 <span style="font-weight:600;font-size:14px">${esc(inst.displayName)}</span>${pendingTag}
                 <div style="font-family:var(--font-mono,monospace);font-size:10.5px;color:var(--text-dim,#8D93A6);margin-top:2px">${esc(inst.exchange)} · ${esc(inst.instrumentType.replace('_', ' '))}${inst.casEligible ? ' · CAS' : ''}</div>
+                ${reasonLine}
               </span>
               ${isCurrent ? '<span style="color:var(--gold,#D4AF6A);font-size:14px">✓</span>' : ''}
             </button>`;
@@ -98,6 +111,10 @@
       if(closeBtn) closeBtn.addEventListener('click', close);
       overlayEl.sheet.querySelectorAll('[data-instrument-id]').forEach(function(btn){
         btn.addEventListener('click', function(){
+          // Second line of defence alongside the `disabled` attribute:
+          // a pending instrument must never reach onSelect(), because
+          // that is what would trigger a doomed candle request.
+          if(btn.getAttribute('data-selectable') === '0') return;
           const id = btn.getAttribute('data-instrument-id');
           close();
           if(typeof opts.onSelect === 'function') opts.onSelect(id);

@@ -90,8 +90,17 @@
 
     let providerSymbol = null;
     let contractPending = false;
+    // Why the contract is pending, when fyers-service.js has tried to
+    // resolve it and failed (e.g. "MCX contract list unavailable").
+    // null for an instrument that was never pending, and for one that
+    // resolved successfully. Read-only passthrough — this file still
+    // stores no contract state of its own.
+    let contractReason = null;
     if(FyersService){
       contractPending = typeof FyersService.isContractPending === 'function' && FyersService.isContractPending(id);
+      if(contractPending && typeof FyersService.getContractReason === 'function'){
+        contractReason = FyersService.getContractReason(id);
+      }
       // toFyersSymbol() is the one function that actually knows the
       // resolved provider symbol string — call it directly (guarded)
       // rather than re-deriving it, so there is exactly one source for
@@ -114,6 +123,12 @@
       provider: 'fyers',
       providerSymbol,
       contractPending,
+      contractReason,
+      // False ONLY for an MCX instrument whose contract could not be
+      // resolved. The selector uses this to make the row non-selectable
+      // so a pending instrument never reaches toFyersSymbol() and never
+      // triggers a /api/fyers/candles request.
+      selectable: !contractPending,
       supportsChart: true,
       supportsLiveData: false,
       casEligible: MarketSession ? MarketSession.isCasEligible(id) : false,

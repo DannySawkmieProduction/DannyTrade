@@ -243,6 +243,119 @@
     return json.data;
   }
 
+  /* =====================================================================
+     MCX CONTRACT RESOLUTION
+
+     The missing supplier for setContractSymbol(). Every MCX entry in
+     SYMBOL_MAP above already carries a `contractBase` (the FUTCOM base
+     symbol, e.g. 'GOLDM'); this asks the Worker to look each one up in
+     FYERS's public symbol master and hand back the exact current,
+     non-expired futures ticker, then feeds it through the EXISTING
+     setContractSymbol() path. No second contract-state system: the
+     resolved string lands in the same SYMBOL_MAP entry toFyersSymbol()
+     already reads, and toFyersSymbol()'s guard is left exactly as it
+     was — it remains the final protection if resolution never happened.
+
+     Nothing here constructs a ticker. `contractTemplate` on those
+     entries stays unused on purpose: interpolating a month into it
+     would be the guess this whole mechanism exists to avoid.
+
+     Failure is a first-class outcome. On any failure the entries stay
+     pending and a human-readable reason is recorded per instrument, so
+     the UI can say WHY rather than implying the instrument is unknown.
+  ===================================================================== */
+  const contractReasons = {};   // instrument id -> honest reason string
+  let contractResolutionState = 'not_attempted'; // | 'resolving' | 'done' | 'failed'
+
+  function mcxInstrumentIds() {
+    return Object.keys(SYMBOL_MAP).filter(id => SYMBOL_MAP[id] && SYMBOL_MAP[id].contractBase);
+  }
+
+  function getContractReason(symbol) {
+    return contractReasons[symbol] || null;
+  }
+
+  function getContractResolutionState() {
+    return contractResolutionState;
+  }
+
+  /**
+   * Resolves every pending MCX contract. Safe to call more than once;
+   * already-resolved entries are skipped. Never throws — a rejected
+   * promise here would break startup, and "could not resolve" is a
+   * normal outcome that must leave the app working.
+   *
+   * @returns {Promise<{resolved: string[], pending: string[], error: string|null}>}
+   */
+  async function resolveMcxContracts() {
+    const ids = mcxInstrumentIds().filter(id => isContractPending(id));
+    if (!ids.length) {
+      contractResolutionState = 'done';
+      return { resolved: [], pending: [], error: null };
+    }
+
+    contractResolutionState = 'resolving';
+    const baseToId = {};
+    ids.forEach(id => { baseToId[SYMBOL_MAP[id].contractBase] = id; });
+    const bases = Object.keys(baseToId);
+
+    function failAll(reason) {
+      ids.forEach(id => { contractReasons[id] = reason; });
+      contractResolutionState = 'failed';
+      console.warn(`[FyersService] MCX contract resolution failed: ${reason}`);
+      return { resolved: [], pending: ids, error: reason };
+    }
+
+    let json = null;
+    let res = null;
+    try {
+      res = await fetch(`/api/fyers/contracts?bases=${encodeURIComponent(bases.join(','))}`, { cache: 'no-store' });
+      json = await res.json();
+    } catch (err) {
+      return failAll('MCX contract list unavailable — could not reach the contract service.');
+    }
+
+    if (!res.ok || !json || json.ok !== true || !json.contracts) {
+      // The Worker's own message is preferred: it distinguishes "symbol
+      // master unreachable" from "served but contained no futures",
+      // which are different problems with different remedies.
+      return failAll((json && json.error) || `MCX contract list unavailable (HTTP ${res.status}).`);
+    }
+
+    const resolved = [];
+    const pending = [];
+    bases.forEach(base => {
+      const id = baseToId[base];
+      const contract = json.contracts[base];
+      if (contract && typeof contract.symbol === 'string' && contract.symbol) {
+        // THE handoff — the existing mechanism, with a string copied
+        // verbatim from the symbol master.
+        if (setContractSymbol(id, contract.symbol)) {
+          delete contractReasons[id];
+          resolved.push(id);
+          const expiry = Number.isFinite(contract.expiryEpoch)
+            ? new Date(contract.expiryEpoch * 1000).toISOString().slice(0, 10) : 'unknown';
+          console.info(`[FyersService] Resolved ${SYMBOL_MAP[id].label} -> ${contract.symbol} (expires ${expiry}).`);
+        } else {
+          contractReasons[id] = 'No active contract found — the resolved symbol was rejected.';
+          pending.push(id);
+        }
+      } else {
+        contractReasons[id] = `No active contract found for ${base} in the FYERS symbol master.`;
+        pending.push(id);
+      }
+    });
+
+    contractResolutionState = pending.length && !resolved.length ? 'failed' : 'done';
+    if (pending.length && json.fyers && Array.isArray(json.fyers.basesInFile)) {
+      // The single most useful diagnostic for an unresolved base: what
+      // the file actually calls its commodities.
+      console.warn('[FyersService] Unresolved MCX bases:', pending.map(id => SYMBOL_MAP[id].contractBase),
+        '— futures bases present in the symbol master:', json.fyers.basesInFile);
+    }
+    return { resolved, pending, error: null };
+  }
+
   window.DannyChart.FyersService = {
     getSymbols,
     getCandles,
@@ -250,6 +363,9 @@
     toFyersSymbol,
     setContractSymbol,
     isContractPending,
+    resolveMcxContracts,
+    getContractReason,
+    getContractResolutionState,
     SUPPORTED_TIMEFRAMES
   };
 
