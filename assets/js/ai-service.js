@@ -466,6 +466,64 @@
      model would emit thousands of tokens at CPU speed. The decision
      object this prompt asks for fits comfortably in 800. */
   const OLLAMA_NUM_PREDICT = 800;
+  /* Measured on the target laptop: COLD 90.4s vs WARM 2.73s (10.3 tok/s,
+     load 0.7s, eval 0.9s). The ~90s is model load, and Ollama's default
+     keep_alive is 5 minutes — so an idle tab, or an eviction caused by a
+     request arriving with DIFFERENT options (num_ctx 4096 here vs the
+     2048 default a bare curl uses), makes the next analysis pay that
+     cost again. At a 120s ceiling, cold start alone consumes 75% of the
+     budget and any queuing pushes it over.
+
+     10m keeps the model resident with THESE options between analyses, so
+     only the first request after an Ollama restart pays the load. It is
+     not a timeout change and does not hide anything: a genuinely slow
+     generation still fails at OLLAMA_TIMEOUT_MS. */
+  const OLLAMA_KEEP_ALIVE = '10m';
+
+  /* -----------------------------------------------------------------
+     SINGLE-FLIGHT STATE — deliberately at MODULE scope, not inside
+     createOllamaAIProvider().
+
+     setProviderName() calls configure(createOllamaAIProvider()) on
+     every switch, so a fresh provider object (and a fresh closure) is
+     built each time. State held in that closure would be silently
+     discarded by a provider switch — exactly the ollama -> gemini ->
+     ollama sequence a user performs while debugging — and the guard
+     would stop working when it is needed most. Module scope means one
+     guard for the lifetime of the page, which is what "only one Ollama
+     generation at a time" actually requires.
+
+     Why a guard at all: aborting a fetch closes the HTTP connection,
+     which is the ONLY cancellation channel Ollama offers (there is no
+     cancel endpoint, and issuing one would be a second request). Ollama
+     serialises generations per model, so two overlapping analyses queue:
+     the second waits out the first, blows the 120s ceiling, and the
+     cascade never recovers. Preventing overlap is the fix; there is no
+     way to "cancel harder".
+  ----------------------------------------------------------------- */
+  let ollamaInFlight = null; // { key, promise, controller, startedAt, type, superseded }
+
+  /** Identity of an analysis request. Two calls with the same signature
+   *  would produce the same answer, so the second can safely reuse the
+   *  first's promise instead of starting a second generation. Two calls
+   *  with DIFFERENT signatures must not share a result — a timeframe
+   *  switch genuinely needs its own analysis — so the older one is
+   *  superseded rather than reused. Keyed on the inputs that actually
+   *  change the prompt; candle contents are represented by count + last
+   *  bar rather than hashing 180 objects on every call. */
+  function ollamaRequestKey(type, payload) {
+    const p = payload || {};
+    const candles = Array.isArray(p.candles) ? p.candles : [];
+    const last = candles.length ? candles[candles.length - 1] : null;
+    return JSON.stringify({
+      type,
+      symbol: p.symbol || null,
+      timeframe: p.timeframe || null,
+      candleCount: candles.length,
+      lastCandleTime: (last && typeof last.time === 'number') ? last.time : null,
+      lastClose: (last && typeof last.close === 'number') ? last.close : null
+    });
+  }
 
   /** The exact origin string the user must put in OLLAMA_ORIGINS. Read
    *  from the live page so the message is always correct for whichever
@@ -499,8 +557,19 @@
         wallClockSec: (Date.now() - startedAt) / 1000,
         hitPredictCap: (body && body.eval_count) === OLLAMA_NUM_PREDICT
       };
+      // Cold vs warm is the single most useful number here: load_duration
+      // is ~0.7s warm and ~90s cold on the measured laptop, and a cold
+      // start is what consumes the 120s budget. keep_alive should make
+      // this read WARM on every request after the first.
+      t.startType = (t.loadSec === null) ? 'unknown' : (t.loadSec > 5 ? 'COLD' : 'WARM');
+      t.keepAlive = OLLAMA_KEEP_ALIVE;
       if (t.outputTokens && t.generateSec) t.tokensPerSec = +(t.outputTokens / t.generateSec).toFixed(1);
-      console.info('[AIService/Ollama] timing', t);
+      console.info(`[AIService/Ollama] timing (${t.startType} start, keep_alive ${t.keepAlive})`, t);
+      if (t.startType === 'COLD') {
+        console.warn(`[AIService/Ollama] COLD start — ${t.loadSec.toFixed(1)}s of this request was model loading. ` +
+          `Subsequent analyses within ${OLLAMA_KEEP_ALIVE} should be warm. If every request is COLD, something is evicting the model ` +
+          '(commonly another client calling Ollama with different options, which forces a reload).');
+      }
       if (t.hitPredictCap) {
         console.warn(`[AIService/Ollama] Generation stopped at the ${OLLAMA_NUM_PREDICT}-token cap — the JSON may be truncated. Raise OLLAMA_NUM_PREDICT if this recurs.`);
       }
@@ -831,12 +900,52 @@
   }
 
   function createOllamaAIProvider() {
+    /* Single-flight gate. Owns NO generation logic — it decides only
+       whether to reuse, supersede, or start, then delegates to
+       runOllamaGeneration(). Release happens in one place (the .finally
+       below) so every exit path — success, HTTP error, malformed JSON,
+       timeout abort, supersede abort, or an unexpected throw — clears
+       the guard. There is no path that can leave it stuck believing a
+       generation is still running. */
     async function call(type, payload) {
       if (type === 'chartImage' || type === 'pdf') {
         throw new Error('Local Ollama provider currently supports structured/text analysis, not image/PDF vision.');
       }
 
-      const controller = new AbortController();
+      const key = ollamaRequestKey(type, payload);
+
+      if (ollamaInFlight) {
+        if (ollamaInFlight.key === key) {
+          // Identical input already generating — reuse it. This is the
+          // case that must NOT surface as an error: auto-refresh, a
+          // repeated tap, or a re-entrant render would otherwise each
+          // start their own generation and queue behind each other.
+          // Both callers await the same promise and get the same real
+          // analysis, so the Decision Panel never shows AI UNAVAILABLE
+          // merely because a request was already in flight.
+          console.info(`[AIService/Ollama] Request already in flight for identical input (${Math.round((Date.now() - ollamaInFlight.startedAt) / 1000)}s elapsed) — reusing it; no second generation started.`);
+          return ollamaInFlight.promise;
+        }
+        // Different input (timeframe/symbol/new candles): the old result
+        // is no longer wanted. Abort it so its connection closes and
+        // Ollama stops generating, freeing the model for the new request
+        // instead of making it queue.
+        console.info('[AIService/Ollama] Superseding in-flight request — newer analysis requested with different input.');
+        ollamaInFlight.superseded = true;
+        ollamaInFlight.controller.abort();
+        ollamaInFlight = null;
+      }
+
+      const record = { key, type, startedAt: Date.now(), controller: new AbortController(), superseded: false };
+      const promise = runOllamaGeneration(type, payload, record)
+        .finally(() => { if (ollamaInFlight === record) ollamaInFlight = null; });
+      record.promise = promise;
+      ollamaInFlight = record;
+      return promise;
+    }
+
+    async function runOllamaGeneration(type, payload, record) {
+      const controller = record.controller;
       const timeoutId = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
       const prompt = buildOllamaPrompt(type, payload || {});
       const startedAt = Date.now();
@@ -855,6 +964,7 @@
             prompt,
             stream: false,
             format: 'json',
+            keep_alive: OLLAMA_KEEP_ALIVE,
             options: { temperature: 0.1, num_ctx: OLLAMA_NUM_CTX, num_predict: OLLAMA_NUM_PREDICT }
           }),
           signal: controller.signal
@@ -881,6 +991,15 @@
         return normalized;
       } catch (err) {
         if (err && err.name === 'AbortError') {
+          // Both cancellations arrive here as the same AbortError, so the
+          // record's own flag is what tells them apart. Reporting a
+          // supersede as a timeout would blame the model for a decision
+          // this code made.
+          if (record.superseded) {
+            const superseded = new Error('Local Ollama request was superseded by a newer analysis request.');
+            superseded.name = 'OllamaSupersededError';
+            throw superseded;
+          }
           throw new Error(`Local Ollama request timed out after ${Math.round(OLLAMA_TIMEOUT_MS/1000)} seconds. ` +
             'Check the console for the last [AIService/Ollama] timing entry, or run: await AIService.benchmarkOllama()');
         }
@@ -1044,6 +1163,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: OLLAMA_MODEL, prompt, stream: false, format: 'json',
+            keep_alive: OLLAMA_KEEP_ALIVE,
             options: { temperature: 0.1, num_ctx: OLLAMA_NUM_CTX, num_predict: numPredict }
           })
         });
@@ -1103,7 +1223,13 @@
     ollamaNormalizeDecision, ollamaNormalizeTradeLevels,
     ollamaNormalizePremiumDiscount, ollamaCoerceChartStructure,
     ollamaJsonFromResponse, buildOllamaPrompt, ollamaDeterministicDigest,
-    OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_TIMEOUT_MS
+    ollamaRequestKey,
+    OLLAMA_NUM_CTX, OLLAMA_NUM_PREDICT, OLLAMA_TIMEOUT_MS, OLLAMA_KEEP_ALIVE,
+    // Live view of the single-flight guard, for tests and console
+    // debugging. Returns null when no Ollama generation is active.
+    getInFlight: () => ollamaInFlight
+      ? { key: ollamaInFlight.key, type: ollamaInFlight.type, startedAt: ollamaInFlight.startedAt, superseded: ollamaInFlight.superseded }
+      : null
   };
 
   setProviderName('gemini'); // Gemini remains the default AI provider — unchanged external behavior.
