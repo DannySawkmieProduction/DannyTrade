@@ -523,6 +523,255 @@ section('[21] End-to-end: a realistic Qwen answer populates the Decision Panel f
   }
 }
 
+/* =================================================================
+   COLD-START / SINGLE-FLIGHT (measured: COLD 90.4s vs WARM 2.73s).
+
+   Ollama serialises generations per model and offers no cancel
+   endpoint — closing the connection is the only cancellation channel.
+   So two overlapping analyses queue: the second waits out the first,
+   blows the 120s ceiling, and the cascade never recovers. These tests
+   lock in that (a) the model stays resident via keep_alive, and (b) at
+   most one generation is ever active.
+   ================================================================= */
+
+/** A fetch stub whose generation completes only when released, so
+ *  overlap is observable rather than inferred from timing. */
+function deferredOllama(){
+  const state = { calls: [], active: 0, maxActive: 0 };
+  const fetchImpl = (url, opts) => {
+    const body = JSON.parse(opts.body);
+    const signal = opts.signal;
+    state.active++;
+    state.maxActive = Math.max(state.maxActive, state.active);
+    const entry = { body, aborted: false, settle: null, url: String(url) };
+    state.calls.push(entry);
+    return new Promise((resolve, reject) => {
+      entry.settle = (payload) => {
+        state.active--;
+        resolve({ ok: true, status: 200, json: async () => payload });
+      };
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          entry.aborted = true;
+          state.active--;
+          const e = new Error('aborted'); e.name = 'AbortError';
+          reject(e);
+        });
+      }
+    });
+  };
+  return { state, fetchImpl };
+}
+
+const GOOD_RESPONSE = {
+  response: JSON.stringify({ finalDecision: 'WAIT', reasoningSummary: 'Overextended; waiting.', trend: 'Bullish' }),
+  prompt_eval_count: 491, eval_count: 240, eval_duration: 23e9,
+  load_duration: 0.7e9, total_duration: 24e9
+};
+
+function payloadFor(timeframe, candleCount){
+  return { symbol: 'NSE:NIFTY50-INDEX', timeframe,
+    candles: makeCandles(candleCount || 180), deterministic: DETERMINISTIC };
+}
+
+section('[22] keep_alive is sent in the production request');
+{
+  let captured = null;
+  const AI = loadAIService((url, opts) => { captured = JSON.parse(opts.body); return Promise.reject(new TypeError('stop')); });
+  AI.setProviderName('ollama');
+  await AI.analyzeChartStructure(payloadFor('15'));
+  assert(captured.keep_alive === '10m', `keep_alive '10m' is sent (got ${JSON.stringify(captured.keep_alive)})`);
+  assert(AI.__ollamaInternals.OLLAMA_KEEP_ALIVE === '10m', 'the constant is 10m');
+  // Production shape must be untouched (req. 7).
+  assert(captured.model === 'qwen2.5:1.5b', 'model unchanged');
+  assert(captured.stream === false, 'stream:false unchanged');
+  assert(captured.format === 'json', 'format:json unchanged');
+  assert(captured.options.temperature === 0.1, 'temperature 0.1 unchanged');
+  assert(captured.options.num_ctx === 4096, 'num_ctx 4096 unchanged');
+  assert(captured.options.num_predict === 800, 'num_predict 800 unchanged');
+  assert(AI.__ollamaInternals.OLLAMA_TIMEOUT_MS === 120000, 'the 120s timeout is neither removed nor increased');
+}
+
+section('[23] Concurrent identical calls create exactly ONE Ollama generation');
+{
+  const { state, fetchImpl } = deferredOllama();
+  const AI = loadAIService(fetchImpl);
+  AI.setProviderName('ollama');
+  const p = payloadFor('15');
+  const a = AI.analyzeChartStructure(p);
+  const b = AI.analyzeChartStructure(p);
+  const c = AI.analyzeChartStructure(p);
+  assert(state.calls.length === 1, `only 1 fetch reached Ollama for 3 concurrent identical calls (got ${state.calls.length})`);
+  assert(state.maxActive === 1, 'never more than one generation active at once');
+  state.calls[0].settle(GOOD_RESPONSE);
+  const [ra, rb, rc] = await Promise.all([a, b, c]);
+  assert(ra.status === 'ok' && rb.status === 'ok' && rc.status === 'ok', 'all three callers get status ok');
+  assert(rb.data.decision.finalDecision === 'WAIT', 'the reusing caller gets the REAL analysis, not an error');
+  assert(rc.data.decision.reasoningSummary === 'Overextended; waiting.', 'and the real reasoning — never AI UNAVAILABLE');
+}
+
+section('[24] A newer DIFFERENT request supersedes the old one — still only one generation');
+{
+  const { state, fetchImpl } = deferredOllama();
+  const AI = loadAIService(fetchImpl);
+  AI.setProviderName('ollama');
+  const first = AI.analyzeChartStructure(payloadFor('15'));
+  const firstSettled = first.catch(e => e);            // attach early; it will reject
+  assert(state.calls.length === 1, 'first request started');
+  const second = AI.analyzeChartStructure(payloadFor('60')); // different timeframe
+  assert(state.calls.length === 2, 'the new request did start (it needs its own analysis)');
+  assert(state.calls[0].aborted === true, 'the OLD request was aborted — no orphaned generation left occupying Ollama');
+  assert(state.active === 1, 'exactly one generation active after the supersede');
+  assert(state.maxActive === 1, 'the two never overlapped');
+  const err = await firstSettled;
+  assert(err && err.status === 'error', 'the superseded caller resolves to an error status, not a hang');
+  assert(/superseded/i.test(err.message), `the message says superseded, not timed out (got: ${err.message})`);
+  assert(!/timed out/i.test(err.message), 'a supersede is never reported as a 120s timeout');
+  state.calls[1].settle(GOOD_RESPONSE);
+  const r2 = await second;
+  assert(r2.status === 'ok' && r2.data.decision.finalDecision === 'WAIT', 'the newer request completes normally');
+}
+
+section('[25] Guard is released on success, failure, timeout and abort');
+{
+  // success
+  {
+    const { state, fetchImpl } = deferredOllama();
+    const AI = loadAIService(fetchImpl);
+    AI.setProviderName('ollama');
+    const p = AI.analyzeChartStructure(payloadFor('15'));
+    assert(AI.__ollamaInternals.getInFlight() !== null, 'guard is held while generating');
+    state.calls[0].settle(GOOD_RESPONSE);
+    await p;
+    assert(AI.__ollamaInternals.getInFlight() === null, 'guard released after SUCCESS');
+  }
+  // network/HTTP failure
+  {
+    const AI = loadAIService(() => Promise.reject(new TypeError('Failed to fetch')));
+    AI.setProviderName('ollama');
+    const r = await AI.analyzeChartStructure(payloadFor('15'));
+    assert(r.status === 'error', 'a failed request resolves to error');
+    assert(AI.__ollamaInternals.getInFlight() === null, 'guard released after FAILURE');
+  }
+  // malformed response
+  {
+    const AI = loadAIService(() => jsonResponse({ response: 'not json at all' }));
+    AI.setProviderName('ollama');
+    const r = await AI.analyzeChartStructure(payloadFor('15'));
+    assert(r.status === 'error', 'a malformed response resolves to error');
+    assert(AI.__ollamaInternals.getInFlight() === null, 'guard released after MALFORMED response');
+  }
+  // An in-flight record is not marked superseded — that flag is what
+  // distinguishes a real 120s timeout from a supersede. The timeout
+  // RELEASE itself is covered end-to-end by section [26].
+  {
+    const { state, fetchImpl } = deferredOllama();
+    const AI = loadAIService(fetchImpl);
+    AI.setProviderName('ollama');
+    const p = AI.analyzeChartStructure(payloadFor('15'));
+    const settled = p.catch(e => e);
+    const rec = AI.__ollamaInternals.getInFlight();
+    assert(rec !== null && rec.superseded === false,
+      'a normally-started request is not flagged superseded, so its abort reports as a timeout');
+    state.calls[0].settle(GOOD_RESPONSE);
+    await settled;
+    assert(AI.__ollamaInternals.getInFlight() === null, 'guard released');
+  }
+}
+
+section('[26] After a timeout, a later analysis runs normally (no permanent lockout)');
+{
+  // First request times out via a genuine AbortError from the transport.
+  let call = 0;
+  const AI = loadAIService(() => {
+    call++;
+    if (call === 1) {
+      const e = new Error('aborted'); e.name = 'AbortError';
+      return Promise.reject(e);
+    }
+    return jsonResponse(GOOD_RESPONSE);
+  });
+  AI.setProviderName('ollama');
+  const r1 = await AI.analyzeChartStructure(payloadFor('15'));
+  assert(r1.status === 'error', 'the first request fails');
+  assert(/timed out/i.test(r1.message), `reported as a timeout (got: ${r1.message})`);
+  assert(AI.__ollamaInternals.getInFlight() === null, 'guard released after the TIMEOUT — not stuck');
+  const r2 = await AI.analyzeChartStructure(payloadFor('15'));
+  assert(r2.status === 'ok', 'a subsequent analysis runs normally after the timeout');
+  assert(r2.data.decision.finalDecision === 'WAIT', 'and produces a real decision');
+}
+
+section('[27] After a supersede, a later analysis runs normally');
+{
+  const { state, fetchImpl } = deferredOllama();
+  const AI = loadAIService(fetchImpl);
+  AI.setProviderName('ollama');
+  const first = AI.analyzeChartStructure(payloadFor('15'));
+  const firstSettled = first.catch(e => e);
+  const second = AI.analyzeChartStructure(payloadFor('60'));
+  await firstSettled;
+  state.calls[1].settle(GOOD_RESPONSE);
+  await second;
+  assert(AI.__ollamaInternals.getInFlight() === null, 'guard released after the supersede chain');
+  const third = AI.analyzeChartStructure(payloadFor('240'));
+  assert(state.calls.length === 3, 'a third, later analysis starts normally');
+  state.calls[2].settle(GOOD_RESPONSE);
+  const r3 = await third;
+  assert(r3.status === 'ok', 'and completes with a real result');
+}
+
+section('[28] Guard survives a provider switch (module scope, not closure scope)');
+{
+  const { state, fetchImpl } = deferredOllama();
+  const AI = loadAIService(fetchImpl);
+  AI.setProviderName('ollama');
+  const p = AI.analyzeChartStructure(payloadFor('15'));
+  const settled = p.catch(e => e);
+  assert(state.calls.length === 1, 'a generation is in flight');
+  // setProviderName builds a BRAND NEW provider object each time — the
+  // guard must not reset with it.
+  AI.setProviderName('gemini');
+  AI.setProviderName('ollama');
+  assert(AI.__ollamaInternals.getInFlight() !== null, 'the guard is still held across ollama -> gemini -> ollama');
+  const again = AI.analyzeChartStructure(payloadFor('15'));
+  assert(state.calls.length === 1, 'the identical request after the switch reuses the in-flight generation — no second one');
+  state.calls[0].settle(GOOD_RESPONSE);
+  const r = await again;
+  assert(r.status === 'ok' && r.data.decision.finalDecision === 'WAIT', 'and gets the real analysis');
+  await settled;
+}
+
+section('[29] Request-signature keying');
+{
+  const AI = loadAIService();
+  const k = AI.__ollamaInternals.ollamaRequestKey;
+  const a = k('chartStructure', payloadFor('15'));
+  assert(k('chartStructure', payloadFor('15')) === a, 'identical input -> identical key (safe to reuse)');
+  assert(k('chartStructure', payloadFor('60')) !== a, 'different timeframe -> different key (must not reuse)');
+  assert(k('chartStructure', payloadFor('15', 179)) !== a, 'different candle count -> different key');
+  assert(k('csv', payloadFor('15')) !== a, 'different request type -> different key');
+  const other = Object.assign(payloadFor('15'), { symbol: 'NSE:BANKNIFTY-INDEX' });
+  assert(k('chartStructure', other) !== a, 'different symbol -> different key');
+}
+
+section('[30] Cold vs warm is reported in the timing diagnostics');
+{
+  const AI = loadAIService(() => jsonResponse(Object.assign({}, GOOD_RESPONSE, { load_duration: 90.4e9 })));
+  AI.setProviderName('ollama');
+  await AI.analyzeChartStructure(payloadFor('15'));
+  const t = sandboxTiming(AI);
+  assert(t !== null, 'timing recorded');
+  assert(t.startType === 'COLD', `a 90.4s load is classified COLD (got ${t.startType})`);
+  assert(t.keepAlive === '10m', 'keep_alive is reported alongside');
+}
+{
+  const AI = loadAIService(() => jsonResponse(GOOD_RESPONSE)); // load 0.7s
+  AI.setProviderName('ollama');
+  await AI.analyzeChartStructure(payloadFor('15'));
+  assert(sandboxTiming(AI).startType === 'WARM', 'a 0.7s load is classified WARM');
+}
+
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 if(failed > 0) process.exitCode = 1;
 })();
