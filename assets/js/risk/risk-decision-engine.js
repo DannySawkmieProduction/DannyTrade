@@ -250,6 +250,12 @@
         vetoes,
         warnings,
         confluence: [],
+        // Market bias, distinct from `direction` (a proposed TRADE) and
+        // from `tradeability`. Populated only when no direction was
+        // proposed, so a NO_TRADE can still report BEARISH/BULLISH
+        // without ever implying a live trade. null in directional mode.
+        underlyingBias: null,
+        confluenceMode: null,
         calculatedRiskReward: null,
         aiStatedRiskReward,
         riskDistance: null,
@@ -283,6 +289,8 @@
       ? EvidenceModel.evaluate(analysisContext, { direction, currentPrice, structureResolution: opts.structureResolution })
       : { confluence: [], supportingCount: 0, conflictingCount: 0, neutralCount: 0, missingCount: 0 };
     const confluence = evidence.confluence;
+    const underlyingBias = evidence.underlyingBias || null;
+    const confluenceMode = evidence.mode || null;
 
     // No trade was proposed at all. That is not a failure — it is the
     // AI correctly declining, or a decision-only response. Nothing to
@@ -293,14 +301,14 @@
       if(!isWait && fd !== FINAL_DECISION.NO_TRADE && !tradeLevels){
         warnings.push(warn('NO_PROPOSAL', 'No trade direction or trade levels were proposed.'));
       }
-      return build(isWait ? TRADEABILITY.WAIT : TRADEABILITY.REJECTED, { confluence });
+      return build(isWait ? TRADEABILITY.WAIT : TRADEABILITY.REJECTED, { confluence, underlyingBias, confluenceMode });
     }
 
     // ---- Tier 2 — geometry ----------------------------------------
     const TLV = Risk.TradeLevelValidator;
     if(!TLV){
       vetoes.push(hard('VALIDATOR_UNAVAILABLE', 'TradeLevelValidator did not load; trade levels cannot be validated and are therefore rejected.'));
-      return build(TRADEABILITY.REJECTED, { confluence });
+      return build(TRADEABILITY.REJECTED, { confluence, underlyingBias, confluenceMode });
     }
 
     const geometry = TLV.validate(tradeLevels, {
@@ -310,7 +318,7 @@
     geometry.warnings.forEach(w => warnings.push(w));
 
     const withGeometry = extra => build(extra.tradeability, Object.assign({
-      confluence,
+      confluence, underlyingBias, confluenceMode,
       calculatedRiskReward: geometry.calculatedRiskReward,
       riskDistance: geometry.riskDistance
     }, extra.fields || {}));

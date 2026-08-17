@@ -64,6 +64,26 @@
     MISSING: 'MISSING'
   });
 
+  /* BIAS-MODE vocabulary. A component's own directional lean, used when
+     no trade direction has been proposed. Distinct from STANCE on
+     purpose: SUPPORTING/CONFLICTING are relative to a PROPOSED TRADE,
+     BULLISH/BEARISH are properties of the MARKET. Collapsing them would
+     make "supports the proposed long" and "the market is bullish"
+     indistinguishable, which is the confusion this whole fix exists to
+     remove. NEUTRAL and MISSING are shared by both modes. */
+  const LEAN = Object.freeze({
+    BULLISH: 'BULLISH',
+    BEARISH: 'BEARISH',
+    NEUTRAL: 'NEUTRAL',
+    MISSING: 'MISSING'
+  });
+
+  const MODE = Object.freeze({ DIRECTIONAL: 'DIRECTIONAL', BIAS: 'BIAS' });
+
+  const BIAS = Object.freeze({
+    BULLISH: 'BULLISH', BEARISH: 'BEARISH', CONFLICTED: 'CONFLICTED', NEUTRAL: 'NEUTRAL'
+  });
+
   /* The order evidence is reported in. Fixed so two runs with the same
      context always produce an identically-ordered array — determinism
      covers ordering, not just membership. */
@@ -274,17 +294,65 @@
        confluence threshold, veto, tradeability or finalDecision changes:
        risk-decision-engine.js returns from its direction===NONE branch
        before any tier that reads these tallies. */
-    if(dir === 'NONE' || !ctx){
-      const confluence = SOURCES.map(s => item(
-        s,
-        !ctx ? STANCE.MISSING : STANCE.NEUTRAL,
-        !ctx ? 'No analysis context available.'
-             : 'Analysis available; no trade direction proposed to score against.'
-      ));
-      return summarize(dir, confluence, !!ctx);
+    /* No context at all: the engines genuinely produced nothing. This
+       stays MISSING in both modes — never NEUTRAL, which would
+       misreport eight broken engines as eight healthy neutral ones. */
+    if(!ctx){
+      const confluence = SOURCES.map(s => item(s, STANCE.MISSING, 'No analysis context available.'));
+      return summarize(dir, confluence, false, dir === 'NONE' ? MODE.BIAS : MODE.DIRECTIONAL);
     }
 
-    const confluence = [
+    /* ---------------- MODE B — BIAS ----------------------------------
+       No trade direction proposed (NO_TRADE / WAIT), but the context is
+       healthy. Previously this returned early with eight identical
+       "no trade direction proposed to score against" lines, so a closed
+       market showed no market read at all despite the engines having
+       found real structure.
+
+       The SAME eight readers are reused — nothing is recalculated and
+       no second bullish/bearish algorithm exists. Each is run once
+       against LONG and once against SHORT, and a component is called
+       directional ONLY when the two passes genuinely disagree:
+
+         LONG SUPPORTING + SHORT CONFLICTING -> BULLISH
+         LONG CONFLICTING + SHORT SUPPORTING -> BEARISH
+         anything else                       -> NEUTRAL
+
+       The both-passes test matters for the asymmetric readers.
+       supportResistanceStance() looks at levels ahead in the direction
+       of travel, so a single pass can report SUPPORTING for LONG and
+       SHORT alike; treating one pass as a lean would invent a bias the
+       reader never expressed. Requiring disagreement keeps ambiguity
+       honestly NEUTRAL.
+    ------------------------------------------------------------------ */
+    if(dir === 'NONE'){
+      const asLong = runReaders(ctx, 'LONG', resolution, currentPrice);
+      const asShort = runReaders(ctx, 'SHORT', resolution, currentPrice);
+      const confluence = asLong.map((l, i) => {
+        const sh = asShort[i];
+        if(l.stance === STANCE.MISSING && sh.stance === STANCE.MISSING){
+          return item(l.source, LEAN.MISSING, l.detail);
+        }
+        if(l.stance === STANCE.SUPPORTING && sh.stance === STANCE.CONFLICTING){
+          return item(l.source, LEAN.BULLISH, l.detail);
+        }
+        if(l.stance === STANCE.CONFLICTING && sh.stance === STANCE.SUPPORTING){
+          // The SHORT pass phrases a bearish read in its own words.
+          return item(l.source, LEAN.BEARISH, sh.detail);
+        }
+        return item(l.source, LEAN.NEUTRAL, l.detail);
+      });
+      return summarize(dir, confluence, true, MODE.BIAS);
+    }
+
+    // ---------------- MODE A — DIRECTIONAL (unchanged) ---------------
+    return summarize(dir, runReaders(ctx, dir, resolution, currentPrice), true, MODE.DIRECTIONAL);
+  }
+
+  /** The eight readers, in fixed order. Single definition, used by both
+   *  modes — there is no duplicate scoring path. */
+  function runReaders(ctx, dir, resolution, currentPrice){
+    return [
       trendStance(ctx, dir),
       marketStructureStance(ctx, dir, resolution),
       liquidityStance(ctx, dir),
@@ -294,22 +362,44 @@
       supportResistanceStance(ctx, dir, currentPrice),
       volumeStance(ctx)
     ];
-    return summarize(dir, confluence, true);
   }
 
-  function summarize(direction, confluence, contextAvailable){
+  /** Aggregate bias from the components' own leans — a tally, not a new
+   *  scoring model. A single dissenting component does not flip or
+   *  erase the majority read; it stays visible in the confluence list. */
+  function classifyBias(bullishCount, bearishCount){
+    if(bullishCount > bearishCount) return BIAS.BULLISH;
+    if(bearishCount > bullishCount) return BIAS.BEARISH;
+    if(bullishCount > 0) return BIAS.CONFLICTED; // tied AND non-zero
+    return BIAS.NEUTRAL;
+  }
+
+  function summarize(direction, confluence, contextAvailable, mode){
     const count = stance => confluence.filter(c => c.stance === stance).length;
+    const bullishCount = count(LEAN.BULLISH);
+    const bearishCount = count(LEAN.BEARISH);
+    const isBias = mode === MODE.BIAS;
     return {
       version: VERSION,
       direction,
+      // Which vocabulary `confluence[].stance` uses. DIRECTIONAL ->
+      // SUPPORTING/CONFLICTING/NEUTRAL/MISSING (relative to a proposed
+      // trade). BIAS -> BULLISH/BEARISH/NEUTRAL/MISSING (the market's
+      // own read). Consumers must branch on this rather than assuming.
+      mode: mode || MODE.DIRECTIONAL,
       confluence,
       supportingCount: count(STANCE.SUPPORTING),
       conflictingCount: count(STANCE.CONFLICTING),
       neutralCount: count(STANCE.NEUTRAL),
       missingCount: count(STANCE.MISSING),
+      // Populated in BIAS mode only; null in DIRECTIONAL mode so a
+      // caller can never mistake a trade direction for a market bias.
+      bullishCount: isBias ? bullishCount : 0,
+      bearishCount: isBias ? bearishCount : 0,
+      underlyingBias: isBias ? classifyBias(bullishCount, bearishCount) : null,
       contextAvailable: !!contextAvailable
     };
   }
 
-  Risk.RiskEvidenceModel = { VERSION, STANCE, SOURCES, evaluate };
+  Risk.RiskEvidenceModel = { VERSION, STANCE, LEAN, MODE, BIAS, SOURCES, evaluate, classifyBias };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
