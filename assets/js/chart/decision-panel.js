@@ -214,11 +214,6 @@
     const fieldEls = buildDom(container);
     let lastValues = {}; // fieldName -> last rendered value, for incremental diffing
     let lastAnalysis = null;
-    // Phase 6 — the tradeability of the most recent update(), read by
-    // the riskVetoes renderer so an empty veto list on a REJECTED
-    // verdict is not reported as "gates cleared". Set in update()
-    // before applyField() runs; reset with the rest of the panel.
-    let lastRiskTradeability = null;
     let lastSymbol = null; // CAS Phase 1 — set whenever update()'s context carries one; see renderSessionIndicator()
 
     function setText(field, text){
@@ -324,24 +319,35 @@
         case 'riskVetoes': {
           const listEl = fieldEls.get('riskVetoes');
           if(!listEl) break;
-          const items = Array.isArray(value) ? value : [];
-          // No vetoes is a real, meaningful state — say so explicitly
-          // rather than reusing the "Not available" default, which
-          // would read as "the check did not run".
+          // `value` is `{ vetoes, tradeability }` (or null on reset).
           //
-          // BUT "no vetoes" only means "gates cleared" when the engine
-          // actually reached the gates. A REJECTED verdict with an
-          // empty veto list means it stopped before them — no trade
-          // direction was proposed, so there was nothing to gate. The
-          // previous wording reported that case as "deterministic gates
-          // cleared", which is the opposite of what happened and
-          // actively misleads anyone diagnosing an empty panel.
+          // WHY BUNDLED, not read from module state: an empty veto list
+          // is `[]` for BOTH a REJECTED-with-no-proposal verdict and a
+          // valid WAIT. update()'s change detection compares tracked
+          // values, and JSON.stringify([]) === JSON.stringify([]) — so
+          // on a REJECTED -> WAIT transition this case was never invoked
+          // and the previous render's text stayed on screen, telling the
+          // user "the AI returned no usable decision" underneath a
+          // perfectly valid WAIT. Bundling tradeability into the tracked
+          // value is what makes the transition visible to the differ.
+          // This is the same fix already applied to finalDecision and
+          // reasoningSummary; reading a sibling `lastRiskTradeability`
+          // could never trigger a rerender and is deliberately gone.
+          const items = (value && Array.isArray(value.vetoes)) ? value.vetoes : [];
+          const tradeability = (value && typeof value === 'object') ? value.tradeability : null;
           if(items.length){
             listEl.innerHTML = items.map(v =>
               `<li><strong>${escapeHtml(v.severity || 'HARD')}</strong> ${escapeHtml(v.code)}: ${escapeHtml(v.message || '')}</li>`).join('');
           } else if(value === null){
             listEl.innerHTML = `<li class="notes-empty">${NOT_AVAILABLE}</li>`;
-          } else if(lastRiskTradeability === 'REJECTED'){
+          } else if(tradeability === 'WAIT'){
+            // A valid WAIT: the analysis is sound, the gates found
+            // nothing wrong, there is simply no actionable direction
+            // yet. Must never be described as an AI failure.
+            listEl.innerHTML = '<li class="notes-empty">No risk vetoes — the setup is valid but not yet actionable.</li>';
+          } else if(tradeability === 'REJECTED'){
+            // Genuine REJECTED with no veto: the engine stopped before
+            // the gates because no direction was proposed at all.
             listEl.innerHTML = '<li class="notes-empty">No trade direction was proposed, so no risk gate was evaluated. ' +
               'The AI returned no usable decision — check the console for [AIService] worker response diagnostics.</li>';
           } else {
@@ -438,7 +444,6 @@
       // renders its normal "Not available" default, so older Structured
       // Analysis objects stay fully backward-compatible.
       const risk = (decision.risk && typeof decision.risk === 'object') ? decision.risk : null;
-      lastRiskTradeability = risk ? risk.tradeability : null;
       // Presentation-only distinction between a genuine AI verdict and
       // the Risk Engine's own fallback decision when no AI proposal
       // exists at all (provider failure, rate limit, malformed response,
@@ -507,7 +512,10 @@
             `${risk.confluence.filter(c => c.stance === 'MISSING').length} missing`
           : null,
         confluence: risk ? risk.confluence : null,
-        riskVetoes: risk ? risk.vetoes : null
+        // Bundled with tradeability so the differ sees a REJECTED -> WAIT
+        // transition even though `vetoes` is [] in both — see the
+        // riskVetoes case above.
+        riskVetoes: risk ? { vetoes: risk.vetoes, tradeability: risk.tradeability } : null
       };
 
       const changedFields = [];
@@ -550,7 +558,6 @@
         educationalNotes: null,
         tradeability: null, confluenceSummary: null, confluence: null, riskVetoes: null
       };
-      lastRiskTradeability = null;
       if(renderer && typeof renderer.emit === 'function') renderer.emit('decisionPanelReset', {});
     }
 
