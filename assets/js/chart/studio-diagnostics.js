@@ -487,6 +487,177 @@
       geomRows = '<div style="margin-top:12px;color:#8D93A6"><b>Full Geometry</b> — not available yet (renderer has not painted a frame).</div>';
     }
 
+    /* ---------------------------------------------------------------
+       AI PROVIDER & RISK section — Phase 6 OpenRouter verification.
+
+       Purely a READ of two objects other files already publish:
+         window.DannyChart.lastAIDiagnostics  (ai-service.js, worker path)
+         window.DannyChart.lastRiskDecision   (studio-bootstrap.js)
+       Nothing is computed, re-derived or estimated here, and no AI
+       provider, worker, risk-engine or annotation code is touched.
+
+       The fields are assembled into an EXPLICIT whitelist object
+       (aiRiskPayload) rather than dumping either source wholesale, so
+       a future field added upstream can never leak into this panel or
+       onto the clipboard unreviewed. Both sources are already
+       secret-free by construction — worker/openrouter.js's
+       buildDiagnostics() only ever receives the specific fields it
+       lists, and ai-service.js's analysisShape records shapes and
+       counts, never candle data, prompts, headers or keys — but the
+       whitelist makes that property hold going forward too.
+    --------------------------------------------------------------- */
+    var aiDiag = DC.lastAIDiagnostics || null;
+    var riskDec = DC.lastRiskDecision || null;
+    var wd = (aiDiag && aiDiag.diagnostics) || null;
+    var shape = (aiDiag && aiDiag.analysisShape) || null;
+
+    var aiRiskPayload = {
+      capturedAt: new Date().toISOString(),
+      provider: providerName,
+      lastAnalysisStatus: { status: status.status, message: status.message || null },
+      ai: aiDiag ? {
+        provider: aiDiag.provider,
+        type: aiDiag.type,
+        httpStatus: aiDiag.httpStatus,
+        workerOk: aiDiag.workerOk,
+        error: aiDiag.error,
+        diagnostics: wd ? {
+          configuredModel: wd.configuredModel,
+          actualModel: wd.actualModel,
+          httpStatus: wd.httpStatus,
+          latencyMs: wd.latencyMs,
+          jsonParsed: wd.jsonParsed,
+          chartStructureValid: wd.chartStructureValid,
+          counts: wd.counts,
+          errorCategory: wd.errorCategory
+        } : null,
+        analysisShape: shape ? {
+          hasDecision: shape.hasDecision,
+          decisionKeys: shape.decisionKeys,
+          finalDecision: shape.finalDecision,
+          hasTradeLevels: shape.hasTradeLevels,
+          structureEvents: shape.structureEvents,
+          orderBlocks: shape.orderBlocks,
+          fvgs: shape.fvgs,
+          liquidity: shape.liquidity
+        } : null
+      } : null,
+      // What actually reached the Structured Analysis object the Risk
+      // Engine and Decision Panel consume — read from studio-chart-init's
+      // own state, so it reports the merged result, not the raw response.
+      structuredAnalysis: lastAnalysis ? {
+        hasDecision: !!lastAnalysis.decision,
+        finalDecision: lastAnalysis.decision ? lastAnalysis.decision.finalDecision : null,
+        hasTradeLevels: !!lastAnalysis.tradeLevels,
+        tradeLevelsCount: lastAnalysis.tradeLevels ? 1 : 0,
+        structureEvents: Array.isArray(lastAnalysis.structureEvents) ? lastAnalysis.structureEvents.length : null,
+        orderBlocks: Array.isArray(lastAnalysis.orderBlocks) ? lastAnalysis.orderBlocks.length : null,
+        fvgs: Array.isArray(lastAnalysis.fvgs) ? lastAnalysis.fvgs.length : null,
+        liquidity: Array.isArray(lastAnalysis.liquidity) ? lastAnalysis.liquidity.length : null
+      } : null,
+      risk: riskDec ? {
+        tradeability: riskDec.tradeability,
+        direction: riskDec.direction,
+        proposedDirection: riskDec.proposedDirection,
+        vetoes: riskDec.vetoes,
+        warnings: riskDec.warnings,
+        confluence: riskDec.confluence,
+        aiProposal: riskDec.aiProposal,
+        calculatedRiskReward: riskDec.calculatedRiskReward,
+        aiStatedRiskReward: riskDec.aiStatedRiskReward,
+        riskDistance: riskDec.riskDistance,
+        candleCount: riskDec.candleCount,
+        contextGeneratedAt: riskDec.contextGeneratedAt
+      } : null
+    };
+    // Also published so the same object is reachable from a desktop
+    // console without reopening the panel.
+    DC.lastDiagPayload = aiRiskPayload;
+
+    function kv(label, value, color){
+      var text = (value === null || value === undefined) ? '—' : String(value);
+      return '<div style="margin-top:2px;color:' + (color || '#8D93A6') + '">' +
+        escapeHtml(label) + ': <span style="color:#C8CDDA">' + escapeHtml(text) + '</span></div>';
+    }
+
+    var aiRiskBlock = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>AI Provider &amp; Risk</b></div>';
+
+    if(!aiDiag){
+      aiRiskBlock += '<div style="margin-top:2px;color:#FFA53C">No worker AI call recorded yet in this page session. ' +
+        'Select a provider and run an analysis, then reopen Diag. ' +
+        '(Local Ollama does not use the worker path and will not populate this section.)</div>';
+    } else {
+      var catColor = (wd && wd.errorCategory && wd.errorCategory !== 'none') ? '#FF5C6C' : '#35D399';
+      aiRiskBlock += kv('AI provider', aiDiag.provider);
+      aiRiskBlock += kv('Request type', aiDiag.type);
+      aiRiskBlock += kv('Worker HTTP status', aiDiag.httpStatus, aiDiag.httpStatus === 200 ? '#8D93A6' : '#FF5C6C');
+      aiRiskBlock += kv('workerOk', aiDiag.workerOk, aiDiag.workerOk ? '#35D399' : '#FF5C6C');
+      aiRiskBlock += kv('errorCategory', wd ? wd.errorCategory : '(no worker diagnostics)', catColor);
+      if(aiDiag.error){
+        aiRiskBlock += '<div style="margin-top:2px;color:#FF5C6C">error: <span style="color:#C8CDDA">' +
+          escapeHtml(String(aiDiag.error)) + '</span></div>';
+      }
+      if(wd){
+        aiRiskBlock += kv('Configured model', wd.configuredModel);
+        aiRiskBlock += kv('Actual model', wd.actualModel);
+        aiRiskBlock += kv('jsonParsed', wd.jsonParsed);
+        aiRiskBlock += kv('chartStructureValid', wd.chartStructureValid);
+        aiRiskBlock += kv('latencyMs', wd.latencyMs);
+      }
+      if(shape){
+        aiRiskBlock += kv('analysisShape.hasDecision', shape.hasDecision, shape.hasDecision ? '#35D399' : '#FF5C6C');
+        aiRiskBlock += kv('analysisShape.finalDecision', shape.finalDecision);
+        aiRiskBlock += kv('analysisShape.decisionKeys (' + (shape.decisionKeys ? shape.decisionKeys.length : 0) + ')',
+          shape.decisionKeys && shape.decisionKeys.length ? shape.decisionKeys.join(', ') : '(none)');
+        aiRiskBlock += kv('analysisShape.hasTradeLevels', shape.hasTradeLevels);
+        aiRiskBlock += kv('Worker counts', 'structureEvents ' + shape.structureEvents +
+          ', orderBlocks ' + shape.orderBlocks + ', fvgs ' + shape.fvgs + ', liquidity ' + shape.liquidity);
+      } else {
+        aiRiskBlock += '<div style="margin-top:2px;color:#FFA53C">analysisShape: null — the worker returned no analysis object at all.</div>';
+      }
+    }
+
+    aiRiskBlock += '<div style="margin-top:6px;color:#8D93A6"><b>Reached Structured Analysis</b></div>';
+    if(aiRiskPayload.structuredAnalysis){
+      var sa = aiRiskPayload.structuredAnalysis;
+      aiRiskBlock += kv('decision present', sa.hasDecision, sa.hasDecision ? '#35D399' : '#FF5C6C');
+      aiRiskBlock += kv('finalDecision', sa.finalDecision);
+      aiRiskBlock += kv('tradeLevels present / count', sa.hasTradeLevels + ' / ' + sa.tradeLevelsCount);
+      aiRiskBlock += kv('structureEvents / orderBlocks / fvgs / liquidity',
+        sa.structureEvents + ' / ' + sa.orderBlocks + ' / ' + sa.fvgs + ' / ' + sa.liquidity);
+    } else {
+      aiRiskBlock += '<div style="margin-top:2px;color:#FFA53C">No Structured Analysis recorded yet.</div>';
+    }
+
+    aiRiskBlock += '<div style="margin-top:6px;color:#8D93A6"><b>Risk Engine verdict</b></div>';
+    if(riskDec){
+      var tColor = riskDec.tradeability === 'ACTIONABLE' ? '#35D399' : (riskDec.tradeability === 'WAIT' ? '#FFA53C' : '#FF5C6C');
+      aiRiskBlock += kv('tradeability', riskDec.tradeability, tColor);
+      aiRiskBlock += kv('direction', riskDec.direction);
+      aiRiskBlock += kv('proposedDirection', riskDec.proposedDirection);
+      aiRiskBlock += kv('calculatedRiskReward', riskDec.calculatedRiskReward);
+      aiRiskBlock += kv('aiStatedRiskReward', riskDec.aiStatedRiskReward);
+      aiRiskBlock += kv('aiProposal', riskDec.aiProposal ? JSON.stringify(riskDec.aiProposal) : 'null');
+      aiRiskBlock += kv('vetoes (' + (riskDec.vetoes ? riskDec.vetoes.length : 0) + ')',
+        (riskDec.vetoes && riskDec.vetoes.length) ? riskDec.vetoes.map(function(v){ return v.code; }).join(', ') : '(none)');
+      aiRiskBlock += kv('warnings (' + (riskDec.warnings ? riskDec.warnings.length : 0) + ')',
+        (riskDec.warnings && riskDec.warnings.length) ? riskDec.warnings.map(function(w){ return w.code; }).join(', ') : '(none)');
+      if(riskDec.confluence && riskDec.confluence.length){
+        var sup = riskDec.confluence.filter(function(c){ return c.stance === 'SUPPORTING'; }).length;
+        var con = riskDec.confluence.filter(function(c){ return c.stance === 'CONFLICTING'; }).length;
+        var mis = riskDec.confluence.filter(function(c){ return c.stance === 'MISSING'; }).length;
+        aiRiskBlock += kv('confluence', sup + ' supporting, ' + con + ' conflicting, ' + mis + ' missing');
+        riskDec.confluence.forEach(function(c){
+          aiRiskBlock += '<div style="margin-top:1px;color:#565C70;font-size:10px">&nbsp;&nbsp;' +
+            escapeHtml(c.source) + ' — ' + escapeHtml(c.stance) + ': ' + escapeHtml(c.detail || '') + '</div>';
+        });
+      } else {
+        aiRiskBlock += kv('confluence', '(none recorded)');
+      }
+    } else {
+      aiRiskBlock += '<div style="margin-top:2px;color:#FFA53C">No risk decision recorded yet.</div>';
+    }
+
     var statusColor = status.status === 'ok' ? '#35D399' : (status.status === 'unknown' ? '#8D93A6' : '#FFA53C');
 
     panelEl.innerHTML =
@@ -497,12 +668,17 @@
       '<div style="position:sticky;top:0;z-index:1;background:rgba(10,12,18,0.98);display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid #232838">' +
         '<b>DannyTrade Diagnostics</b>' +
         '<span style="display:flex;gap:6px">' +
+          '<button id="dtDiagCopyBtn" style="background:none;border:1px solid rgba(53,211,153,0.5);color:#35D399;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:11px;min-height:32px">Copy</button>' +
           '<button id="dtDiagJumpBtn" style="background:none;border:1px solid rgba(212,175,106,0.5);color:#D4AF6A;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:11px;min-height:32px">Geometry ↓</button>' +
           '<button id="dtDiagCloseBtn" style="background:none;border:1px solid #232838;color:#8D93A6;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:11px;min-height:32px">Close</button>' +
         '</span>' +
       '</div>' +
       '<div style="padding:10px 12px 16px">' +
       '<div style="color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
+      // Phase 6 OpenRouter verification — placed FIRST (immediately under
+      // the status line) so it is visible without scrolling on a phone.
+      aiRiskBlock +
+      '<div id="dtDiagCopyArea"></div>' +
       '<div style="margin-top:4px;color:#8D93A6">Renderer drawables (total): ' + totalDrawables + ' &nbsp;|&nbsp; Visible layers: ' + visibleLayerCount + '</div>' +
       '<div style="margin-top:4px;color:' + (DC.lastRenderError ? '#FF5C6C' : '#8D93A6') + '">Last error: ' + lastError + '</div>' +
       layoutBlock +
@@ -516,6 +692,39 @@
 
     var closeBtn = document.getElementById('dtDiagCloseBtn');
     if(closeBtn) closeBtn.addEventListener('click', hide);
+    /* Copy — the whole point on Android, where there is no console to
+       read this out of. Copies the SAME whitelist object rendered above
+       (never a raw dump). navigator.clipboard needs a secure context and
+       a user gesture; both hold for a tap on an HTTPS page, but Android
+       WebViews still refuse it often enough that the textarea fallback
+       is not optional — without it the button silently does nothing. */
+    var copyBtn = document.getElementById('dtDiagCopyBtn');
+    if(copyBtn){
+      copyBtn.addEventListener('click', function(){
+        var text = '';
+        try{ text = JSON.stringify(window.DannyChart.lastDiagPayload || {}, null, 2); }
+        catch(e){ text = 'Could not serialize diagnostics: ' + (e && e.message); }
+        function fallback(){
+          var area = document.getElementById('dtDiagCopyArea');
+          if(!area) return;
+          area.innerHTML = '<div style="margin-top:8px;color:#FFA53C">Automatic copy was blocked. ' +
+            'Long-press the text below, choose Select all, then Copy.</div>' +
+            '<textarea readonly style="width:100%;height:220px;margin-top:4px;background:#0A0C12;color:#C8CDDA;' +
+            'border:1px solid #232838;border-radius:6px;font-family:var(--font-mono),monospace;font-size:10px;' +
+            'padding:6px;-webkit-user-select:text;user-select:text"></textarea>';
+          var ta = area.querySelector('textarea');
+          if(ta){ ta.value = text; ta.focus(); try{ ta.setSelectionRange(0, text.length); } catch(e2){} }
+        }
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(text).then(function(){
+            copyBtn.textContent = 'Copied';
+            setTimeout(function(){ copyBtn.textContent = 'Copy'; }, 1500);
+          }).catch(fallback);
+        } else {
+          fallback();
+        }
+      });
+    }
     var jumpBtn = document.getElementById('dtDiagJumpBtn');
     if(jumpBtn){
       jumpBtn.addEventListener('click', function(){
