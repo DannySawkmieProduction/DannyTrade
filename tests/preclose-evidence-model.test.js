@@ -37,7 +37,33 @@ function optionChainFixture(overrides){
   }, overrides);
 }
 
+/* PRODUCTION SHAPE — analysis-engine.js's analyze() stores each engine's
+   result UNWRAPPED (context.liquidity = r.data, lines 312-358) and
+   returns those slots directly, so ctx.liquidity IS {sweeps, meta}.
+
+   This fixture previously used the {data:{...}} wrapper, which
+   production stopped producing — so all 86 assertions here passed while
+   safeData() returned null for all eight engines on every real run.
+   That is precisely how the "0 sweep(s) / 0 FVG / no clear trend"
+   pre-close bug escaped. The default fixture is now the real shape;
+   legacyWrappedAnalysisContext() below keeps the old shape covered. */
 function baseAnalysisContext(overrides){
+  return Object.assign({
+    marketStructure: { external: { trend: null, swings: [] }, meta: { insufficientData: false } },
+    liquidity: { sweeps: [], meta: { insufficientData: false } },
+    fairValueGaps: { fvgs: [], meta: { insufficientData: false } },
+    orderBlocks: { orderBlocks: [], meta: { insufficientData: false } },
+    premiumDiscount: { currentLocation: null, meta: { insufficientData: false } },
+    trend: { primary: { current: { direction: null, strength: null, persistence: 0, evidence: {} } } },
+    volume: { highestVolumeBucket: null, meta: { insufficientData: false } },
+    supportResistance: { levels: [], meta: { insufficientData: false } },
+    diagnostics: { errors: [] }
+  }, overrides);
+}
+
+/** The older {data:{...}} shape — a raw engine result can still reach
+ *  safeData() from a direct caller, so it stays covered. */
+function legacyWrappedAnalysisContext(overrides){
   return Object.assign({
     marketStructure: { data: { external: { trend: null, swings: [] }, meta: { insufficientData: false } } },
     liquidity: { data: { sweeps: [], meta: { insufficientData: false } } },
@@ -401,6 +427,271 @@ console.log('\n[30] STALE_OPTION_DATA — the option chain\'s OWN timestamp dete
   const evidence = EM.buildEvidence(baseAnalysisContext(), oc, { sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(), staleSeconds: 900 });
   assert(evidence.riskFlags.some(f => f.code === 'STALE_OPTION_DATA'), 'A 20-minute-old option chain (over the 15-minute threshold) triggers STALE_OPTION_DATA');
   assert(evidence.marketAnalysis.optionChainDataQuality === 'STALE', 'marketAnalysis.optionChainDataQuality correctly STALE');
+}
+
+
+/* =================================================================
+   PRODUCTION SHAPE REGRESSION (Fix A + Fix B)
+
+   The escaped bug: analysis-engine.js stores each engine's result
+   UNWRAPPED (context.liquidity = r.data, lines 312-358), but safeData()
+   required a {data:...} wrapper — so it returned null for ALL EIGHT
+   engines on every real run. The Pre-Close panel therefore reported
+   "0 sweep(s)", "0 fair value gap(s)", "0 order block(s)", "no clear
+   trend", "unresolved" and "0 level(s)" no matter what the market was
+   doing, while diagnostics.valid was true and the engines had succeeded.
+
+   Correcting the fixtures alone does NOT catch this — verified: with
+   production-shape fixtures and the OLD safeData(), all 86 pre-existing
+   assertions still passed, because every one of them checks an EMPTY
+   outcome that both versions produce. Only POPULATED engine data
+   distinguishes them. That is what these tests supply.
+   ================================================================= */
+
+/** A production-shape context with every engine genuinely populated. */
+function populatedProductionContext(){
+  return baseAnalysisContext({
+    marketStructure: {
+      external: { trend: 'bullish', swings: [{ index: 10, type: 'high', price: 24350 }] },
+      meta: { insufficientData: false }
+    },
+    liquidity: {
+      sweeps: [
+        { direction: 'buySide', level: 24400, sweepIndex: 150, isStopHunt: false },
+        { direction: 'sellSide', level: 24180, sweepIndex: 170, isStopHunt: true }
+      ],
+      meta: { insufficientData: false }
+    },
+    fairValueGaps: {
+      fvgs: [
+        { direction: 'bearish', top: 24320, bottom: 24300, startIndex: 120, state: 'unfilled' },
+        { direction: 'bullish', top: 24260, bottom: 24240, startIndex: 168, state: 'unfilled' }
+      ],
+      meta: { insufficientData: false }
+    },
+    orderBlocks: {
+      orderBlocks: [
+        { direction: 'bearish', top: 24380, bottom: 24360, mitigationState: 'unmitigated', qualityScore: 0.6 },
+        { direction: 'bullish', top: 24230, bottom: 24210, mitigationState: 'unmitigated', qualityScore: 0.8 }
+      ],
+      meta: { insufficientData: false }
+    },
+    premiumDiscount: { currentLocation: 'discount', meta: { insufficientData: false } },
+    trend: { primary: { current: { direction: 'bullish', strength: 0.7, persistence: 5, evidence: { momentumConfirmed: true } } } },
+    volume: { highestVolumeBucket: { price: 24250, volume: 980000 }, meta: { insufficientData: false } },
+    supportResistance: {
+      levels: [
+        { type: 'support', price: 24180, status: 'active' },
+        { type: 'resistance', price: 24400, status: 'active' },
+        { type: 'support', price: 24050, status: 'active' }
+      ],
+      meta: { insufficientData: false }
+    }
+  });
+}
+
+function buildFromCtx(ctx){
+  return EM.buildEvidence(ctx, OPTION_UNAVAILABLE, {
+    sessionInfo: SESSION_CONTINUOUS_IN_WINDOW, candles: freshCandles(), now: new Date()
+  });
+}
+
+console.log('\n[P1] Real unwrapped engine output is actually read');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.marketStructure && ma.marketStructure.trend === 'bullish',
+    `market structure trend read from the unwrapped shape (got ${ma.marketStructure && ma.marketStructure.trend})`);
+  assert(ma.momentum && ma.momentum.confirmed === true, 'momentum is read, not DATA UNAVAILABLE');
+}
+
+console.log('\n[P2] Populated liquidity produces a real sweep count');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.liquidity.sweepCount === 2, `sweepCount is 2, not 0 (got ${ma.liquidity.sweepCount})`);
+  assert(ma.liquidity.insufficientData === false, 'not flagged insufficient');
+}
+
+console.log('\n[P3] Populated FVG data produces a real FVG count');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.fvg.count === 2, `FVG count is 2, not 0 (got ${ma.fvg.count})`);
+}
+
+console.log('\n[P4] Populated order blocks produce a real order-block count');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.orderBlocks.count === 2, `order-block count is 2, not 0 (got ${ma.orderBlocks.count})`);
+}
+
+console.log('\n[P5] Populated support/resistance produces a real level count');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.supportResistance.levelCount === 3, `levelCount is 3, not 0 (got ${ma.supportResistance.levelCount})`);
+  assert(ma.supportResistance.insufficientData === false, 'not flagged insufficient');
+}
+
+console.log('\n[P6] Trend data produces a real direction');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.trend.direction === 'bullish', `trend direction is bullish, not null (got ${ma.trend.direction})`);
+  assert(ma.trend.strength === 0.7, 'trend strength carried through');
+}
+
+console.log('\n[P7] Premium/discount data produces a real location');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.premiumDiscount.currentLocation === 'discount',
+    `location is 'discount', not 'unresolved' (got ${ma.premiumDiscount.currentLocation})`);
+}
+
+console.log('\n[P8] Volume data is read');
+{
+  const ma = buildFromCtx(populatedProductionContext()).marketAnalysis;
+  assert(ma.volume.highestVolumeBucket !== null, 'a dominant volume level is reported');
+  assert(ma.volume.insufficientData === false, 'not flagged insufficient');
+}
+
+console.log('\n[P9] Populated engines actually generate directional EVIDENCE');
+{
+  // The counts prove the data is READ; this proves it reaches the
+  // decision inputs, not just the display summary.
+  const e = buildFromCtx(populatedProductionContext());
+  const total = e.bullish.length + e.bearish.length + e.conflicting.length;
+  assert(total > 0, `evidence was generated (${total} items) — the buggy version produced 0`);
+  const sources = e.bullish.concat(e.bearish, e.conflicting).map(i => i.source);
+  ['trend', 'premiumDiscount', 'liquidity', 'fvg', 'orderBlocks'].forEach(src => {
+    assert(sources.indexOf(src) !== -1, `${src} contributed evidence`);
+  });
+}
+
+console.log('\n[P10] The legacy {data:...} shape still works');
+{
+  const legacy = legacyWrappedAnalysisContext({
+    liquidity: { data: { sweeps: [{ direction: 'sellSide', level: 24180, isStopHunt: false }], meta: { insufficientData: false } } },
+    fairValueGaps: { data: { fvgs: [{ direction: 'bullish', top: 24260, bottom: 24240 }], meta: { insufficientData: false } } },
+    supportResistance: { data: { levels: [{ type: 'support', price: 24180 }], meta: { insufficientData: false } } },
+    premiumDiscount: { data: { currentLocation: 'premium', meta: { insufficientData: false } } }
+  });
+  const ma = buildFromCtx(legacy).marketAnalysis;
+  assert(ma.liquidity.sweepCount === 1, 'legacy wrapped liquidity still read');
+  assert(ma.fvg.count === 1, 'legacy wrapped FVG still read');
+  assert(ma.supportResistance.levelCount === 1, 'legacy wrapped S/R still read');
+  assert(ma.premiumDiscount.currentLocation === 'premium', 'legacy wrapped premium/discount still read');
+}
+
+console.log('\n[P11] A genuinely null engine result stays DATA UNAVAILABLE, never a fake 0');
+{
+  const ctx = baseAnalysisContext({
+    marketStructure: null, trend: null, volume: null, supportResistance: null,
+    liquidity: null, fairValueGaps: null, orderBlocks: null, premiumDiscount: null
+  });
+  const e = buildFromCtx(ctx);
+  const ma = e.marketAnalysis;
+  // A hard engine failure must be flagged insufficientData:true rather
+  // than reported as a real zero measurement. marketStructure keeps a
+  // present-but-flagged object ({trend:null, insufficientData:true}), so
+  // the distinguishing signal is the FLAG, not the object's absence —
+  // which is why every slot below is asserted on insufficientData.
+  assert(ma.marketStructure.trend === null && ma.marketStructure.insufficientData === true,
+    'a null marketStructure yields trend:null flagged insufficientData');
+  assert(ma.trend.direction === null, 'a null trend yields a null direction');
+  /* KNOWN LIMITATION, documented here rather than asserted away —
+     OUT OF SCOPE for Fix A/B, and a candidate for Fix C.
+
+     Three builders flag a hard engine failure:
+       marketStructure / volume / supportResistance -> insufficientData: true
+     Four do NOT, because they compute the flag as
+       !!(data && data.meta && data.meta.insufficientData)
+     which is false when `data` itself is null:
+       liquidity / fvg / orderBlocks / premiumDiscount -> insufficientData: false
+
+     So for those four, "the engine failed" is currently
+     indistinguishable from "the engine ran and found zero" — the same
+     class of conflation as the NO_TRADE reason categories. These
+     assertions record the ACTUAL behaviour so the gap is visible and a
+     future fix has a baseline to change deliberately. */
+  assert(ma.liquidity.sweepCount === 0 && ma.liquidity.insufficientData === false,
+    'null liquidity currently reports 0 sweeps UNFLAGGED (known gap — indistinguishable from a real zero)');
+  assert(ma.fvg.count === 0 && ma.fvg.insufficientData === false,
+    'null FVG currently reports 0 UNFLAGGED (known gap)');
+  assert(ma.orderBlocks.count === 0 && ma.orderBlocks.insufficientData === false,
+    'null order blocks currently report 0 UNFLAGGED (known gap)');
+  assert(ma.premiumDiscount.currentLocation === null && ma.premiumDiscount.insufficientData === false,
+    'null premium/discount currently reports null location UNFLAGGED (known gap)');
+  assert(ma.volume.insufficientData === true, 'a null volume engine is flagged insufficient');
+  assert(ma.supportResistance.insufficientData === true, 'a null S/R engine is flagged insufficient');
+  assert(e.bullish.length === 0 && e.bearish.length === 0, 'no evidence is invented from null engines');
+}
+{
+  // Non-object junk must not be treated as data.
+  const ma = buildFromCtx(baseAnalysisContext({ liquidity: 'not an object', fairValueGaps: 42, orderBlocks: true })).marketAnalysis;
+  assert(ma.liquidity.sweepCount === 0 && ma.fvg.count === 0 && ma.orderBlocks.count === 0,
+    'non-object engine slots are rejected without throwing');
+}
+
+console.log('\n[P12] END-TO-END — real AnalysisEngine output through buildEvidence()');
+{
+  /* THE test whose absence let this ship. Everything above still uses a
+     hand-built fixture; this runs the ACTUAL eight engines and feeds
+     their real Analysis Context straight into buildEvidence(), so the
+     integration boundary itself is asserted. */
+  const sbE2E = { window: {}, console: { log(){}, warn(){}, error(){}, info(){} }, Intl, Date, Math, JSON, Number, Array, Object, String, isNaN, parseInt, parseFloat };
+  sbE2E.global = sbE2E;
+  const ctxE2E = vm.createContext(sbE2E);
+  ['analysis/candle-utils.js', 'analysis/market-structure-engine.js', 'analysis/liquidity-engine.js',
+   'analysis/order-block-engine.js', 'analysis/fvg-engine.js', 'analysis/premium-discount-engine.js',
+   'analysis/volume-engine.js', 'analysis/trend-engine.js', 'analysis/support-resistance-engine.js',
+   'analysis/analysis-engine.js'].forEach(f => {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'assets', 'js', f), 'utf8'), ctxE2E, { filename: f });
+  });
+  const AnalysisEngine = sbE2E.window.DannyChart.Analysis.AnalysisEngine;
+
+  // 180 candles with a genuine directional move, so the engines have
+  // something real to find.
+  const t0 = nowUnix() - 180 * 900;
+  const real = [];
+  let px = 24000;
+  for(let i = 0; i < 180; i++){
+    const drift = Math.sin(i / 11) * 70 + (i * 1.6);
+    const o = px, c = +(24000 + drift).toFixed(2);
+    real.push({ time: t0 + i * 900, open: +o.toFixed(2), high: +(Math.max(o, c) + 18).toFixed(2),
+      low: +(Math.min(o, c) - 18).toFixed(2), close: c, volume: 100000 + (i % 17) * 9000 });
+    px = c;
+  }
+
+  const realCtx = AnalysisEngine.analyze(real, { symbol: 'NIFTY', timeframe: null });
+  assert(realCtx.diagnostics.valid === true, 'the real AnalysisEngine reported valid');
+  assert(realCtx.diagnostics.errors.length === 0, 'and no engine errors');
+
+  // Confirm the context really is the unwrapped shape this fix targets.
+  assert(!realCtx.liquidity.data && !realCtx.fairValueGaps.data,
+    'the real context is UNWRAPPED (no .data) — the shape safeData() must handle');
+
+  const e = EM.buildEvidence(realCtx, OPTION_UNAVAILABLE, {
+    sessionInfo: SESSION_CONTINUOUS_IN_WINDOW,
+    candles: freshCandles(),
+    now: new Date()
+  });
+  const ma = e.marketAnalysis;
+
+  // Whatever the engines found must be REFLECTED, not nulled. Asserted
+  // per engine so a future regression names which one broke.
+  assert(ma.marketStructure !== null, 'marketStructure survived the real boundary');
+  assert(ma.liquidity && typeof ma.liquidity.sweepCount === 'number', 'liquidity survived');
+  assert(ma.fvg && typeof ma.fvg.count === 'number', 'fvg survived');
+  assert(ma.orderBlocks && typeof ma.orderBlocks.count === 'number', 'orderBlocks survived');
+  assert(ma.premiumDiscount !== null, 'premiumDiscount survived');
+  assert(ma.trend !== null, 'trend survived');
+  assert(ma.volume.insufficientData === false, 'volume engine reported real data, not insufficient');
+  assert(ma.supportResistance.insufficientData === false, 'S/R engine reported real data, not insufficient');
+
+  // The decisive assertion: the real trend engine found a direction on a
+  // clearly trending series, and it reached the model. Under the buggy
+  // safeData() this was null on every single run.
+  assert(ma.trend.direction !== null,
+    `the real trend engine's direction reached the model (got ${ma.trend.direction})`);
+  assert(e.bullish.length + e.bearish.length > 0,
+    'real engine output generated directional evidence end-to-end');
 }
 
 console.log('\n[31] REAL-RESPONSE FIX end-to-end — the exact production expiry shape (numeric epoch string, no .date) now classifies correctly instead of silently failing');
