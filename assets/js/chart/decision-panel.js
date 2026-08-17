@@ -85,7 +85,7 @@
     return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
   }
 
-  const DECISION_TAG_CLASSES = ['buy','sell','wait','no-trade'];
+  const DECISION_TAG_CLASSES = ['buy','sell','wait','no-trade','ai-unavailable'];
   function decisionTagClass(finalDecision){
     const map = { BUY:'buy', SELL:'sell', WAIT:'wait', NO_TRADE:'no-trade' };
     return map[finalDecision] || null;
@@ -235,9 +235,40 @@
           const el = fieldEls.get('finalDecision');
           if(el){
             DECISION_TAG_CLASSES.forEach(c => el.classList.remove(c));
-            const cls = decisionTagClass(value);
-            if(cls) el.classList.add(cls);
-            el.textContent = formatPlain(value);
+            el.style.background = '';
+            el.style.color = '';
+            // `value` is `{ value: decision.finalDecision, aiUnavailable }`
+            // (or null on reset) — see update(), where the flag is bundled
+            // in specifically because `finalDecision` can be the identical
+            // string 'NO_TRADE' whether the AI actually said so or the
+            // Risk Engine synthesized it from no proposal at all. Bundling
+            // the flag into the tracked value (rather than reading a
+            // sibling module variable) guarantees this case re-runs
+            // whenever aiUnavailable changes, even on updates where the
+            // finalDecision STRING happens to stay the same.
+            const fd = (value && typeof value === 'object') ? value.value : value;
+            const isAiUnavailable = !!(value && typeof value === 'object' && value.aiUnavailable);
+            if(isAiUnavailable){
+              // Presentation-only: decision.finalDecision underneath this
+              // badge is still exactly 'NO_TRADE', written by the Risk
+              // Engine exactly as before. This branch changes what the
+              // badge SAYS, never what was decided or why — no veto,
+              // tradeability, or annotation-pipeline behavior is touched.
+              el.classList.add('ai-unavailable');
+              // No dedicated neutral/grey token exists yet for this tag in
+              // assets/css/chart-studio.css (buy/sell/wait/no-trade all
+              // have one) — set inline, matching that file's existing
+              // "-dim" convention (a low-opacity tint of the solid color)
+              // using style.css's --text-dim (#8D93A6) so it fits the
+              // existing palette without editing a shared stylesheet.
+              el.style.background = 'rgba(141,147,166,0.14)';
+              el.style.color = 'var(--text-dim, #8D93A6)';
+              el.textContent = 'AI UNAVAILABLE';
+            } else {
+              const cls = decisionTagClass(fd);
+              if(cls) el.classList.add(cls);
+              el.textContent = formatPlain(fd);
+            }
           }
           break;
         }
@@ -249,7 +280,26 @@
           if(pctEl) pctEl.textContent = formatPct(value);
           break;
         }
-        case 'reasoningSummary': setText('reasoningSummary', formatPlain(value)); break;
+        case 'reasoningSummary': {
+          // `value` is `{ value: decision.reasoningSummary, aiUnavailable }`
+          // (or null on reset) — see the comment on this field in
+          // update() for why it's bundled the same way finalDecision is.
+          //
+          // Deliberately the ONLY other field scoped for the wording
+          // swap (req. 6) — it's the primary narrative a user reads to
+          // understand "why", directly under the badge. Every other
+          // AI-detail field (tradeGrade, marketPhase, etc.) keeps the
+          // existing generic "Not available" — a deliberate minimal
+          // scope, not a broader per-field rewrite. No diagnostics or
+          // error text is exposed here, only this fixed, generic
+          // sentence (req. 7).
+          const rs = (value && typeof value === 'object') ? value.value : value;
+          const rsAiUnavailable = !!(value && typeof value === 'object' && value.aiUnavailable);
+          setText('reasoningSummary', rsAiUnavailable
+            ? 'AI analysis unavailable for this request. The result below reflects deterministic Risk Engine evaluation only, not AI reasoning.'
+            : formatPlain(rs));
+          break;
+        }
         case 'tradeGrade': setText('tradeGrade', formatPlain(value)); break;
         case 'tradeQuality': setText('tradeQuality', formatPlain(value)); break;
         case 'riskReward': setText('riskReward', formatRR(value)); break;
@@ -389,6 +439,24 @@
       // Analysis objects stay fully backward-compatible.
       const risk = (decision.risk && typeof decision.risk === 'object') ? decision.risk : null;
       lastRiskTradeability = risk ? risk.tradeability : null;
+      // Presentation-only distinction between a genuine AI verdict and
+      // the Risk Engine's own fallback decision when no AI proposal
+      // exists at all (provider failure, rate limit, malformed response,
+      // or no provider connected). Derived entirely from fields the Risk
+      // Engine already computes and never overrides decision.finalDecision,
+      // risk.tradeability, or any veto — see the finalDecision case below
+      // for what this actually changes (display only).
+      //
+      // ACTIONABLE is excluded deliberately: a validated, approved trade
+      // always has a real aiProposal by construction (the Risk Engine can
+      // only approve levels the AI itself proposed), so this flag can
+      // never fire for a BUY/SELL that reached the chart.
+      // Computed fresh each update() and bundled directly into the
+      // finalDecision and reasoningSummary tracked values below (not
+      // held in module state) — see those fields' cases for why a
+      // persisted flag read separately from the diffed value would
+      // both miss same-string transitions and go stale across reset().
+      const aiUnavailable = !!(risk && risk.aiProposal === null && risk.tradeability !== 'ACTIONABLE');
       lastAnalysis = analysis || null;
 
       // CAS Phase 1 — additive only. context.symbol is optional and,
@@ -405,9 +473,21 @@
 
       const nextValues = {
         badge,
-        finalDecision: decision.finalDecision,
+        // Bundled with aiUnavailable (not a plain string) so the
+        // finalDecision case below re-renders whenever EITHER changes —
+        // see that case for why finalDecision alone can't distinguish
+        // the two 'NO_TRADE' sources by string value.
+        finalDecision: { value: decision.finalDecision, aiUnavailable },
         confidence: decision.confidence,
-        reasoningSummary: decision.reasoningSummary,
+        // Bundled with aiUnavailable for the same reason as finalDecision
+        // above, but for a different collision: on a panel's very FIRST
+        // update(), decision.reasoningSummary is undefined when the AI
+        // never answered, and JSON.stringify(undefined-as-null) equals
+        // JSON.stringify(the initial lastValues default of null) — so a
+        // plain-value diff would see "no change" and never call
+        // applyField at all, leaving the build-time "Not available"
+        // placeholder on screen instead of the AI-unavailable message.
+        reasoningSummary: { value: decision.reasoningSummary, aiUnavailable },
         tradeGrade: decision.tradeGrade,
         tradeQuality: decision.tradeQuality,
         riskReward: decision.riskReward,
