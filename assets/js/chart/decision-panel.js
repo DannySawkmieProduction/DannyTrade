@@ -214,6 +214,11 @@
     const fieldEls = buildDom(container);
     let lastValues = {}; // fieldName -> last rendered value, for incremental diffing
     let lastAnalysis = null;
+    // Phase 6 — the tradeability of the most recent update(), read by
+    // the riskVetoes renderer so an empty veto list on a REJECTED
+    // verdict is not reported as "gates cleared". Set in update()
+    // before applyField() runs; reset with the rest of the panel.
+    let lastRiskTradeability = null;
     let lastSymbol = null; // CAS Phase 1 — set whenever update()'s context carries one; see renderSessionIndicator()
 
     function setText(field, text){
@@ -273,9 +278,25 @@
           // No vetoes is a real, meaningful state — say so explicitly
           // rather than reusing the "Not available" default, which
           // would read as "the check did not run".
-          listEl.innerHTML = items.length
-            ? items.map(v => `<li><strong>${escapeHtml(v.severity || 'HARD')}</strong> ${escapeHtml(v.code)}: ${escapeHtml(v.message || '')}</li>`).join('')
-            : (value === null ? `<li class="notes-empty">${NOT_AVAILABLE}</li>` : `<li class="notes-empty">No risk vetoes — deterministic gates cleared.</li>`);
+          //
+          // BUT "no vetoes" only means "gates cleared" when the engine
+          // actually reached the gates. A REJECTED verdict with an
+          // empty veto list means it stopped before them — no trade
+          // direction was proposed, so there was nothing to gate. The
+          // previous wording reported that case as "deterministic gates
+          // cleared", which is the opposite of what happened and
+          // actively misleads anyone diagnosing an empty panel.
+          if(items.length){
+            listEl.innerHTML = items.map(v =>
+              `<li><strong>${escapeHtml(v.severity || 'HARD')}</strong> ${escapeHtml(v.code)}: ${escapeHtml(v.message || '')}</li>`).join('');
+          } else if(value === null){
+            listEl.innerHTML = `<li class="notes-empty">${NOT_AVAILABLE}</li>`;
+          } else if(lastRiskTradeability === 'REJECTED'){
+            listEl.innerHTML = '<li class="notes-empty">No trade direction was proposed, so no risk gate was evaluated. ' +
+              'The AI returned no usable decision — check the console for [AIService] worker response diagnostics.</li>';
+          } else {
+            listEl.innerHTML = '<li class="notes-empty">No risk vetoes — deterministic gates cleared.</li>';
+          }
           break;
         }
         case 'educationalNotes': {
@@ -367,6 +388,7 @@
       // renders its normal "Not available" default, so older Structured
       // Analysis objects stay fully backward-compatible.
       const risk = (decision.risk && typeof decision.risk === 'object') ? decision.risk : null;
+      lastRiskTradeability = risk ? risk.tradeability : null;
       lastAnalysis = analysis || null;
 
       // CAS Phase 1 — additive only. context.symbol is optional and,
@@ -448,6 +470,7 @@
         educationalNotes: null,
         tradeability: null, confluenceSummary: null, confluence: null, riskVetoes: null
       };
+      lastRiskTradeability = null;
       if(renderer && typeof renderer.emit === 'function') renderer.emit('decisionPanelReset', {});
     }
 
