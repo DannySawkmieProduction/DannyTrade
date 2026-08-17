@@ -221,6 +221,30 @@ const ANALYSIS_APPROVED_BUY = {
   }
 };
 
+
+/** A valid AI WAIT — the exact shape the user's live panel showed:
+ *  real reasoning, confidence 0.85, tradeability WAIT, aiProposal
+ *  non-null, vetoes []. Proven against the real risk engine. */
+const ANALYSIS_VALID_WAIT = {
+  decision: {
+    finalDecision: 'WAIT', tradeGrade: 'B', tradeQuality: 'High potential but currently overextended',
+    riskReward: 2.5, marketPhase: 'Recovery/Expansion', trend: 'Bullish',
+    structureSummary: 'Bullish recovery following a significant market structure shift and subsequent break of structure to the upside.',
+    lastStructureEvent: 'Bullish BOS at index 163', trapRisk: 'Moderate',
+    liquidityTarget: '24405.2', invalidationLevel: '24302.4', confidence: 0.85,
+    reasoningSummary: 'Bullish structure but price is overextended; waiting for a pullback into value.',
+    educationalNotes: ['Avoid chasing extended moves.'],
+    risk: {
+      tradeability: 'WAIT', direction: 'NONE', proposedDirection: 'NONE',
+      vetoes: [], warnings: [],
+      aiProposal: { finalDecision: 'WAIT', direction: null, confidence: 0.85, riskReward: 2.5 },
+      calculatedRiskReward: null, aiStatedRiskReward: 2.5,
+      confluence: new Array(8).fill({ source: 'trend', stance: 'NEUTRAL',
+        detail: 'Analysis available; no trade direction proposed to score against.' })
+    }
+  }
+};
+
 /* ================================================================= */
 
 section('[A] Genuine AI NO_TRADE — displays NO_TRADE, not AI UNAVAILABLE');
@@ -352,6 +376,98 @@ section('[J] Backward compatibility — an analysis with no decision.risk at all
   assert(fd.classList.contains('wait'), 'normal wait class applied');
   assert(!fd.classList.contains('ai-unavailable'), 'no risk object means aiUnavailable can never be true (risk is null, not falsy-but-present)');
 }
+
+/* =================================================================
+   Stale-riskVetoes regression. `risk.vetoes` is [] for BOTH a
+   REJECTED-with-no-proposal verdict and a valid WAIT, so the change
+   differ saw no change and left the previous render's text on screen —
+   telling the user "the AI returned no usable decision" underneath a
+   perfectly valid WAIT decision. Fixed by bundling tradeability into
+   the tracked value.
+   ================================================================= */
+
+const NO_USABLE = 'The AI returned no usable decision';
+
+section('[K-A] REJECTED -> valid WAIT on the SAME panel: riskVetoes must update');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_RATE_LIMITED);           // REJECTED, vetoes []
+  const before = field(container, 'riskVetoes').textContent;
+  assert(before.indexOf(NO_USABLE) !== -1, 'the REJECTED render shows the "no usable decision" text');
+
+  panel.update(ANALYSIS_VALID_WAIT);             // WAIT, vetoes [] — same [] as before
+  const after = field(container, 'riskVetoes').textContent;
+  assert(after.indexOf(NO_USABLE) === -1,
+    'the stale "AI returned no usable decision" text is GONE after the WAIT render');
+  assert(after.indexOf('valid but not yet actionable') !== -1,
+    'riskVetoes now shows the valid-WAIT wording');
+  assert(before !== after, 'the field genuinely re-rendered despite vetoes being [] in both updates');
+}
+
+section('[K-B] Valid WAIT renders consistently as a valid decision');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_VALID_WAIT);
+  const fd = field(container, 'finalDecision');
+  assert(fd.textContent === 'WAIT', `badge reads WAIT (got "${fd.textContent}")`);
+  assert(fd.classList.contains('wait'), 'badge carries the wait class');
+  assert(!fd.classList.contains('ai-unavailable'), 'badge is NOT AI UNAVAILABLE — aiProposal is non-null');
+  assert(field(container, 'tradeability').textContent === 'WAIT', 'tradeability reads WAIT');
+  const rs = field(container, 'reasoningSummary').textContent;
+  assert(rs === ANALYSIS_VALID_WAIT.decision.reasoningSummary, 'the AI\'s real reasoning is shown verbatim');
+  assert(!/AI analysis unavailable/i.test(rs), 'the AI-unavailable message is NOT shown');
+  const rv = field(container, 'riskVetoes').textContent;
+  assert(rv.indexOf(NO_USABLE) === -1, 'riskVetoes does not claim the AI returned no usable decision');
+  assert(rv.indexOf('valid but not yet actionable') !== -1, 'riskVetoes states the setup is valid but not actionable');
+  assert(field(container, 'tradeGrade').textContent === 'B', 'tradeGrade B survives');
+  assert(field(container, 'riskReward').textContent.indexOf('2.5') !== -1, 'riskReward 2.5 survives');
+}
+
+section('[K-C] AI UNAVAILABLE -> valid WAIT completely replaces the unavailable state');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_RATE_LIMITED);
+  assert(field(container, 'finalDecision').textContent === 'AI UNAVAILABLE', 'starts as AI UNAVAILABLE');
+  panel.update(ANALYSIS_VALID_WAIT);
+  const fd = field(container, 'finalDecision');
+  assert(fd.textContent === 'WAIT', 'badge fully replaced with WAIT');
+  assert(!fd.classList.contains('ai-unavailable'), 'ai-unavailable class cleared');
+  assert(fd.classList.contains('wait'), 'wait class applied');
+  assert(!/AI analysis unavailable/i.test(field(container, 'reasoningSummary').textContent),
+    'the AI-unavailable reasoning message is replaced by real AI text');
+  assert(field(container, 'riskVetoes').textContent.indexOf(NO_USABLE) === -1, 'no stale failure text remains anywhere');
+}
+
+section('[K-G] Genuine REJECTED behaviour is unchanged');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_RATE_LIMITED);
+  const rv = field(container, 'riskVetoes').textContent;
+  assert(rv.indexOf('no risk gate was evaluated') !== -1, 'REJECTED still explains that no gate ran');
+  assert(rv.indexOf(NO_USABLE) !== -1, 'REJECTED still reports no usable AI decision — correct for a real failure');
+  assert(rv.indexOf('valid but not yet actionable') === -1, 'REJECTED does NOT borrow the WAIT wording');
+}
+{
+  // REJECTED WITH real vetoes must still list them (State 2).
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_AI_REJECTED);
+  const rv = field(container, 'riskVetoes').textContent;
+  assert(rv.indexOf('STOP_ON_WRONG_SIDE') !== -1, 'a real veto is still listed');
+  assert(rv.indexOf(NO_USABLE) === -1, 'a vetoed proposal is not described as unusable — the AI did propose');
+  assert(field(container, 'finalDecision').textContent === 'NO_TRADE', 'the Risk Engine verdict still shows');
+}
+
+section('[K-H] WAIT -> REJECTED also updates (the reverse transition)');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_VALID_WAIT);
+  assert(field(container, 'riskVetoes').textContent.indexOf('valid but not yet actionable') !== -1, 'starts as valid WAIT');
+  panel.update(ANALYSIS_RATE_LIMITED);
+  const rv = field(container, 'riskVetoes').textContent;
+  assert(rv.indexOf(NO_USABLE) !== -1, 'switches to the REJECTED wording');
+  assert(rv.indexOf('valid but not yet actionable') === -1, 'the WAIT wording is gone');
+}
+
 
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 if(failed > 0) process.exitCode = 1;

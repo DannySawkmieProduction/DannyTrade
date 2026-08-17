@@ -656,5 +656,101 @@ section('[34] Evidence model never fabricates support');
   assert(opposite.conflictingCount >= 3, 'the same context read against SHORT yields conflict, not support');
 }
 
+/* =================================================================
+   Fix 2(a) — presentation/semantic correctness of the no-direction
+   confluence state. Marking eight HEALTHY engines as MISSING merely
+   because no direction was proposed misrepresented a valid WAIT as a
+   data failure. They are now NEUTRAL. Scoring is deliberately
+   unchanged: the eight directional readers still do not run, and
+   supporting/conflicting counts are identical.
+   ================================================================= */
+
+section('[35] D — no direction + healthy context: NEUTRAL, not MISSING');
+{
+  const EM = risk().RiskEvidenceModel;
+  const r = EM.evaluate(context('LONG'), { direction: 'NONE', currentPrice: 24000 });
+  assert(r.confluence.length === 8, 'all 8 sources are still reported');
+  assert(r.confluence.every(c => c.stance === 'NEUTRAL'),
+    'every source is NEUTRAL — the engines ran and produced analysis');
+  assert(r.confluence.every(c => c.stance !== 'MISSING'),
+    'no source is MISSING — they are not broken, there is just no direction to score against');
+  assert(r.missingCount === 0, 'missingCount is 0');
+  assert(r.neutralCount === 8, 'neutralCount is 8');
+  assert(r.confluence.every(c => /no trade direction proposed to score against/i.test(c.detail)),
+    'the wording states there is no direction to score against');
+  assert(r.confluence.every(c => !/stance is not applicable/i.test(c.detail)),
+    'the old "stance is not applicable" wording is gone');
+  assert(r.confluence.every(c => !/failed|no data|produced no/i.test(c.detail)),
+    'the wording never implies the analysis engine failed or produced no data');
+}
+
+section('[36] D — supporting/conflicting counts are EXACTLY unchanged');
+{
+  const EM = risk().RiskEvidenceModel;
+  const r = EM.evaluate(context('LONG'), { direction: 'NONE', currentPrice: 24000 });
+  assert(r.supportingCount === 0, 'supportingCount still 0');
+  assert(r.conflictingCount === 0, 'conflictingCount still 0');
+  assert(r.contextAvailable === true, 'contextAvailable still true');
+  assert(r.direction === 'NONE', 'direction still NONE');
+}
+
+section('[37] E — genuine missing context keeps MISSING');
+{
+  const EM = risk().RiskEvidenceModel;
+  const r = EM.evaluate(null, { direction: 'LONG' });
+  assert(r.confluence.every(c => c.stance === 'MISSING'), 'a null context still yields MISSING for every source');
+  assert(r.missingCount === 8 && r.neutralCount === 0, 'tallies reflect genuinely absent analysis');
+  assert(r.confluence.every(c => /No analysis context available/i.test(c.detail)),
+    'the wording still says the context itself was unavailable');
+  assert(r.supportingCount === 0 && r.conflictingCount === 0, 'no support is invented');
+  // Null context AND no direction — still MISSING, context absence wins.
+  const r2 = EM.evaluate(null, { direction: 'NONE' });
+  assert(r2.confluence.every(c => c.stance === 'MISSING'), 'absent context takes precedence over absent direction');
+}
+
+section('[38] F — directional BUY/SELL confluence is completely unchanged');
+{
+  const EM = risk().RiskEvidenceModel;
+  const long = EM.evaluate(context('LONG'), { direction: 'LONG', currentPrice: 24000 });
+  assert(long.supportingCount >= 3, `an aligned LONG still yields real support (${long.supportingCount})`);
+  assert(long.confluence.some(c => c.stance === 'SUPPORTING'), 'SUPPORTING stances still produced');
+  assert(long.confluence.every(c => !/no trade direction proposed/i.test(c.detail)),
+    'the no-direction wording never leaks into a directional evaluation');
+  const short = EM.evaluate(context('LONG'), { direction: 'SHORT', currentPrice: 24000 });
+  assert(short.conflictingCount >= 3, `the same context read against SHORT still conflicts (${short.conflictingCount})`);
+  assert(short.confluence.some(c => c.stance === 'CONFLICTING'), 'CONFLICTING stances still produced');
+}
+
+section('[39] The eight directional readers still do NOT run for WAIT (2b remains out of scope)');
+{
+  const EM = risk().RiskEvidenceModel;
+  const ctx = context('LONG');
+  const r = EM.evaluate(ctx, { direction: 'NONE', currentPrice: 24000 });
+  // Every detail is the single generic no-direction sentence — none of
+  // the per-source readers' own wording (e.g. "Primary trend is
+  // bullish", "unmitigated order blocks") appears.
+  assert(r.confluence.every(c => c.detail === r.confluence[0].detail),
+    'all 8 details are the same generic sentence — no reader produced source-specific text');
+  assert(!r.confluence.some(c => /Primary trend is/.test(c.detail)), 'trendStance did not run');
+  assert(!r.confluence.some(c => /order blocks/.test(c.detail)), 'orderBlockStance did not run');
+  assert(!r.confluence.some(c => /fair value gaps/i.test(c.detail)), 'fvgStance did not run');
+}
+
+section('[40] G — a valid AI WAIT end-to-end keeps tradeability WAIT and a non-null aiProposal');
+{
+  const waitDecision = { finalDecision: 'WAIT', confidence: 0.85, riskReward: 2.5,
+    reasoningSummary: 'Bullish structure but price is overextended.' };
+  const r = evalWith(null, 'LONG', { decision: waitDecision, currentPrice: 24000 });
+  assert(r.tradeability === 'WAIT', 'a valid AI WAIT yields tradeability WAIT, not REJECTED');
+  assert(r.aiProposal !== null && r.aiProposal.finalDecision === 'WAIT', 'aiProposal is non-null and records WAIT');
+  assert(r.vetoes.length === 0, 'no vetoes — nothing was wrong with the analysis');
+  assert(!r.warnings.some(w => w.code === 'NO_PROPOSAL'), 'NO_PROPOSAL is NOT raised — the AI did decide');
+  assert(r.confluence.every(c => c.stance === 'NEUTRAL'), 'confluence is NEUTRAL, not MISSING');
+  const out = risk().RiskDecisionEngine.applyToStructuredAnalysis({ tradeLevels: null, decision: waitDecision }, r);
+  assert(out.decision.finalDecision === 'WAIT', 'finalDecision stays WAIT — never rewritten to NO_TRADE');
+  assert(out.decision.reasoningSummary === waitDecision.reasoningSummary, 'the AI reasoning is preserved');
+}
+
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 if(failed > 0) process.exitCode = 1;
