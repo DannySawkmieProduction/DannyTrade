@@ -54,6 +54,50 @@
     PUT_BIAS:  { label: 'PUT BIAS',  color: '#FF5C6C' },
     NO_TRADE:  { label: 'NO TRADE',  color: '#8D93A6' }
   };
+
+  /* Category-specific presentation for a NO_TRADE.
+
+     All six NO_TRADE paths in preclose-decision-engine.js return the
+     same STATE.NO_TRADE, so every one rendered as an identical grey
+     "NO TRADE" — reading as a verdict on the MARKET when it is usually
+     a verdict on the DATA (market closed, or the feed gone stale).
+     Observed live at 17:04 IST: a fully successful analysis (bearish
+     structure, 4 sweeps, 52 FVGs, 7 order blocks, 10 S/R levels) shown
+     as a bare "NO TRADE" because the session had ended 108 minutes
+     earlier.
+
+     Keyed on decision.noTradeCategory, which the decision engine derives
+     from the blockers it already computed. `state` remains authoritative;
+     this only relabels it, and every evidence/engine-analysis section
+     below is left fully visible and unchanged.
+
+     Amber for MARKET_CLOSED, red for STALE_DATA: a closed market after
+     hours is the normal expected state, not a fault. A lagging feed
+     during an OPEN session genuinely is one. */
+  const CATEGORY_DISPLAY = {
+    MARKET_CLOSED: { label: 'MARKET CLOSED', color: '#D4AF6A',
+      message: 'Historical snapshot — not a live entry signal. The analysis below ran successfully, but the market is closed and the latest candle is historical.' },
+    STALE_DATA:    { label: 'STALE DATA', color: '#FF5C6C',
+      message: 'Market data is too old to safely issue a current entry signal.' },
+    NO_SETUP:      { label: 'NO TRADE', color: '#8D93A6',
+      message: 'Market is open and data is fresh, but no actionable setup is confirmed.' },
+    BLOCKED:       { label: 'NOT EVALUATED', color: '#FF5C6C',
+      message: 'A data or system condition prevented a safe current assessment — see REASONS below.' }
+  };
+
+  /** Resolves the chip label/colour/message. A bias keeps its existing
+   *  state-based treatment; only a NO_TRADE is categorised. Falls back
+   *  to the original behaviour when noTradeCategory is absent, so an
+   *  older decision object still renders exactly as before. */
+  function decisionPresentation(decision){
+    const cat = decision.noTradeCategory;
+    if(cat && cat !== 'ACTIONABLE' && CATEGORY_DISPLAY[cat]){
+      const c = CATEGORY_DISPLAY[cat];
+      return { label: c.label, color: c.color, message: decision.categoryMessage || c.message };
+    }
+    const disp = DECISION_DISPLAY[decision.state] || DECISION_DISPLAY.NO_TRADE;
+    return { label: finalStateLabel(decision), color: disp.color, message: null };
+  }
   // Priority 6/11 — the FINAL STATE line combines state + entryState
   // exactly as specified: "CALL BIAS — WAIT" / "CALL ENTRY CONFIRMED" /
   // "PUT BIAS — WAIT" / "PUT ENTRY CONFIRMED" / "NO TRADE".
@@ -254,14 +298,28 @@
 
     function renderDecision(decision){
       // Always immediately visible — never hidden behind an expandable section.
-      const disp = DECISION_DISPLAY[decision.state] || DECISION_DISPLAY.NO_TRADE;
+      const pres = decisionPresentation(decision);
+      const disp = { color: pres.color };
+      const categoryMessageHtml = pres.message
+        ? `<div style="margin-top:9px;font-size:12px;line-height:1.45;color:${pres.color}">${esc(pres.message)}</div>`
+        : '';
+      /* Confidence is only a measurement when the engine's rule 5 ran.
+         Every hard-blocker path short-circuits with a literal 0, so
+         "Confidence: LOW (0%)" told the user the evidence had been
+         weighed and found worthless — when it was never weighed at all.
+         confidenceEvaluated comes from the decision engine. */
+      const confidenceHtml = decision.confidenceEvaluated === false
+        ? `<div style="margin-top:8px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-faint,#565C70)">Confidence: NOT EVALUATED <span>(a blocker prevented a current assessment — the evidence below was gathered but never scored into a decision)</span></div>`
+        : `<div style="margin-top:8px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-dim,#8D93A6)">Confidence: ${esc(confidenceLabel(decision.confidence))} <span style="color:var(--text-faint,#565C70)">(${(decision.confidence * 100).toFixed(0)}% — deterministic evidence agreement, not AI-estimated)</span></div>`;
+
       return `<div style="margin-top:16px;font-family:var(--font-mono,monospace);font-size:11px;letter-spacing:.05em;color:var(--text-faint,#565C70)">FINAL STATE</div>
       <div style="margin-top:6px;padding:14px;border:1px solid ${disp.color}55;border-radius:12px;background:${disp.color}14">
         <div style="display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:20px;background:${disp.color}22;border:1px solid ${disp.color}55">
           <span style="width:9px;height:9px;border-radius:50%;background:${disp.color};display:inline-block"></span>
-          <span style="font-family:var(--font-mono,monospace);font-weight:700;font-size:14px;letter-spacing:.03em;color:${disp.color}">${esc(finalStateLabel(decision))}</span>
+          <span style="font-family:var(--font-mono,monospace);font-weight:700;font-size:14px;letter-spacing:.03em;color:${disp.color}">${esc(pres.label)}</span>
         </div>
-        <div style="margin-top:8px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-dim,#8D93A6)">Confidence: ${esc(confidenceLabel(decision.confidence))} <span style="color:var(--text-faint,#565C70)">(${(decision.confidence * 100).toFixed(0)}% — deterministic evidence agreement, not AI-estimated)</span></div>
+        ${categoryMessageHtml}
+        ${confidenceHtml}
         <div style="margin-top:8px;font-size:10.5px;color:var(--text-faint,#565C70);letter-spacing:.04em">REASONS</div>
         <div style="margin-top:2px;display:flex;flex-direction:column;gap:2px;font-size:11.5px;color:var(--text-dim,#8D93A6)">${decision.reasons.map(r => `<div>${esc(r)}</div>`).join('')}</div>
       </div>
