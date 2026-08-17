@@ -665,30 +665,31 @@ section('[34] Evidence model never fabricates support');
    supporting/conflicting counts are identical.
    ================================================================= */
 
-section('[35] D — no direction + healthy context: NEUTRAL, not MISSING');
+section('[35] SUPERSEDED BY [39]/[41] — no direction now runs the readers');
 {
+  /* This section previously asserted that a healthy context with no
+     direction produced eight NEUTRAL components. That was Fix 2(a)'s
+     intended behaviour, and it is exactly what caused the reported
+     defect. Superseded deliberately; the surviving assertions are the
+     parts of 2(a) that remain correct. */
   const EM = risk().RiskEvidenceModel;
   const r = EM.evaluate(context('LONG'), { direction: 'NONE', currentPrice: 24000 });
   assert(r.confluence.length === 8, 'all 8 sources are still reported');
-  assert(r.confluence.every(c => c.stance === 'NEUTRAL'),
-    'every source is NEUTRAL — the engines ran and produced analysis');
-  assert(r.confluence.every(c => c.stance !== 'MISSING'),
-    'no source is MISSING — they are not broken, there is just no direction to score against');
-  assert(r.missingCount === 0, 'missingCount is 0');
-  assert(r.neutralCount === 8, 'neutralCount is 8');
-  assert(r.confluence.every(c => /no trade direction proposed to score against/i.test(c.detail)),
-    'the wording states there is no direction to score against');
   assert(r.confluence.every(c => !/stance is not applicable/i.test(c.detail)),
-    'the old "stance is not applicable" wording is gone');
-  assert(r.confluence.every(c => !/failed|no data|produced no/i.test(c.detail)),
-    'the wording never implies the analysis engine failed or produced no data');
+    'the original "stance is not applicable" wording is still gone');
+  assert(r.confluence.every(c => !/no trade direction proposed to score against/i.test(c.detail)),
+    'and the Fix 2(a) placeholder wording is gone too');
+  assert(r.mode === 'BIAS', 'the mode is BIAS');
 }
 
 section('[36] D — supporting/conflicting counts are EXACTLY unchanged');
 {
   const EM = risk().RiskEvidenceModel;
   const r = EM.evaluate(context('LONG'), { direction: 'NONE', currentPrice: 24000 });
-  assert(r.supportingCount === 0, 'supportingCount still 0');
+  // supporting/conflicting belong to DIRECTIONAL mode and stay 0 here —
+  // bias mode reports bullishCount/bearishCount instead, so no veto or
+  // confluence threshold can ever read a bias as trade support.
+  assert(r.supportingCount === 0, 'supportingCount still 0 — bias never feeds a trade gate');
   assert(r.conflictingCount === 0, 'conflictingCount still 0');
   assert(r.contextAvailable === true, 'contextAvailable still true');
   assert(r.direction === 'NONE', 'direction still NONE');
@@ -721,19 +722,34 @@ section('[38] F — directional BUY/SELL confluence is completely unchanged');
   assert(short.confluence.some(c => c.stance === 'CONFLICTING'), 'CONFLICTING stances still produced');
 }
 
-section('[39] The eight directional readers still do NOT run for WAIT (2b remains out of scope)');
+section('[39] The eight readers DO run when no direction is proposed (BIAS mode)');
 {
+  /* DELIBERATELY INVERTED. This section previously asserted the exact
+     opposite — that the readers do NOT run — because Fix 2(b) was
+     explicitly deferred at the time. That deferral is what produced the
+     live defect: a closed-market panel showing eight identical
+     "Analysis available; no trade direction proposed to score against."
+     lines while the engines had found bearish structure, 4 sweeps,
+     52 FVGs, 7 order blocks and 10 S/R levels.
+
+     Inverted on purpose and recorded here rather than quietly deleted,
+     so the reversal is visible in history. */
   const EM = risk().RiskEvidenceModel;
   const ctx = context('LONG');
   const r = EM.evaluate(ctx, { direction: 'NONE', currentPrice: 24000 });
-  // Every detail is the single generic no-direction sentence — none of
-  // the per-source readers' own wording (e.g. "Primary trend is
-  // bullish", "unmitigated order blocks") appears.
-  assert(r.confluence.every(c => c.detail === r.confluence[0].detail),
-    'all 8 details are the same generic sentence — no reader produced source-specific text');
-  assert(!r.confluence.some(c => /Primary trend is/.test(c.detail)), 'trendStance did not run');
-  assert(!r.confluence.some(c => /order blocks/.test(c.detail)), 'orderBlockStance did not run');
-  assert(!r.confluence.some(c => /fair value gaps/i.test(c.detail)), 'fvgStance did not run');
+
+  assert(r.mode === 'BIAS', `mode is BIAS when no direction is proposed (got ${r.mode})`);
+  assert(!r.confluence.every(c => c.detail === r.confluence[0].detail),
+    'the 8 details are NOT one repeated generic sentence — each reader produced its own');
+  assert(!r.confluence.some(c => /no trade direction proposed to score against/i.test(c.detail)),
+    'the generic placeholder text is gone entirely');
+  // NOTE: the base context() fixture deliberately has NO `trend` key,
+  // so trendStance correctly reports its own MISSING wording — that is
+  // the reader running, not failing to run.
+  assert(r.confluence.some(c => /Trend engine produced no result/i.test(c.detail)), 'trendStance DID run');
+  assert(r.confluence.some(c => /order blocks/i.test(c.detail)), 'orderBlockStance DID run');
+  assert(r.confluence.some(c => /fair value gaps/i.test(c.detail)), 'fvgStance DID run');
+  assert(r.confluence.length === 8, 'all 8 sources are still reported');
 }
 
 section('[40] G — a valid AI WAIT end-to-end keeps tradeability WAIT and a non-null aiProposal');
@@ -745,10 +761,229 @@ section('[40] G — a valid AI WAIT end-to-end keeps tradeability WAIT and a non
   assert(r.aiProposal !== null && r.aiProposal.finalDecision === 'WAIT', 'aiProposal is non-null and records WAIT');
   assert(r.vetoes.length === 0, 'no vetoes — nothing was wrong with the analysis');
   assert(!r.warnings.some(w => w.code === 'NO_PROPOSAL'), 'NO_PROPOSAL is NOT raised — the AI did decide');
-  assert(r.confluence.every(c => c.stance === 'NEUTRAL'), 'confluence is NEUTRAL, not MISSING');
+  // The base fixture deliberately omits `trend`, so that ONE source is
+  // legitimately MISSING. The point is that the readers ran at all and
+  // produced real per-source leans, not the eight identical NEUTRAL
+  // placeholders the defect produced.
+  assert(!r.confluence.every(c => c.stance === 'MISSING'), 'the readers ran — not everything is MISSING');
+  assert(r.confluence.some(c => c.stance === 'BULLISH' || c.stance === 'BEARISH'),
+    'a WAIT still yields real directional component evidence');
+  assert(r.underlyingBias !== null, `a WAIT still carries an underlying bias (${r.underlyingBias})`);
   const out = risk().RiskDecisionEngine.applyToStructuredAnalysis({ tradeLevels: null, decision: waitDecision }, r);
   assert(out.decision.finalDecision === 'WAIT', 'finalDecision stays WAIT — never rewritten to NO_TRADE');
   assert(out.decision.reasoningSummary === waitDecision.reasoningSummary, 'the AI reasoning is preserved');
+}
+
+
+/* =================================================================
+   BIAS MODE (Fix 2b) — underlying market bias when no trade direction
+   is proposed.
+
+   THE LIVE DEFECT: risk-evidence-model.js returned early on
+   direction === NONE, so a NO_TRADE (market closed, stale data, or no
+   setup) collapsed eight healthy engines into eight identical NEUTRAL
+   lines and "0 supporting, 0 conflicting, 0 missing" — while the
+   deterministic engines had real bearish evidence.
+
+   The readers are REUSED, not duplicated: each is run once against
+   LONG and once against SHORT, and a component is only called
+   directional when the two passes genuinely disagree (SUPPORTING one
+   way, CONFLICTING the other). Ambiguity stays NEUTRAL.
+   ================================================================= */
+
+/** Builds a context with per-engine direction control, so a mixed
+ *  pattern (mostly bearish, one bullish FVG) can be asserted exactly. */
+function biasContext(o){
+  const c = context(o.base || 'SHORT');
+  if(o.trend) c.trend = { meta: { primaryTrend: o.trend } };
+  if(o.structure) c.marketStructure = { external: { structureEvents: [
+    { type: 'BOS', direction: o.structure, index: 170, level: 24150 } ] } };
+  if(o.orderBlocks) c.orderBlocks = { orderBlocks: [
+    { direction: o.orderBlocks, top: 24120, bottom: 24100, mitigationState: 'unmitigated' } ] };
+  if(o.fvg) c.fairValueGaps = { fvgs: [
+    { direction: o.fvg, top: 24140, bottom: 24120, startIndex: 167, state: 'unfilled' } ] };
+  if(o.location) c.premiumDiscount = { currentLocation: o.location, meta: {} };
+  if(o.sweep) c.liquidity = { sweeps: [{ direction: o.sweep, level: 24010, sweepIndex: 168 }],
+    buySideLiquidity: [], sellSideLiquidity: [] };
+  return c;
+}
+
+section('[41] TEST 1 — real bearish analysis with direction NONE is NOT all NEUTRAL');
+{
+  const EM = risk().RiskEvidenceModel;
+  const ctx = biasContext({ base: 'SHORT', trend: 'bearish', structure: 'bearish',
+    orderBlocks: 'bearish', fvg: 'bearish', location: 'premium', sweep: 'buySide' });
+  const r = EM.evaluate(ctx, { direction: 'NONE', currentPrice: 24000 });
+  const nonNeutral = r.confluence.filter(c => c.stance !== 'NEUTRAL' && c.stance !== 'MISSING');
+  assert(nonNeutral.length > 0, `${nonNeutral.length} components carry a real directional lean (was 0)`);
+  assert(r.confluence.some(c => c.stance === 'BEARISH'), 'at least one component reads BEARISH');
+  assert(r.bearishCount > 0, `bearishCount is ${r.bearishCount}, not 0`);
+}
+
+section('[42] TEST 2 — bearish trend + structure + order block -> underlyingBias BEARISH');
+{
+  const EM = risk().RiskEvidenceModel;
+  const r = EM.evaluate(biasContext({ base: 'SHORT', trend: 'bearish', structure: 'bearish',
+    orderBlocks: 'bearish', fvg: 'bearish', location: 'premium', sweep: 'buySide' }),
+    { direction: 'NONE', currentPrice: 24000 });
+  assert(r.underlyingBias === 'BEARISH', `underlyingBias BEARISH (got ${r.underlyingBias})`);
+  assert(r.bearishCount > r.bullishCount, 'bearish components outnumber bullish');
+}
+
+section('[43] TEST 3 — bullish analysis -> underlyingBias BULLISH');
+{
+  const EM = risk().RiskEvidenceModel;
+  const r = EM.evaluate(biasContext({ base: 'LONG', trend: 'bullish', structure: 'bullish',
+    orderBlocks: 'bullish', fvg: 'bullish', location: 'discount', sweep: 'sellSide' }),
+    { direction: 'NONE', currentPrice: 24000 });
+  assert(r.underlyingBias === 'BULLISH', `underlyingBias BULLISH (got ${r.underlyingBias})`);
+  assert(r.bullishCount > r.bearishCount, 'bullish components outnumber bearish');
+}
+
+section('[44] TEST 4 — balanced evidence -> underlyingBias CONFLICTED');
+{
+  const EM = risk().RiskEvidenceModel;
+  // Two clearly bullish, two clearly bearish; the rest neutral/missing.
+  const ctx = biasContext({ base: 'LONG', trend: 'bullish', structure: 'bullish',
+    orderBlocks: 'bearish', fvg: 'bearish' });
+  ctx.premiumDiscount = { currentLocation: 'equilibrium', meta: {} };
+  ctx.liquidity = { sweeps: [], buySideLiquidity: [], sellSideLiquidity: [] };
+  ctx.supportResistance = { levels: [] };
+  const r = EM.evaluate(ctx, { direction: 'NONE', currentPrice: 24000 });
+  assert(r.bullishCount === r.bearishCount && r.bullishCount > 0,
+    `counts are tied at ${r.bullishCount} (bull) vs ${r.bearishCount} (bear)`);
+  assert(r.underlyingBias === 'CONFLICTED', `underlyingBias CONFLICTED (got ${r.underlyingBias})`);
+}
+
+section('[45] TEST 5 — no usable context -> MISSING, never NEUTRAL');
+{
+  const EM = risk().RiskEvidenceModel;
+  const r = EM.evaluate(null, { direction: 'NONE' });
+  assert(r.confluence.every(c => c.stance === 'MISSING'), 'every source is MISSING');
+  assert(r.missingCount === 8 && r.neutralCount === 0, 'tallies reflect genuinely absent analysis');
+  assert(r.underlyingBias === 'NEUTRAL' || r.underlyingBias === null,
+    'no bias is invented from an absent context');
+  assert(r.confluence.every(c => /No analysis context available/i.test(c.detail)),
+    'the wording states the context itself was unavailable');
+}
+
+section('[46] PART 14 — each component keeps its OWN stance; a conflicting one stays visible');
+{
+  const EM = risk().RiskEvidenceModel;
+  // Mostly bearish, but the latest FVG is bullish — the exact pattern
+  // from the reported screenshot.
+  const r = EM.evaluate(biasContext({ base: 'SHORT', trend: 'bearish', structure: 'bearish',
+    orderBlocks: 'bearish', fvg: 'bullish', location: 'premium', sweep: 'buySide' }),
+    { direction: 'NONE', currentPrice: 24000 });
+  const by = {}; r.confluence.forEach(c => { by[c.source] = c.stance; });
+  assert(by.trend === 'BEARISH', 'trend stays BEARISH');
+  assert(by.marketStructure === 'BEARISH', 'marketStructure stays BEARISH');
+  assert(by.orderBlocks === 'BEARISH', 'orderBlocks stays BEARISH');
+  assert(by.fairValueGaps === 'BULLISH', 'the conflicting bullish FVG is PRESERVED, not flattened');
+  assert(r.underlyingBias === 'BEARISH', 'aggregate bias is still BEARISH despite the dissenter');
+  assert(r.confluence.find(c => c.source === 'fairValueGaps').detail.indexOf('bullish') !== -1,
+    'and its own reader wording survives');
+}
+
+section('[47] TEST 6/7 — NO_TRADE and a real underlying bias coexist');
+{
+  const R = risk().RiskDecisionEngine;
+  const bearCtx = biasContext({ base: 'SHORT', trend: 'bearish', structure: 'bearish',
+    orderBlocks: 'bearish', fvg: 'bearish', location: 'premium', sweep: 'buySide' });
+  const r = R.evaluate({
+    candles: candles(180), timeframe: '15', symbol: 'NIFTY', analysisContext: bearCtx,
+    tradeLevels: null, decision: { finalDecision: 'NO_TRADE', reasoningSummary: 'x' }, currentPrice: 24000
+  }, { now: 5000 });
+  assert(r.tradeability === 'REJECTED', 'trade decision is still REJECTED — no live trade manufactured');
+  assert(r.direction === 'NONE', 'no directional trade is exposed');
+  assert(r.underlyingBias === 'BEARISH', `underlying bias is BEARISH alongside it (got ${r.underlyingBias})`);
+  assert(r.confluence.some(c => c.stance === 'BEARISH'), 'component evidence is present on the risk object');
+
+  const bullCtx = biasContext({ base: 'LONG', trend: 'bullish', structure: 'bullish',
+    orderBlocks: 'bullish', fvg: 'bullish', location: 'discount', sweep: 'sellSide' });
+  const r2 = R.evaluate({
+    candles: candles(180), timeframe: '15', symbol: 'NIFTY', analysisContext: bullCtx,
+    tradeLevels: null, decision: { finalDecision: 'NO_TRADE' }, currentPrice: 24000
+  }, { now: 5000 });
+  assert(r2.tradeability === 'REJECTED' && r2.underlyingBias === 'BULLISH',
+    'NO_TRADE + BULLISH bias also coexist');
+  assert(r2.direction === 'NONE', 'still no live direction');
+}
+
+section('[48] Directional mode is completely unchanged (MODE A)');
+{
+  const EM = risk().RiskEvidenceModel;
+  const long = EM.evaluate(context('LONG'), { direction: 'LONG', currentPrice: 24000 });
+  assert(long.mode === 'DIRECTIONAL', 'a proposed direction gives DIRECTIONAL mode');
+  assert(long.supportingCount >= 3, `SUPPORTING stances still produced (${long.supportingCount})`);
+  assert(long.confluence.some(c => c.stance === 'SUPPORTING'), 'SUPPORTING vocabulary retained');
+  assert(long.underlyingBias === null, 'no bias is computed in directional mode');
+  const short = EM.evaluate(context('LONG'), { direction: 'SHORT', currentPrice: 24000 });
+  assert(short.conflictingCount >= 3, 'CONFLICTING still produced against the opposite direction');
+  assert(!short.confluence.some(c => c.stance === 'BULLISH' || c.stance === 'BEARISH'),
+    'bias vocabulary never leaks into directional mode');
+}
+
+section('[49] REAL PIPELINE — actual AnalysisEngine output must not collapse to 8 x NEUTRAL');
+{
+  /* PART 12. Everything above uses hand-built contexts; this runs the
+     real ten engines and feeds their genuine Analysis Context into the
+     risk evidence pipeline with direction NONE — the exact production
+     path that produced the reported screenshot. */
+  const sbE2E = { window: {}, console: { log(){}, warn(){}, error(){}, info(){} },
+    Intl, Date, Math, JSON, Number, Array, Object, String, isNaN, parseInt, parseFloat };
+  sbE2E.global = sbE2E;
+  const ctxE2E = vm.createContext(sbE2E);
+  ['analysis/candle-utils.js', 'analysis/market-structure-engine.js', 'analysis/liquidity-engine.js',
+   'analysis/order-block-engine.js', 'analysis/fvg-engine.js', 'analysis/premium-discount-engine.js',
+   'analysis/volume-engine.js', 'analysis/trend-engine.js', 'analysis/support-resistance-engine.js',
+   'analysis/analysis-engine.js'].forEach(f => {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'assets', 'js', f), 'utf8'), ctxE2E, { filename: f });
+  });
+  const AnalysisEngine = sbE2E.window.DannyChart.Analysis.AnalysisEngine;
+
+  /* A genuine DOWNTREND: nine impulsive legs down, each followed by a
+     shallow retracement. This produces real lower highs / lower lows,
+     displacement gaps and structure events — a smooth sine drift does
+     NOT, and the engines correctly find nothing in one, which would
+     make this test pass for the wrong reason. */
+  const real = [];
+  let t = 1755300000, px = 25000;
+  for(let leg = 0; leg < 9; leg++){
+    for(let i = 0; i < 12; i++){                    // impulsive drop
+      const o = px, c = +(px - 38 - (i % 3) * 9).toFixed(2);
+      real.push({ time: t, open: o, high: +(o + 4).toFixed(2), low: +(c - 4).toFixed(2), close: c, volume: 220000 + i * 4000 });
+      px = c; t += 900;
+    }
+    for(let i = 0; i < 8; i++){                     // shallow retracement
+      const o = px, c = +(px + 16).toFixed(2);
+      real.push({ time: t, open: o, high: +(c + 5).toFixed(2), low: +(o - 5).toFixed(2), close: c, volume: 90000 + i * 2000 });
+      px = c; t += 900;
+    }
+  }
+  const realCtx = AnalysisEngine.analyze(real, { symbol: 'NIFTY', timeframe: '15' });
+  assert(realCtx.diagnostics.valid === true && realCtx.diagnostics.errors.length === 0,
+    'the real AnalysisEngine ran cleanly');
+
+  const EM = risk().RiskEvidenceModel;
+  const r = EM.evaluate(realCtx, { direction: 'NONE', currentPrice: real[179].close });
+
+  assert(r.mode === 'BIAS', 'real context + no direction -> BIAS mode');
+  const allNeutral = r.confluence.every(c => c.stance === 'NEUTRAL');
+  assert(!allNeutral, 'real engine output does NOT collapse to 8 x NEUTRAL — the reported defect');
+  assert(r.bullishCount + r.bearishCount + r.neutralCount + r.missingCount === 8,
+    'every component is accounted for under the bias vocabulary');
+  assert(r.underlyingBias === 'BEARISH',
+    `a genuine downtrend reads BEARISH end-to-end (got ${r.underlyingBias})`);
+  // PART 14 on real data: a dissenting component must survive the tally.
+  const leans = {}; r.confluence.forEach(c => { leans[c.source] = c.stance; });
+  assert(leans.trend === 'BEARISH' && leans.marketStructure === 'BEARISH',
+    'trend and market structure both read BEARISH from the real engines');
+  assert(r.bullishCount + r.bearishCount > 0,
+    `real engines produced ${r.bullishCount} bullish / ${r.bearishCount} bearish components`);
+  assert(r.underlyingBias !== null, `a real underlying bias was derived (${r.underlyingBias})`);
+  assert(!r.confluence.some(c => /no trade direction proposed to score against/i.test(c.detail)),
+    'no generic placeholder text survives anywhere');
 }
 
 

@@ -271,9 +271,19 @@ section('[B] AI proposed BUY, Risk Engine rejected — displays the Risk Engine\
   assert(!fd.classList.contains('ai-unavailable'), 'badge does NOT carry ai-unavailable — the AI DID propose something');
   const vetoes = field(container, 'riskVetoes');
   assert(vetoes.textContent.indexOf('STOP_ON_WRONG_SIDE') !== -1, 'Risk Vetoes still shows the real veto that caused the rejection');
+  /* PART 6/8 — this assertion previously locked in the pre-existing
+     mismatch: the AI's bullish prose displayed verbatim beneath a
+     NO_TRADE badge, readable as the final market conclusion. Now the
+     prose is marked superseded and visibly demoted, but NOT deleted —
+     it remains the audit trail of what the model actually said. */
   const rs = field(container, 'reasoningSummary');
-  assert(rs.textContent === ANALYSIS_AI_REJECTED.decision.reasoningSummary,
-    'reasoningSummary still shows the AI\'s original (bullish) text — this fix does not touch that pre-existing mismatch');
+  assert(/Superseded by deterministic risk controls/i.test(rs.textContent),
+    'the AI prose is marked superseded');
+  assert(/the AI proposed BUY/i.test(rs.textContent), 'and names what the AI had proposed');
+  assert(rs.textContent.indexOf(ANALYSIS_AI_REJECTED.decision.reasoningSummary) !== -1,
+    'the original AI text is still present for reference, not deleted');
+  assert(/not source-grounded/i.test(rs.textContent),
+    'and is flagged as possibly containing figures the engines never produced');
 }
 
 section('[C] AI rate-limited — displays AI UNAVAILABLE');
@@ -466,6 +476,138 @@ section('[K-H] WAIT -> REJECTED also updates (the reverse transition)');
   const rv = field(container, 'riskVetoes').textContent;
   assert(rv.indexOf(NO_USABLE) !== -1, 'switches to the REJECTED wording');
   assert(rv.indexOf('valid but not yet actionable') === -1, 'the WAIT wording is gone');
+}
+
+
+/* =================================================================
+   BIAS-MODE CONFLUENCE RENDERING (Fix 2b)
+
+   The reported defect: a NO_TRADE produced "0 supporting, 0
+   conflicting, 0 missing" plus seven identical
+   "Analysis available; no trade direction proposed to score against."
+   lines, while the deterministic engines had real bearish evidence.
+   ================================================================= */
+
+/** The exact reported screenshot pattern: bearish bias, one dissenting
+ *  bullish component, decision NO_TRADE from a closed market. */
+const ANALYSIS_BIAS_BEARISH = {
+  decision: {
+    finalDecision: 'NO_TRADE',
+    risk: {
+      tradeability: 'REJECTED', direction: 'NONE', proposedDirection: 'NONE',
+      vetoes: [], warnings: [],
+      // The AI DID answer and also declined — so the badge reads
+      // NO_TRADE (not AI UNAVAILABLE) and nothing is superseded. This
+      // isolates what L4 is actually testing: bias and trade decision
+      // coexisting, independent of AI availability.
+      aiProposal: { finalDecision: 'NO_TRADE', direction: null, confidence: 0.3, riskReward: null },
+      calculatedRiskReward: null, aiStatedRiskReward: null,
+      confluenceMode: 'BIAS', underlyingBias: 'BEARISH',
+      confluence: [
+        { source: 'trend', stance: 'BEARISH', detail: 'Primary trend is bearish.' },
+        { source: 'marketStructure', stance: 'BEARISH', detail: 'Most recent structure event is a bearish BOS at 24150.' },
+        { source: 'liquidity', stance: 'NEUTRAL', detail: '17 liquidity pool(s) resting, none swept yet.' },
+        { source: 'orderBlocks', stance: 'BEARISH', detail: '2 bullish and 7 bearish unmitigated order blocks.' },
+        { source: 'fairValueGaps', stance: 'BULLISH', detail: '54 bullish and 31 bearish unfilled fair value gaps.' },
+        { source: 'premiumDiscount', stance: 'BULLISH', detail: 'Price is in the discount half of the dealing range.' },
+        { source: 'supportResistance', stance: 'NEUTRAL', detail: 'Nearest level ahead is support at 24050.' },
+        { source: 'volume', stance: 'NEUTRAL', detail: 'Volume data available; not treated as directional evidence.' }
+      ]
+    }
+  }
+};
+
+section('[L1] Bias mode — no repeated placeholder, each component explains itself');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_BIAS_BEARISH);
+  const conf = field(container, 'confluence').textContent;
+  assert(conf.indexOf('no trade direction proposed to score against') === -1,
+    'the repeated placeholder sentence is GONE');
+  assert(conf.indexOf('Primary trend is bearish.') !== -1, 'trend shows its own reader wording');
+  assert(conf.indexOf('bearish BOS at 24150') !== -1, 'market structure shows its own wording');
+  assert(conf.indexOf('unmitigated order blocks') !== -1, 'order blocks show their own wording');
+  assert(conf.indexOf('discount half of the dealing range') !== -1, 'premium/discount shows its own wording');
+  // No sentence may appear eight times.
+  const counts = {};
+  conf.split(/(?<=\.)\s+/).forEach(x => { const k = x.trim(); if(k) counts[k] = (counts[k] || 0) + 1; });
+  assert(Object.keys(counts).every(k => counts[k] < 8), 'no single sentence is repeated for every component');
+}
+
+section('[L2] Bias mode — Underlying Bias is shown and the summary uses bias vocabulary');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_BIAS_BEARISH);
+  assert(field(container, 'underlyingBias').textContent === 'BEARISH',
+    `Underlying Bias reads BEARISH (got ${field(container, 'underlyingBias').textContent})`);
+  const summary = field(container, 'confluenceSummary').textContent;
+  assert(summary === '3 bullish, 0 bearish, 0 neutral, 0 missing' || /bullish/.test(summary),
+    `summary uses the bias vocabulary (got "${summary}")`);
+  assert(summary.indexOf('0 supporting, 0 conflicting, 0 missing') === -1,
+    'the misleading "0 supporting, 0 conflicting, 0 missing" is gone');
+  assert(/3 bearish/.test(summary), 'the 3 bearish components are counted');
+  assert(/2 bullish/.test(summary), 'the 2 bullish components are counted');
+}
+
+section('[L3] PART 14 — a dissenting component stays visible and is NOT flattened');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_BIAS_BEARISH);
+  const conf = field(container, 'confluence').textContent;
+  assert(/fairValueGaps — BULLISH/.test(conf), 'the bullish FVG dissenter is rendered as BULLISH');
+  assert(/premiumDiscount — BULLISH/.test(conf), 'the bullish premium/discount dissenter is preserved');
+  assert(/trend — BEARISH/.test(conf), 'while trend stays BEARISH');
+  assert(field(container, 'underlyingBias').textContent === 'BEARISH',
+    'the aggregate is BEARISH despite the two dissenters — they are not erased');
+}
+
+section('[L4] PART 5 — underlying bias and trade decision coexist without collapsing');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_BIAS_BEARISH);
+  assert(field(container, 'finalDecision').textContent === 'NO_TRADE',
+    'the trade decision is still NO_TRADE — no live trade manufactured');
+  assert(field(container, 'tradeability').textContent === 'REJECTED', 'tradeability is REJECTED');
+  assert(field(container, 'underlyingBias').textContent === 'BEARISH',
+    'and the underlying bias is BEARISH at the same time');
+}
+
+section('[L5] Directional mode rendering is unchanged (MODE A)');
+{
+  const directional = {
+    decision: { finalDecision: 'BUY', reasoningSummary: 'Swept lows then BOS.', confidence: 0.8, riskReward: 2,
+      risk: { tradeability: 'ACTIONABLE', direction: 'LONG', proposedDirection: 'LONG',
+        vetoes: [], warnings: [],
+        aiProposal: { finalDecision: 'BUY', direction: 'bullish', confidence: 0.8, riskReward: 2 },
+        calculatedRiskReward: 2, aiStatedRiskReward: 2,
+        confluenceMode: 'DIRECTIONAL', underlyingBias: null,
+        confluence: [
+          { source: 'trend', stance: 'SUPPORTING', detail: 'Primary trend is bullish.' },
+          { source: 'premiumDiscount', stance: 'CONFLICTING', detail: 'Price is in the premium half.' },
+          { source: 'volume', stance: 'NEUTRAL', detail: 'Volume data available.' }
+        ] } }
+  };
+  const { panel, container } = mountPanel();
+  panel.update(directional);
+  const summary = field(container, 'confluenceSummary').textContent;
+  assert(/supporting/.test(summary) && /conflicting/.test(summary),
+    `directional summary keeps the supporting/conflicting vocabulary (got "${summary}")`);
+  assert(!/bullish|bearish/.test(summary), 'bias vocabulary does not leak into directional mode');
+  assert(field(container, 'underlyingBias').textContent === 'Not available',
+    'no underlying bias is claimed for a directional decision');
+  assert(field(container, 'finalDecision').textContent === 'BUY', 'BUY still renders normally');
+  assert(field(container, 'reasoningSummary').textContent === 'Swept lows then BOS.',
+    'an ACTIONABLE decision keeps its AI reasoning verbatim — not superseded');
+}
+
+section('[L6] TEST 12/13 — a genuine AI NO_TRADE agrees and is NOT marked superseded');
+{
+  const { panel, container } = mountPanel();
+  panel.update(ANALYSIS_AI_NO_TRADE);
+  const rs = field(container, 'reasoningSummary').textContent;
+  assert(!/Superseded/i.test(rs),
+    'the AI itself said NO_TRADE — it agrees with the engine, so nothing is superseded');
+  assert(rs === ANALYSIS_AI_NO_TRADE.decision.reasoningSummary, 'its real reasoning shows verbatim');
 }
 
 
