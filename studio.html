@@ -282,10 +282,6 @@
 <script defer src="assets/js/chart/replay-engine.js"></script>
 <script defer src="assets/js/chart/timeframe-manager.js"></script>
 <script defer src="assets/js/chart/decision-panel.js"></script>
-<!-- Phase 3: chart-level Trend state badge (not a canvas annotation —
-     see trend-badge.js). Loaded before studio-bootstrap.js, which
-     mounts and updates it. -->
-<script defer src="assets/js/chart/trend-badge.js"></script>
 <script defer src="assets/js/chart/cas-model.js"></script>
 <script defer src="assets/js/chart/cas-panel.js"></script>
 <!-- Pre-Close Options Intelligence — the existing, unmodified deterministic
@@ -307,6 +303,18 @@
      "Structured Analysis". MUST load after analysis-engine.js and
      before studio-bootstrap.js, which calls it. -->
 <script defer src="assets/js/chart/analysis-context-adapter.js"></script>
+
+<!-- Phase 6 — deterministic Risk & Trade Decision Engine. Loads after
+     analysis-engine.js (it reads the Analysis Context) and before
+     studio-bootstrap.js (which calls it). Order within the group
+     matters: risk-decision-engine.js looks up TradeLevelValidator and
+     RiskEvidenceModel on window.DannyChart.Risk at call time, but
+     loading them first keeps the dependency direction obvious.
+     If these fail to load, studio-bootstrap.js logs an error and the
+     AI's trade levels are NOT validated — see applyRiskValidation(). -->
+<script defer src="assets/js/risk/trade-level-validator.js"></script>
+<script defer src="assets/js/risk/risk-evidence-model.js"></script>
+<script defer src="assets/js/risk/risk-decision-engine.js"></script>
 <script defer src="assets/js/preclose/option-chain-provider.js"></script>
 <script defer src="assets/js/preclose/preclose-evidence-model.js"></script>
 <script defer src="assets/js/preclose/preclose-decision-engine.js"></script>
