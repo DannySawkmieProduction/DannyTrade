@@ -354,7 +354,7 @@ function buildPrompt(type, payload) {
         `Respond with ONLY a single valid JSON object (no markdown fences, no prose outside the JSON) with ` +
         `exactly these top-level keys: version (string), timeframe (string), swings (array), ` +
         `structureEvents (array), orderBlocks (array), fvgs (array), liquidity (array), premiumDiscount ` +
-        `(object or null), tradeLevels (object or null), decision (object or null). ` +
+        `(object or null), tradeLevels (object or null), decision (object — MANDATORY, never null). ` +
         `HONESTY RULES (strict): every "index" you output must be a real position in the candle array you ` +
         `were given (0 to ${Math.max(candles.length - 1, 0)}), and every price must genuinely appear (as ` +
         `open/high/low/close) at that index — never interpolated, rounded, or invented. If a category has ` +
@@ -362,7 +362,12 @@ function buildPrompt(type, payload) {
         `is weak, mixed, or absent, return null for tradeLevels and set decision.finalDecision to "WAIT" or ` +
         `"NO_TRADE" — never force a trade. strength and confidence fields are 0-1 floats reflecting your own ` +
         `self-assessed certainty.\n\n` +
-        `If "decision" is non-null it MUST include ALL of these exact keys, with NO other spelling or synonym ` +
+        `"decision" IS MANDATORY AND MUST NEVER BE null. Every response must carry a fully populated decision ` +
+        `object. There is ALWAYS a decision to state: if the evidence does not support a trade, that IS the ` +
+        `decision — "NO_TRADE" with an honest reasoningSummary explaining why. If the setup may still develop ` +
+        `but is not yet actionable, that is "WAIT". Returning null, omitting the key, or returning an empty ` +
+        `object for "decision" is a failed response and will be rejected.\n\n` +
+        `"decision" MUST include ALL of these exact keys, with NO other spelling or synonym ` +
         `accepted: finalDecision (EXACTLY one of the four literal strings "BUY", "SELL", "WAIT", "NO_TRADE" — ` +
         `NEVER "LONG", "SHORT", "HOLD", or any other word), tradeGrade (exactly one of "A+","A","B","C","D"), ` +
         `marketPhase (string), trapRisk (exactly one of "Very High","High","Moderate","Low" — never a ` +
@@ -370,8 +375,11 @@ function buildPrompt(type, payload) {
         `(2-4 sentences), riskReward (float), trend (exactly one of "Bullish","Bearish","Sideways"), ` +
         `structureSummary (string), lastStructureEvent (string), invalidationLevel (string), educationalNotes ` +
         `(array of 2-4 short strings). A response missing any of these keys, or using a value outside the ` +
-        `exact allowed set for finalDecision/tradeGrade/trapRisk/trend, will be rejected — if you cannot ` +
-        `populate every field honestly, set "decision" to null instead of submitting a partial object.\n\n` +
+        `exact allowed set for finalDecision/tradeGrade/trapRisk/trend, will be rejected. Every field has an ` +
+        `honest value available even in the worst case — use these rather than omitting a field or nulling ` +
+        `the whole object: tradeGrade "D", trapRisk "Low", confidence 0.1, riskReward 0, tradeQuality ` +
+        `"No valid setup", liquidityTarget "None identified", lastStructureEvent "None observed", ` +
+        `invalidationLevel "Not applicable", marketPhase "Undetermined".\n\n` +
         `If "tradeLevels" is non-null it MUST include ALL of: direction ("bullish" or "bearish"), confidence ` +
         `(0-1 float), riskReward (float), entry ({index, price}), stopLoss ({price}), target1 ({price}), and ` +
         `observation/evidence/reasoning/tradingImplication (each a short string). target2, target3, and ` +
@@ -465,11 +473,56 @@ function coerceChartStructure(parsed) {
   }
   out.tradeLevels = tradeLevels;
 
+  /* PHASE 6 STABILIZATION — `decision` is now MANDATORY for
+     chartStructure.
+
+     It was previously optional here: `validateDecision(null)` returns
+     true (it still does — that function is shared and unchanged), so a
+     model that omitted `decision` entirely produced
+     `{ ok:true, chartStructureValid:true, errorCategory:'none' }` with
+     no decision in it. The browser had no way to tell that apart from a
+     healthy answer, and the AI Decision Panel rendered every field as
+     "Not available" with no explanation anywhere in the chain.
+
+     "No trade" is a legitimate outcome and always was — but it must be
+     STATED, as a complete decision object with finalDecision
+     "NO_TRADE" and an honest reasoningSummary. Silence is not a
+     decision. The prompt now says so explicitly; this is the matching
+     enforcement, and it is a STRENGTHENING of validation, never a
+     relaxation: everything that was rejected before is still rejected.
+
+     Deliberately NOT solved by substituting a synthetic NO_TRADE here.
+     A fabricated decision would be indistinguishable downstream from
+     one the model actually reasoned to, which is precisely the
+     confusion this whole investigation existed to remove. A response
+     with no decision is a FAILED response; the deterministic Risk
+     Engine then produces its own honest NO_TRADE, clearly attributed
+     to RiskDecisionEngine rather than to the AI. */
   const decision = (parsed.decision === undefined) ? null : parsed.decision;
+  if (decision === null) {
+    throw new Error('"decision" was missing or null. It is mandatory: when no trade is warranted the model must still return a complete decision object with finalDecision "NO_TRADE" and an honest reasoningSummary, not omit the field.');
+  }
   if (!validateDecision(decision)) {
     throw new Error('"decision" was present but did not match the required DannyTrade schema — either a required field (finalDecision, tradeGrade, marketPhase, trapRisk, liquidityTarget, tradeQuality, confidence, reasoningSummary, riskReward, trend, structureSummary, lastStructureEvent, invalidationLevel, educationalNotes) was missing, or finalDecision/tradeGrade/trapRisk/trend used a value outside the allowed set (e.g. "LONG" instead of "BUY"/"SELL"/"WAIT"/"NO_TRADE").');
   }
   out.decision = decision;
+
+  /* Second half of the same gap. Even with a decision present, a
+     response whose every structural array is empty AND which carries
+     no premiumDiscount and no tradeLevels contained nothing the model
+     actually produced. Coercion turns each absent array into [], so
+     `{}` used to emerge from this function looking like a
+     well-formed analysis. Report it as its own condition instead of
+     letting it pass as valid — the caller tags it
+     errorCategory:'empty_analysis' so it is never again
+     indistinguishable from real work. */
+  const structuralTotal = CHART_STRUCTURE_ARRAY_KEYS
+    .reduce((n, k) => n + out[k].length, 0);
+  if (structuralTotal === 0 && out.premiumDiscount === null && out.tradeLevels === null) {
+    const err = new Error('response contained no structural analysis at all — every array was empty and premiumDiscount/tradeLevels were absent. The model returned a syntactically valid but empty object.');
+    err.emptyAnalysis = true;
+    throw err;
+  }
 
   return out;
 }
@@ -529,8 +582,47 @@ function buildDiagnostics(partial) {
     jsonParsed: partial.jsonParsed != null ? partial.jsonParsed : null,
     chartStructureValid: partial.chartStructureValid != null ? partial.chartStructureValid : null,
     counts: partial.counts || null, // { structureEvents, orderBlocks, fvgs, liquidity, tradeLevels } — tradeLevels is 0 or 1 (single object or null), not an array
+    // PHASE 6 — the model's actual output SHAPE (key names, finish
+    // reason, token counts). Names and integers only: never the model's
+    // content, never the prompt, never a header or env value. This is
+    // what was missing when an empty response looked healthy — with it,
+    // "the model returned {}" and "the model returned other key names"
+    // are distinguishable without another round trip.
+    responseShape: partial.responseShape || null,
     errorCategory: partial.errorCategory || 'none'
   };
+}
+
+/** Top-level key names + finish reason + token usage. No content. */
+function describeResponseShape(parsed, openRouterJson) {
+  const shape = { topLevelKeys: null, finishReason: null, usage: null };
+  try {
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      shape.topLevelKeys = Object.keys(parsed).slice(0, 40);
+    } else if (parsed !== null && parsed !== undefined) {
+      shape.topLevelKeys = [`(not an object: ${Array.isArray(parsed) ? 'array' : typeof parsed})`];
+    }
+    const choice = openRouterJson && Array.isArray(openRouterJson.choices) ? openRouterJson.choices[0] : null;
+    if (choice) {
+      shape.finishReason = choice.finish_reason || choice.native_finish_reason || null;
+      // A reasoning model can burn its whole budget before the answer;
+      // reasoning_tokens is how that becomes visible rather than
+      // inferred. Counts only.
+      const msg = choice.message || {};
+      shape.hasReasoningField = typeof msg.reasoning === 'string' && msg.reasoning.length > 0;
+      shape.contentLength = typeof msg.content === 'string' ? msg.content.length : null;
+    }
+    const u = openRouterJson && openRouterJson.usage;
+    if (u) {
+      shape.usage = {
+        promptTokens: u.prompt_tokens != null ? u.prompt_tokens : null,
+        completionTokens: u.completion_tokens != null ? u.completion_tokens : null,
+        reasoningTokens: (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens != null)
+          ? u.completion_tokens_details.reasoning_tokens : null
+      };
+    }
+  } catch { /* diagnostics must never break the request */ }
+  return shape;
 }
 
 function logDiagnostics(diagnostics) {
@@ -613,6 +705,21 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
     prompt = Object.assign({}, prompt, { user: `${prompt.user}\n\n${sessionNote}` });
   }
 
+  /* max_tokens was previously UNSET, which left the completion budget
+     entirely to OpenRouter's per-model default. That is safe for a chat
+     reply and unsafe here: `openai/gpt-oss-20b:free` is a reasoning
+     model whose chain-of-thought is billed against the same completion
+     budget as the visible answer. With a large prompt (a full candle
+     array) and no explicit ceiling, the model can spend its allowance
+     reasoning and then emit a minimal — even empty — JSON object to
+     satisfy response_format:{type:'json_object'}. That object parses
+     cleanly, which is exactly why it reached the browser reported as a
+     healthy response with zero content in it.
+
+     8000 is sized for the largest legitimate chartStructure answer
+     (several populated arrays plus a full decision object) with room
+     for reasoning ahead of it. It is a CEILING, not a target — a short
+     honest answer still costs only what it costs. */
   const requestBody = {
     model: env.OPENROUTER_MODEL,
     messages: [
@@ -620,6 +727,7 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
       { role: 'user', content: prompt.user }
     ],
     response_format: { type: 'json_object' },
+    max_tokens: 8000,
     temperature: 0.3
   };
 
@@ -738,7 +846,9 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
   } catch (err) {
     const diagnostics = buildDiagnostics({
       configuredModel, actualModel, httpStatus: openRouterRes.status, latencyMs,
-      jsonParsed: true, chartStructureValid: false, errorCategory: 'schema_invalid'
+      jsonParsed: true, chartStructureValid: false,
+      errorCategory: err && err.emptyAnalysis ? 'empty_analysis' : 'schema_invalid',
+      responseShape: describeResponseShape(rawParsed, openRouterJson)
     });
     logDiagnostics(diagnostics);
     return jsonEnvelope({
@@ -761,6 +871,7 @@ export async function handleOpenRouterAnalyze(type, payload, env) {
     configuredModel, actualModel, httpStatus: openRouterRes.status, latencyMs,
     jsonParsed: true, chartStructureValid: true,
     counts: (type === 'chartStructure') ? chartStructureCounts(analysis) : null,
+    responseShape: describeResponseShape(rawParsed, openRouterJson),
     errorCategory: 'none'
   });
   logDiagnostics(diagnostics);
