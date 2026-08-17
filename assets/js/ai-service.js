@@ -359,6 +359,54 @@
       let body = null;
       try { body = await res.json(); } catch { /* handled below */ }
 
+      /* ---------- DIAGNOSTIC (Phase 6 OpenRouter verification) ----------
+         worker/openrouter.js ALREADY builds and returns a `diagnostics`
+         object on every response — configuredModel, actualModel,
+         httpStatus, latencyMs, jsonParsed, chartStructureValid, counts,
+         errorCategory. Until now this code read only `body.error` and
+         `body.analysis` and dropped `diagnostics` on the floor, so the
+         one field that distinguishes
+
+           CASE A  the model honestly returned no decision
+                   -> ok:true, errorCategory 'none', decision null
+           CASE B  the model DID answer and the Worker rejected it
+                   -> ok:false, errorCategory 'schema_invalid'
+
+         never reached the browser. Both cases render identically in the
+         AI Decision Panel (everything "Not available", NO_TRADE), which
+         is exactly why this was undiagnosable from the UI.
+
+         This is additive: nothing that previously worked reads these
+         fields, and no control flow below depends on them. Inspect with
+             window.DannyChart.lastAIDiagnostics
+         ------------------------------------------------------------- */
+      try {
+        const DC = global.DannyChart = global.DannyChart || {};
+        DC.lastAIDiagnostics = {
+          provider: aiProviderName,
+          type,
+          httpStatus: res.status,
+          workerOk: !!(body && body.ok),
+          diagnostics: (body && body.diagnostics) || null,
+          error: (body && body.error) || null,
+          // What the Worker actually handed back for the three fields
+          // the Decision Panel and Risk Engine consume. Shape only —
+          // no candle data, no prompt, no secrets.
+          analysisShape: (body && body.analysis) ? {
+            hasDecision: !!body.analysis.decision,
+            decisionKeys: body.analysis.decision ? Object.keys(body.analysis.decision) : [],
+            finalDecision: body.analysis.decision ? body.analysis.decision.finalDecision : null,
+            hasTradeLevels: !!body.analysis.tradeLevels,
+            structureEvents: Array.isArray(body.analysis.structureEvents) ? body.analysis.structureEvents.length : null,
+            orderBlocks: Array.isArray(body.analysis.orderBlocks) ? body.analysis.orderBlocks.length : null,
+            fvgs: Array.isArray(body.analysis.fvgs) ? body.analysis.fvgs.length : null,
+            liquidity: Array.isArray(body.analysis.liquidity) ? body.analysis.liquidity.length : null
+          } : null,
+          at: Date.now()
+        };
+        console.info('[AIService] worker response diagnostics', DC.lastAIDiagnostics);
+      } catch (_e) { /* diagnostics must never break a working request */ }
+
       if (!res.ok || !body || body.ok === false) {
         throw new Error((body && body.error) || `AI provider request failed (${res.status}).`);
       }
