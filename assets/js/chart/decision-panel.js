@@ -170,7 +170,8 @@
        show the same "Not available" default as every other field when
        the risk engine did not run. */
     section('Confluence', `
-      <div class="ai-decision-field"><span class="k">Supporting</span><span class="v" data-field="confluenceSummary">${NOT_AVAILABLE}</span></div>
+      <div class="ai-decision-field"><span class="k">Underlying Bias</span><span class="v" data-field="underlyingBias">${NOT_AVAILABLE}</span></div>
+      <div class="ai-decision-field"><span class="k">Components</span><span class="v" data-field="confluenceSummary">${NOT_AVAILABLE}</span></div>
       <ul class="ai-decision-notes" data-field="confluence"><li class="notes-empty">${NOT_AVAILABLE}</li></ul>
     `);
     section('Risk Vetoes', `
@@ -290,9 +291,22 @@
           // sentence (req. 7).
           const rs = (value && typeof value === 'object') ? value.value : value;
           const rsAiUnavailable = !!(value && typeof value === 'object' && value.aiUnavailable);
-          setText('reasoningSummary', rsAiUnavailable
-            ? 'AI analysis unavailable for this request. The result below reflects deterministic Risk Engine evaluation only, not AI reasoning.'
-            : formatPlain(rs));
+          const rsSuperseded = !!(value && typeof value === 'object' && value.aiSuperseded);
+          const proposed = (value && typeof value === 'object') ? value.proposed : null;
+          const el = fieldEls.get('reasoningSummary');
+          if(rsAiUnavailable){
+            setText('reasoningSummary', 'AI analysis unavailable for this request. The result below reflects deterministic Risk Engine evaluation only, not AI reasoning.');
+          } else if(rsSuperseded && el){
+            // Superseded: prefix a clear notice, keep the original prose
+            // visibly demoted beneath it.
+            el.innerHTML =
+              `<span style="color:#FFA53C">Superseded by deterministic risk controls${proposed ? ` — the AI proposed ${escapeHtml(proposed)}` : ''}. ` +
+              `The decision above is the deterministic result; the AI text below was not used and is shown only for reference. ` +
+              `It is not source-grounded and may contain figures the engines never produced.</span>` +
+              (rs ? `<br><span style="opacity:.6;font-style:italic">${escapeHtml(String(rs))}</span>` : '');
+          } else {
+            setText('reasoningSummary', formatPlain(rs));
+          }
           break;
         }
         case 'tradeGrade': setText('tradeGrade', formatPlain(value)); break;
@@ -306,13 +320,26 @@
         case 'liquidityTarget': setText('liquidityTarget', formatPlain(value)); break;
         case 'invalidationLevel': setText('invalidationLevel', formatPlain(value)); break;
         case 'tradeability': setText('tradeability', formatPlain(value)); break;
+        case 'underlyingBias': setText('underlyingBias', formatPlain(value)); break;
         case 'confluenceSummary': setText('confluenceSummary', formatPlain(value)); break;
         case 'confluence': {
           const listEl = fieldEls.get('confluence');
           if(!listEl) break;
           const items = Array.isArray(value) ? value : [];
+          // Colour by lean/stance so a dissenting component is visible
+          // at a glance rather than buried in identical grey text. Each
+          // line carries the reader's OWN wording — no shared boilerplate.
+          const tone = {
+            BULLISH: '#35D399', SUPPORTING: '#35D399',
+            BEARISH: '#FF5C6C', CONFLICTING: '#FF5C6C',
+            NEUTRAL: '#8D93A6', MISSING: '#565C70'
+          };
           listEl.innerHTML = items.length
-            ? items.map(c => `<li><strong>${escapeHtml(c.source)}</strong> — ${escapeHtml(c.stance)}: ${escapeHtml(c.detail || '')}</li>`).join('')
+            ? items.map(c => {
+                const col = tone[c.stance] || '#8D93A6';
+                return `<li><strong style="color:${col}">${escapeHtml(c.source)} — ${escapeHtml(c.stance)}</strong>` +
+                  (c.detail ? `<br><span style="opacity:.8">${escapeHtml(c.detail)}</span>` : '') + `</li>`;
+              }).join('')
             : `<li class="notes-empty">${NOT_AVAILABLE}</li>`;
           break;
         }
@@ -462,6 +489,25 @@
       // persisted flag read separately from the diffed value would
       // both miss same-string transitions and go stale across reset().
       const aiUnavailable = !!(risk && risk.aiProposal === null && risk.tradeability !== 'ACTIONABLE');
+      /* PART 6/8 — the AI PROPOSED something and the deterministic Risk
+         Engine overruled it. decision.reasoningSummary still holds the
+         model's ORIGINAL prose, which the engine never rewrites, so a
+         bullish LLM narrative could sit under a NO_TRADE badge and read
+         as the final market conclusion. Observed live: "The market is
+         currently trending Bullishly… recent swing at 7941" beneath a
+         NO_TRADE, with a fabricated price (spot was 24287.65).
+
+         The prose is NOT deleted — it is evidence of what the model
+         said, and hiding it would remove the audit trail. It is marked
+         superseded so it can never be mistaken for the decision.
+         Deterministic result outranks LLM prose, always. */
+      /* Only a CONTRADICTION is superseded. If the AI itself said
+         NO_TRADE or WAIT and the engine also declined, the two AGREE —
+         labelling that "superseded" would be false and would hide the
+         model's genuine reasoning for no reason. */
+      const aiProposedDirectional = !!(risk && risk.aiProposal &&
+        (risk.aiProposal.finalDecision === 'BUY' || risk.aiProposal.finalDecision === 'SELL'));
+      const aiSuperseded = !!(aiProposedDirectional && risk.tradeability !== 'ACTIONABLE');
       lastAnalysis = analysis || null;
 
       // CAS Phase 1 — additive only. context.symbol is optional and,
@@ -492,7 +538,8 @@
         // plain-value diff would see "no change" and never call
         // applyField at all, leaving the build-time "Not available"
         // placeholder on screen instead of the AI-unavailable message.
-        reasoningSummary: { value: decision.reasoningSummary, aiUnavailable },
+        reasoningSummary: { value: decision.reasoningSummary, aiUnavailable, aiSuperseded,
+          proposed: (risk && risk.aiProposal) ? risk.aiProposal.finalDecision : null },
         tradeGrade: decision.tradeGrade,
         tradeQuality: decision.tradeQuality,
         riskReward: decision.riskReward,
@@ -506,10 +553,21 @@
         educationalNotes: decision.educationalNotes,
         // Phase 6 — from the deterministic risk engine, if it ran.
         tradeability: risk ? risk.tradeability : null,
+        // The Confluence summary must use whichever vocabulary the risk
+        // engine actually produced. In BIAS mode (no proposed trade
+        // direction) counting SUPPORTING/CONFLICTING yields "0, 0, 0"
+        // even though every component carries a real bullish/bearish
+        // lean — the reported defect.
+        underlyingBias: risk ? (risk.underlyingBias || null) : null,
         confluenceSummary: risk
-          ? `${risk.confluence.filter(c => c.stance === 'SUPPORTING').length} supporting, ` +
-            `${risk.confluence.filter(c => c.stance === 'CONFLICTING').length} conflicting, ` +
-            `${risk.confluence.filter(c => c.stance === 'MISSING').length} missing`
+          ? (risk.confluenceMode === 'BIAS'
+              ? `${risk.confluence.filter(c => c.stance === 'BULLISH').length} bullish, ` +
+                `${risk.confluence.filter(c => c.stance === 'BEARISH').length} bearish, ` +
+                `${risk.confluence.filter(c => c.stance === 'NEUTRAL').length} neutral, ` +
+                `${risk.confluence.filter(c => c.stance === 'MISSING').length} missing`
+              : `${risk.confluence.filter(c => c.stance === 'SUPPORTING').length} supporting, ` +
+                `${risk.confluence.filter(c => c.stance === 'CONFLICTING').length} conflicting, ` +
+                `${risk.confluence.filter(c => c.stance === 'MISSING').length} missing`)
           : null,
         confluence: risk ? risk.confluence : null,
         // Bundled with tradeability so the differ sees a REJECTED -> WAIT
@@ -556,7 +614,7 @@
         structureSummary: null, lastStructureEvent: null,
         trapRisk: null, liquidityTarget: null, invalidationLevel: null,
         educationalNotes: null,
-        tradeability: null, confluenceSummary: null, confluence: null, riskVetoes: null
+        tradeability: null, underlyingBias: null, confluenceSummary: null, confluence: null, riskVetoes: null
       };
       if(renderer && typeof renderer.emit === 'function') renderer.emit('decisionPanelReset', {});
     }
@@ -577,6 +635,7 @@
       applyField('liquidityTarget', null);
       applyField('invalidationLevel', null);
       applyField('tradeability', null);
+      applyField('underlyingBias', null);
       applyField('confluenceSummary', null);
       applyField('confluence', null);
       applyField('riskVetoes', null);
