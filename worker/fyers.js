@@ -627,3 +627,192 @@ export async function handleFyersOptionChain(request, env) {
   // available the moment a genuine authenticated request succeeds.
   return jsonEnvelope({ ok: true, data: fyersJson.data, fyers: { endpointUsed } }, 200);
 }
+
+/* =====================================================================
+   GET /api/fyers/contracts?bases=GOLDM,CRUDEOIL,NATURALGAS
+
+   Resolves the CURRENT, non-expired MCX futures contract for each
+   requested base symbol from FYERS's public symbol master.
+
+   =====================================================================
+   WHY THIS EXISTS
+   =====================================================================
+   fyers-service.js's SYMBOL_MAP deliberately leaves the MCX entries'
+   `fyersSymbol` as null with `contractPending: true`, because an MCX
+   futures ticker encodes a specific expiry month (MCX:GOLDM26AUGFUT)
+   and hardcoding one silently starts returning wrong or missing data
+   the moment it expires. instrument-registry.js's setActiveContract()
+   was built to receive a real contract at runtime — but nothing ever
+   called it, so the three commodities stayed permanently pending.
+   This route is the missing supplier.
+
+   =====================================================================
+   AUTHORITATIVE, NOT COMPUTED
+   =====================================================================
+   The ticker is COPIED from the symbol master's own `symbol` column.
+   No month names, no year arithmetic, no template interpolation, no
+   expiry guessing — the file states both the exact ticker and its
+   exact expiry epoch, and this code only filters and sorts.
+
+   Requires no FYERS auth (the file is public), so it works before the
+   user has connected their account.
+
+   =====================================================================
+   COLUMN LAYOUT (0-indexed) — verified against real MCX_COM.csv rows,
+   not from documentation, which is known to be out of date:
+
+     1120251205470295,GOLDM 25 Dec 05 FUT,30,1,1.0,,0900-2355|1815-1915:,
+     2025-12-02,1764959100,MCX:GOLDM25DECFUT,11,20,470295,GOLDM,117,
+     -1.0,XX,1120000000117,1764959100,0,0.0
+
+      0 fytoken           7 last_upd (date)     13 short_sym  <- BASE
+      1 name              8 expiry (epoch sec)  15 strike
+      2 instrument_type   9 symbol  <- TICKER   16 option_type
+        30 = futures                               XX = future
+        31 = option                                CE/PE = option
+
+   Futures are selected on THREE independent signals (instrument_type
+   30, option_type XX, ticker ending in FUT) rather than one, so an
+   option can never be mistaken for a futures contract if one field's
+   encoding ever changes.
+===================================================================== */
+
+const FYERS_MCX_SYMBOL_MASTER_URL = 'https://public.fyers.in/sym_details/MCX_COM.csv';
+
+const COL = Object.freeze({
+  NAME: 1, INSTRUMENT_TYPE: 2, EXPIRY_EPOCH: 8, SYMBOL: 9, SHORT_SYM: 13, OPTION_TYPE: 16
+});
+const INSTRUMENT_TYPE_FUTURES = '30';
+const OPTION_TYPE_FUTURES = 'XX';
+
+/** Parses the symbol master and returns the nearest non-expired futures
+ *  contract per requested base. Pure — takes text, returns data. */
+export function resolveMcxFuturesContracts(csvText, requestedBases, nowSeconds) {
+  const wanted = new Set(requestedBases);
+  const best = {};            // base -> { symbol, expiryEpoch, name }
+  const seenBases = new Set(); // every futures base in the file, for diagnostics
+  let rows = 0, futuresRows = 0;
+
+  const lines = String(csvText || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || line.indexOf(',') === -1) continue;
+    rows++;
+    const f = line.split(',');
+    if (f.length <= COL.OPTION_TYPE) continue;
+
+    const shortSym = (f[COL.SHORT_SYM] || '').trim();
+    const symbol = (f[COL.SYMBOL] || '').trim();
+    const optionType = (f[COL.OPTION_TYPE] || '').trim();
+    const instrumentType = (f[COL.INSTRUMENT_TYPE] || '').trim();
+
+    // Three-signal futures test — see the header note.
+    const isFutures = instrumentType === INSTRUMENT_TYPE_FUTURES &&
+                      optionType === OPTION_TYPE_FUTURES &&
+                      /FUT$/.test(symbol);
+    if (!isFutures) continue;
+    futuresRows++;
+    if (shortSym) seenBases.add(shortSym);
+
+    // EXACT base match, never a prefix: 'CRUDEOIL' must not match
+    // 'CRUDEOILM' (the mini contract), and 'GOLDM' must not match
+    // 'GOLDMTEN'. A prefix match here would silently chart the wrong
+    // instrument.
+    if (!wanted.has(shortSym)) continue;
+
+    const expiryEpoch = Number(f[COL.EXPIRY_EPOCH]);
+    if (!Number.isFinite(expiryEpoch) || expiryEpoch <= 0) continue;
+    // Already-expired contracts are discarded outright.
+    if (expiryEpoch <= nowSeconds) continue;
+
+    // Nearest expiry wins — the front-month contract.
+    if (!best[shortSym] || expiryEpoch < best[shortSym].expiryEpoch) {
+      best[shortSym] = { symbol, expiryEpoch, name: (f[COL.NAME] || '').trim() };
+    }
+  }
+
+  const unresolved = requestedBases.filter(b => !best[b]);
+  return {
+    contracts: best,
+    unresolved,
+    stats: { rows, futuresRows, basesInFile: Array.from(seenBases).sort() }
+  };
+}
+
+export async function handleFyersContracts(request, env) {
+  const url = new URL(request.url);
+  const basesParam = url.searchParams.get('bases') || '';
+  const bases = basesParam.split(',').map(s => s.trim()).filter(Boolean);
+  if (!bases.length) {
+    return jsonEnvelope({ ok: false, error: 'Missing "bases" query parameter (comma-separated MCX base symbols).' }, 400);
+  }
+
+  let res = null;
+  try {
+    // Cached at the edge: the file is multi-MB and changes at most once
+    // a day, so re-downloading it per page load would be wasteful and
+    // slow. cacheTtl also blunts the 522s FYERS's own CDN has been
+    // reported to return to programmatic clients.
+    res = await fetch(FYERS_MCX_SYMBOL_MASTER_URL, {
+      cf: { cacheTtl: 3600, cacheEverything: true },
+      headers: { 'Accept': 'text/csv,text/plain,*/*' }
+    });
+  } catch (err) {
+    return jsonEnvelope({
+      ok: false,
+      error: 'MCX contract list unavailable — the FYERS symbol master could not be reached.',
+      fyers: { url: FYERS_MCX_SYMBOL_MASTER_URL, networkError: (err && err.message) || String(err) }
+    }, 502);
+  }
+
+  if (!res.ok) {
+    return jsonEnvelope({
+      ok: false,
+      error: `MCX contract list unavailable — the FYERS symbol master returned HTTP ${res.status}.`,
+      fyers: { url: FYERS_MCX_SYMBOL_MASTER_URL, httpStatus: res.status }
+    }, 502);
+  }
+
+  let csvText = '';
+  try {
+    csvText = await res.text();
+  } catch (err) {
+    return jsonEnvelope({
+      ok: false,
+      error: 'MCX contract list unavailable — the FYERS symbol master response could not be read.',
+      fyers: { url: FYERS_MCX_SYMBOL_MASTER_URL, httpStatus: res.status }
+    }, 502);
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const resolved = resolveMcxFuturesContracts(csvText, bases, nowSeconds);
+
+  // A 200 with zero futures rows means the file was served but has no
+  // usable commodity futures in it — reported honestly rather than as a
+  // per-instrument "no contract found", because the cause is different
+  // (FYERS restricted MCX API data access in a 2023 notice; if that is
+  // still in force this is what it looks like).
+  if (resolved.stats.futuresRows === 0) {
+    return jsonEnvelope({
+      ok: false,
+      error: 'MCX contract list contained no futures contracts — FYERS may have restricted MCX data for API users.',
+      fyers: { url: FYERS_MCX_SYMBOL_MASTER_URL, httpStatus: res.status, rows: resolved.stats.rows, futuresRows: 0 }
+    }, 502);
+  }
+
+  return jsonEnvelope({
+    ok: true,
+    contracts: resolved.contracts,
+    unresolved: resolved.unresolved,
+    fyers: {
+      url: FYERS_MCX_SYMBOL_MASTER_URL,
+      httpStatus: res.status,
+      rows: resolved.stats.rows,
+      futuresRows: resolved.stats.futuresRows,
+      // Only when something went unresolved — this is the field that
+      // tells you a base symbol is spelled differently than expected.
+      basesInFile: resolved.unresolved.length ? resolved.stats.basesInFile : undefined,
+      resolvedAt: nowSeconds
+    }
+  }, 200);
+}

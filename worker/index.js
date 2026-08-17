@@ -35,7 +35,7 @@
    Nothing here touches the UI, studio.js, studio.html or style.css.
 ===================================================================== */
 
-import { handleFyersLogin, handleFyersCallback, handleFyersCandles, handleFyersOptionChain } from './fyers.js';
+import { handleFyersLogin, handleFyersCallback, handleFyersCandles, handleFyersOptionChain, handleFyersContracts } from './fyers.js';
 import { handleOpenRouterAnalyze } from './openrouter.js';
 import { fetchWithRetry } from './http-utils.js';
 
@@ -184,6 +184,16 @@ export default {
           return new Response(null, { status: 204, headers: CORS_HEADERS });
         }
         return await handleFyersOptionChain(request, env);
+      }
+      // MCX contract resolution — supplies the current, non-expired
+      // futures ticker for GOLD MINI / CRUDE OIL / NATURAL GAS from
+      // FYERS's public symbol master. Unauthenticated (the file is
+      // public), so it works before the user connects their account.
+      if (url.pathname === '/api/fyers/contracts') {
+        if (request.method === 'OPTIONS') {
+          return new Response(null, { status: 204, headers: CORS_HEADERS });
+        }
+        return await handleFyersContracts(request, env);
       }
 
       // Everything else is the static site (index.html, studio.html,
