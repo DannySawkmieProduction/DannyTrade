@@ -62,13 +62,19 @@ function makeDocument(){
 }
 
 // ---- Load the real studio-diagnostics.js into a sandbox with fakes ----
-function loadModule({ studioInstance, aiProviderName, lastRenderError }){
+function loadModule({ studioInstance, aiProviderName, lastRenderError, lastAIDiagnostics, lastRiskDecision, lastAnalysisStatus }){
   const doc = makeDocument();
   const mobileDiagBtn = makeEl('button');
   doc._register('mobileDiagBtn', mobileDiagBtn);
 
   const sandbox = {
-    window: { DannyChart: { studioInstance, lastAnalysisStatus: { status: 'ok', message: 'Analysis received.' }, lastRenderError: lastRenderError || null } },
+    window: { DannyChart: {
+      studioInstance,
+      lastAnalysisStatus: lastAnalysisStatus || { status: 'ok', message: 'Analysis received.' },
+      lastRenderError: lastRenderError || null,
+      lastAIDiagnostics: lastAIDiagnostics || null,
+      lastRiskDecision: lastRiskDecision || null
+    } },
     document: doc,
     console,
     AIService: aiProviderName ? { getProviderName: () => aiProviderName } : undefined,
@@ -616,6 +622,128 @@ console.log('\n[17] FIX 2 — a genuine paint FAILURE (not just off-screen) stil
   assert(html.indexOf('drawable(s) failed to paint') !== -1, 'A genuine paint failure still gets the failure-specific line');
   assert(html.indexOf('color:#FFA53C">1 drawable(s) failed to paint') !== -1, 'Genuine paint failures still use the alarm orange color, unaffected by FIX 2');
 }
+
+/* =================================================================
+   Phase 6 OpenRouter verification — the AI Provider & Risk section.
+   These assert the panel REPORTS what the two published objects
+   contain, and reports their ABSENCE honestly. The panel computes
+   nothing here, so there is nothing else to test.
+   ================================================================= */
+
+const OPENROUTER_REJECTED = {
+  provider: 'openrouter', type: 'chartStructure', httpStatus: 502, workerOk: false,
+  error: 'OpenRouter response could not be normalized to the required DannyTrade analysis schema: "decision" was present but did not match the required DannyTrade schema',
+  diagnostics: {
+    configuredModel: 'openai/gpt-oss-20b:free', actualModel: 'openai/gpt-oss-20b',
+    httpStatus: 200, latencyMs: 4120, jsonParsed: true, chartStructureValid: false,
+    counts: null, errorCategory: 'schema_invalid'
+  },
+  analysisShape: null, at: 1
+};
+
+const RISK_NO_DIRECTION = {
+  tradeability: 'REJECTED', direction: 'NONE', proposedDirection: 'NONE',
+  vetoes: [], warnings: [{ code: 'NO_PROPOSAL', message: 'No trade direction or trade levels were proposed.' }],
+  confluence: [
+    { source: 'trend', stance: 'MISSING', detail: 'No trade direction proposed; stance is not applicable.' },
+    { source: 'marketStructure', stance: 'MISSING', detail: 'No trade direction proposed; stance is not applicable.' }
+  ],
+  aiProposal: null, calculatedRiskReward: null, aiStatedRiskReward: null,
+  riskDistance: null, candleCount: 180, contextGeneratedAt: 1000
+};
+
+console.log('\n[18] AI Provider & Risk section reports a worker rejection');
+{
+  const { doc, mobileDiagBtn } = loadModule({
+    studioInstance: makeFakeStudioInstance(), aiProviderName: 'openrouter',
+    lastAIDiagnostics: OPENROUTER_REJECTED, lastRiskDecision: RISK_NO_DIRECTION
+  });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+
+  assert(html.indexOf('AI Provider &amp; Risk') !== -1, 'AI Provider & Risk section is present');
+  assert(html.indexOf('Worker HTTP status') !== -1 && html.indexOf('502') !== -1, 'Worker HTTP status (502) is shown');
+  assert(html.indexOf('workerOk') !== -1 && html.indexOf('false') !== -1, 'workerOk false is shown');
+  assert(html.indexOf('schema_invalid') !== -1, 'errorCategory schema_invalid is shown — the CASE A/B discriminator');
+  assert(html.indexOf('did not match the required DannyTrade schema') !== -1, 'the worker error message is shown verbatim');
+  assert(html.indexOf('openai/gpt-oss-20b:free') !== -1, 'configured model is shown');
+  assert(html.indexOf('chartStructureValid') !== -1, 'chartStructureValid is shown');
+  assert(html.indexOf('the worker returned no analysis object at all') !== -1, 'a null analysisShape is stated honestly, not blanked');
+}
+
+console.log('\n[19] Risk verdict fields are all reported');
+{
+  const { doc, mobileDiagBtn } = loadModule({
+    studioInstance: makeFakeStudioInstance(), aiProviderName: 'openrouter',
+    lastAIDiagnostics: OPENROUTER_REJECTED, lastRiskDecision: RISK_NO_DIRECTION
+  });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+
+  ['tradeability', 'proposedDirection', 'calculatedRiskReward', 'aiStatedRiskReward', 'aiProposal', 'vetoes', 'warnings', 'confluence']
+    .forEach(f => assert(html.indexOf(f) !== -1, `risk field "${f}" is reported`));
+  assert(html.indexOf('REJECTED') !== -1, 'tradeability REJECTED is shown');
+  assert(html.indexOf('NO_PROPOSAL') !== -1, 'the NO_PROPOSAL warning code is shown (the panel itself does not render warnings)');
+  assert(html.indexOf('0 supporting, 0 conflicting, 2 missing') !== -1, 'confluence tallies are shown');
+  assert(html.indexOf('No trade direction proposed; stance is not applicable.') !== -1, 'per-source confluence detail is shown');
+  assert(html.indexOf('vetoes (0)') !== -1, 'an empty veto list is reported as 0, not omitted');
+}
+
+console.log('\n[20] A successful worker response with a decision is distinguishable');
+{
+  const ok = {
+    provider: 'openrouter', type: 'chartStructure', httpStatus: 200, workerOk: true, error: null,
+    diagnostics: { configuredModel: 'openai/gpt-oss-20b:free', actualModel: null, httpStatus: 200,
+      latencyMs: 3100, jsonParsed: true, chartStructureValid: true,
+      counts: { structureEvents: 4, orderBlocks: 2, fvgs: 3, liquidity: 5, tradeLevels: 1 }, errorCategory: 'none' },
+    analysisShape: { hasDecision: true, decisionKeys: ['finalDecision', 'tradeGrade', 'reasoningSummary'],
+      finalDecision: 'BUY', hasTradeLevels: true, structureEvents: 4, orderBlocks: 2, fvgs: 3, liquidity: 5 },
+    at: 1
+  };
+  const { doc, mobileDiagBtn } = loadModule({
+    studioInstance: makeFakeStudioInstance(), aiProviderName: 'openrouter', lastAIDiagnostics: ok
+  });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+
+  assert(html.indexOf('none') !== -1 && html.indexOf('schema_invalid') === -1, 'errorCategory none, no schema_invalid anywhere');
+  assert(html.indexOf('analysisShape.hasDecision') !== -1, 'hasDecision is reported');
+  assert(html.indexOf('finalDecision, tradeGrade, reasoningSummary') !== -1, 'decisionKeys are listed so a partial decision is visible');
+  assert(html.indexOf('structureEvents 4, orderBlocks 2, fvgs 3, liquidity 5') !== -1, 'worker section counts are reported');
+}
+
+console.log('\n[21] Absent diagnostics are stated, never faked');
+{
+  const { doc, mobileDiagBtn } = loadModule({ studioInstance: makeFakeStudioInstance(), aiProviderName: 'ollama' });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('No worker AI call recorded yet') !== -1, 'a missing lastAIDiagnostics is stated plainly');
+  assert(html.indexOf('Local Ollama does not use the worker path') !== -1, 'the Ollama exception is called out so it is not misread as a fault');
+  assert(html.indexOf('No risk decision recorded yet') !== -1, 'a missing lastRiskDecision is stated plainly');
+}
+
+console.log('\n[22] Copy button exists and publishes a whitelisted payload');
+{
+  const { sandbox, doc, mobileDiagBtn } = loadModule({
+    studioInstance: makeFakeStudioInstance(), aiProviderName: 'openrouter',
+    lastAIDiagnostics: OPENROUTER_REJECTED, lastRiskDecision: RISK_NO_DIRECTION
+  });
+  mobileDiagBtn.click();
+  const html = doc.body.children.find(c => c.id === 'dtChartDiagnostics').innerHTML;
+  assert(html.indexOf('dtDiagCopyBtn') !== -1, 'Copy button is in the existing sticky header');
+  assert(html.indexOf('dtDiagCopyArea') !== -1, 'a fallback copy area exists for Android clipboard refusals');
+  assert(html.indexOf('Close') !== -1 && html.indexOf('Geometry ↓') !== -1, 'the existing Close and Geometry buttons are untouched');
+
+  const payload = sandbox.window.DannyChart.lastDiagPayload;
+  assert(!!payload, 'lastDiagPayload is published for the Copy button and desktop console');
+  assert(payload.ai.diagnostics.errorCategory === 'schema_invalid', 'payload carries errorCategory');
+  assert(payload.risk.tradeability === 'REJECTED', 'payload carries the risk verdict');
+  assert(payload.structuredAnalysis.hasDecision === false, 'payload records what reached Structured Analysis');
+  const json = JSON.stringify(payload).toLowerCase();
+  ['api_key', 'apikey', 'authorization', 'bearer', 'token', 'secret']
+    .forEach(k => assert(json.indexOf(k) === -1, `payload contains no "${k}" — nothing secret is copied`));
+}
+
 
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 process.exit(failed > 0 ? 1 : 0);
