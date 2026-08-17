@@ -302,5 +302,171 @@ console.log('\n[24] Phase 4 — EXPIRY_SESSION_RISK is a SOFT flag (reduces conf
   assert(Math.abs(result.confidence - (1 * DE.GREEKS_CONFIDENCE_PENALTY * DE.EXPIRY_CONFIDENCE_PENALTY)) < 1e-9, 'Confidence correctly reflects BOTH penalty factors multiplied together, not just one: ' + result.confidence);
 }
 
+/* =================================================================
+   PRESENTATION CATEGORY (additive)
+
+   All six NO_TRADE paths return the same STATE.NO_TRADE, so the panel
+   could not tell "market closed" from "feed stale" from "no setup" —
+   a verdict on the DATA rendered as a verdict on the MARKET. These
+   assert the category derivation and, critically, that no existing
+   decision value moved.
+   ================================================================= */
+
+const THREE_BULLISH = [
+  evidenceItem('marketStructure', 'bullish', 'a'),
+  evidenceItem('fvg', 'bullish', 'b'),
+  evidenceItem('trend', 'bullish', 'c')
+];
+
+console.log('\n[C1] MARKET_CLOSED — session ended, analysis ran');
+{
+  const r = DE.decide(bundle({
+    bullish: THREE_BULLISH,
+    riskFlags: [{ code: 'OUTSIDE_TRADING_WINDOW', message: 'Session is CLOSED, not CONTINUOUS.' }]
+  }));
+  assert(r.state === 'NO_TRADE', 'state is still NO_TRADE — the veto is untouched');
+  assert(r.noTradeCategory === 'MARKET_CLOSED', `category MARKET_CLOSED (got ${r.noTradeCategory})`);
+  assert(/Historical snapshot/i.test(r.categoryMessage), 'message calls it a historical snapshot');
+  assert(/not a live entry signal/i.test(r.categoryMessage), 'and says it is not a live entry signal');
+  assert(r.confidenceEvaluated === false, 'confidence is flagged as NOT evaluated');
+  assert(r.blockers.indexOf('OUTSIDE_TRADING_WINDOW') !== -1, 'the blocker is still reported');
+}
+
+console.log('\n[C2] STALE_DATA — session open, feed lagging');
+{
+  const r = DE.decide(bundle({
+    bullish: THREE_BULLISH,
+    riskFlags: [{ code: 'STALE_DATA', message: 'Last candle is 40 minute(s) old (threshold 15m).' }]
+  }));
+  assert(r.noTradeCategory === 'STALE_DATA', `category STALE_DATA (got ${r.noTradeCategory})`);
+  assert(/too old to safely issue a current entry signal/i.test(r.categoryMessage), 'message states the data is too old');
+  assert(r.confidenceEvaluated === false, 'confidence not evaluated');
+  assert(r.state === 'NO_TRADE', 'still NO_TRADE');
+}
+{
+  const r = DE.decide(bundle({ bullish: THREE_BULLISH, riskFlags: [{ code: 'INSUFFICIENT_CANDLES', message: 'No candles supplied.' }] }));
+  assert(r.noTradeCategory === 'STALE_DATA', 'INSUFFICIENT_CANDLES also categorises as STALE_DATA');
+}
+
+console.log('\n[C3] NO_SETUP — market open, data fresh, genuinely no setup');
+{
+  // Conflicting evidence: the pipeline ran cleanly and found a conflict.
+  const r = DE.decide(bundle({
+    bullish: THREE_BULLISH,
+    conflicting: [evidenceItem('momentum', 'neutral', 'Momentum diverges from the bullish trend')]
+  }));
+  assert(r.noTradeCategory === 'NO_SETUP', `category NO_SETUP (got ${r.noTradeCategory})`);
+  assert(/Market is open and data is fresh/i.test(r.categoryMessage), 'message says market is open and data fresh');
+  assert(/no actionable setup is confirmed/i.test(r.categoryMessage), 'and that no setup is confirmed');
+  assert(r.blockers.indexOf('CONFLICTING_EVIDENCE') !== -1, 'the real blocker is preserved');
+}
+{
+  const r = DE.decide(bundle({ bullish: [evidenceItem('trend', 'bullish', 'a')] }));
+  assert(r.noTradeCategory === 'NO_SETUP', 'INSUFFICIENT_EVIDENCE categorises as NO_SETUP');
+}
+{
+  const r = DE.decide(bundle({
+    bullish: [evidenceItem('trend', 'bullish', 'a'), evidenceItem('fvg', 'bullish', 'b')],
+    bearish: [evidenceItem('marketStructure', 'bearish', 'c'), evidenceItem('orderBlocks', 'bearish', 'd')]
+  }));
+  assert(r.noTradeCategory === 'NO_SETUP', 'INSUFFICIENT_NET_EVIDENCE (tied underlying) categorises as NO_SETUP');
+}
+{
+  const r = DE.decide(bundle({
+    bullish: THREE_BULLISH.concat([{ source: 'pcr', direction: 'bullish', signal: 'x', detail: null, group: 'options' }]),
+    bearish: [{ source: 'oi', direction: 'bearish', signal: 'y', detail: null, group: 'options' },
+              { source: 'oiChange', direction: 'bearish', signal: 'z', detail: null, group: 'options' }]
+  }));
+  assert(r.blockers.indexOf('GROUPS_DISAGREE') !== -1, 'groups disagree');
+  assert(r.noTradeCategory === 'NO_SETUP', 'GROUPS_DISAGREE categorises as NO_SETUP');
+}
+
+console.log('\n[C4] ACTIONABLE — a real bias keeps its existing presentation');
+{
+  const r = DE.decide(bundle({ bullish: THREE_BULLISH }));
+  assert(r.state === 'CALL_BIAS', 'state is CALL_BIAS');
+  assert(r.noTradeCategory === 'ACTIONABLE', `category ACTIONABLE (got ${r.noTradeCategory})`);
+  assert(r.categoryMessage === null, 'no category message — the bias presentation explains itself');
+  assert(r.confidenceEvaluated === true, 'confidence WAS evaluated');
+  assert(r.confidence === 1, 'and keeps its computed value');
+  const bear = DE.decide(bundle({ bearish: [
+    evidenceItem('marketStructure', 'bearish', 'a'), evidenceItem('fvg', 'bearish', 'b'), evidenceItem('trend', 'bearish', 'c')
+  ] }));
+  assert(bear.state === 'PUT_BIAS' && bear.noTradeCategory === 'ACTIONABLE', 'PUT_BIAS is also ACTIONABLE');
+}
+
+console.log('\n[C5] PRECEDENCE — MARKET_CLOSED wins over STALE_DATA');
+{
+  // The exact live 17:04 IST condition: both flags fire together,
+  // because the data went stale BECAUSE the session ended.
+  const r = DE.decide(bundle({
+    bullish: THREE_BULLISH,
+    riskFlags: [
+      { code: 'STALE_DATA', message: 'Last candle is 108 minute(s) old (threshold 15m).' },
+      { code: 'OUTSIDE_TRADING_WINDOW', message: 'Session is CLOSED, not CONTINUOUS.' }
+    ]
+  }));
+  assert(r.noTradeCategory === 'MARKET_CLOSED',
+    `MARKET_CLOSED takes precedence when both fire (got ${r.noTradeCategory})`);
+  assert(r.blockers.indexOf('STALE_DATA') !== -1 && r.blockers.indexOf('OUTSIDE_TRADING_WINDOW') !== -1,
+    'BOTH blockers are still reported — precedence affects the label only, never the blocker list');
+  // Order-independent.
+  const flipped = DE.decide(bundle({
+    bullish: THREE_BULLISH,
+    riskFlags: [
+      { code: 'OUTSIDE_TRADING_WINDOW', message: 'x' },
+      { code: 'STALE_DATA', message: 'y' }
+    ]
+  }));
+  assert(flipped.noTradeCategory === 'MARKET_CLOSED', 'precedence is independent of riskFlags order');
+}
+{
+  // STALE_DATA only wins when the session is NOT the cause.
+  const r = DE.decide(bundle({ bullish: THREE_BULLISH, riskFlags: [{ code: 'STALE_DATA', message: 'x' }] }));
+  assert(r.noTradeCategory === 'STALE_DATA', 'with no session blocker, STALE_DATA is the category');
+}
+
+console.log('\n[C6] An unrecognised hard blocker is BLOCKED, not mislabelled NO_SETUP');
+{
+  const r = DE.decide(bundle({ bullish: THREE_BULLISH, riskFlags: [{ code: 'ENGINE_ERRORS', message: 'x' }] }));
+  assert(r.noTradeCategory === 'BLOCKED', `ENGINE_ERRORS -> BLOCKED (got ${r.noTradeCategory})`);
+  assert(!/data is fresh/i.test(r.categoryMessage), 'it does NOT claim the data was fresh and analysed');
+  const sess = DE.decide(bundle({ bullish: THREE_BULLISH, riskFlags: [{ code: 'SESSION_UNAVAILABLE', message: 'x' }] }));
+  assert(sess.noTradeCategory === 'BLOCKED', 'SESSION_UNAVAILABLE -> BLOCKED');
+  const opt = DE.decide(bundle({ bullish: THREE_BULLISH, riskFlags: [{ code: 'OPTION_DATA_UNAVAILABLE', message: 'x' }] }));
+  assert(opt.noTradeCategory === 'BLOCKED', 'OPTION_DATA_UNAVAILABLE -> BLOCKED');
+}
+
+console.log('\n[C7] Categorisation is additive — no existing decision field changed');
+{
+  // Soft flags must not affect the category or the bias.
+  const soft = DE.decide(bundle({ bullish: THREE_BULLISH, riskFlags: [{ code: 'GREEKS_UNAVAILABLE', message: 'x' }] }));
+  assert(soft.state === 'CALL_BIAS', 'a soft flag still yields CALL_BIAS');
+  assert(soft.noTradeCategory === 'ACTIONABLE', 'and stays ACTIONABLE');
+  assert(Math.abs(soft.confidence - DE.GREEKS_CONFIDENCE_PENALTY) < 1e-9, 'the penalty still applies unchanged');
+
+  // Every documented field is still present with its original meaning.
+  const blocked = DE.decide(bundle({ riskFlags: [{ code: 'OUTSIDE_TRADING_WINDOW', message: 'x' }] }));
+  ['state','entryState','confidence','reasons','blockers','entryCondition','invalidationCondition','noTradeCondition']
+    .forEach(f => assert(blocked[f] !== undefined, `existing field "${f}" is still present`));
+  assert(blocked.entryState === 'NONE', 'entryState NONE for NO_TRADE, unchanged');
+  assert(blocked.confidence === 0, 'confidence is still literally 0 in the object — only its DISPLAY changes');
+  assert(blocked.entryCondition === 'No entry — conditions below must clear first.', 'entryCondition unchanged');
+  assert(blocked.invalidationCondition === 'Not applicable while NO_TRADE.', 'invalidationCondition unchanged');
+  assert(blocked.noTradeCondition === 'OUTSIDE_TRADING_WINDOW', 'noTradeCondition unchanged');
+}
+
+console.log('\n[C8] categorize() is exported and pure');
+{
+  assert(typeof DE.categorize === 'function', 'categorize is exported');
+  assert(DE.categorize('NO_TRADE', ['OUTSIDE_TRADING_WINDOW']) === 'MARKET_CLOSED', 'direct call: MARKET_CLOSED');
+  assert(DE.categorize('NO_TRADE', ['STALE_DATA']) === 'STALE_DATA', 'direct call: STALE_DATA');
+  assert(DE.categorize('NO_TRADE', ['CONFLICTING_EVIDENCE']) === 'NO_SETUP', 'direct call: NO_SETUP');
+  assert(DE.categorize('CALL_BIAS', []) === 'ACTIONABLE', 'direct call: ACTIONABLE');
+  assert(DE.categorize('NO_TRADE', []) === 'NO_SETUP', 'a blockerless NO_TRADE falls back to NO_SETUP');
+  assert(DE.CATEGORY.MARKET_CLOSED === 'MARKET_CLOSED', 'CATEGORY vocabulary is exported');
+}
+
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 process.exit(failed > 0 ? 1 : 0);
