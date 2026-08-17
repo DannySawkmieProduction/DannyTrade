@@ -126,6 +126,55 @@
     if(bannerEl) bannerEl.style.display = 'none';
   }
 
+  /* =====================================================================
+     PHASE 6 — the one call site of the deterministic Risk Engine.
+
+     Runs on BOTH getStructuredAnalysis() return paths (AI success and
+     AI failure), so the risk verdict is never skipped just because a
+     provider was down. Returns a NEW Structured Analysis object; the
+     deterministic `structured` passed in is not mutated.
+
+     If the risk modules did not load, this is a pass-through and the
+     pipeline behaves exactly as it did before Phase 6 — the same
+     optional-dependency pattern AnnotationNormalizer already uses in
+     studio-chart-init.js. It is logged loudly rather than silently
+     accepted, because a missing risk engine means unvalidated AI
+     levels can reach the chart.
+  ===================================================================== */
+  function applyRiskValidation(structured, analysisContext, candles, timeframe, symbol){
+    var Risk = window.DannyChart && window.DannyChart.Risk;
+    var Engine = Risk && Risk.RiskDecisionEngine;
+    if(!Engine){
+      console.error('[StudioBootstrap] RiskDecisionEngine did not load — AI trade levels are NOT being risk-validated. Check the script order in studio.html.');
+      return structured;
+    }
+    try{
+      var risk = Engine.evaluate({
+        candles: candles,
+        timeframe: timeframe,
+        symbol: symbol,
+        analysisContext: analysisContext || null,
+        tradeLevels: structured ? structured.tradeLevels : null,
+        decision: structured ? structured.decision : null
+      });
+      var validated = Engine.applyToStructuredAnalysis(structured, risk);
+      window.DannyChart.lastRiskDecision = risk;
+      console.log('[StudioBootstrap] Risk Engine ->', risk.tradeability,
+        '| direction:', risk.direction,
+        '| calculated R:R:', risk.calculatedRiskReward,
+        '| vetoes:', risk.vetoes.map(function(v){ return v.code; }),
+        '| supporting:', risk.confluence.filter(function(c){ return c.stance === 'SUPPORTING'; }).length);
+      return validated;
+    } catch(err){
+      // A throwing risk engine must not hand unvalidated levels to the
+      // renderer. Fail closed: drop the levels, keep the deterministic
+      // overlays, and say so.
+      console.error('[StudioBootstrap] Risk Engine threw; dropping AI trade levels as a precaution:', err);
+      if(structured) structured.tradeLevels = null;
+      return structured;
+    }
+  }
+
   async function boot(){
     var DC = window.DannyChart;
     if(!DC || !DC.StudioChartInit){
@@ -263,6 +312,25 @@
           };
         }
 
+        // =============================================================
+        // PHASE 6 — RISK VALIDATION BOUNDARY
+        // =============================================================
+        // Everything the AI proposes below passes through
+        // assets/js/risk/risk-decision-engine.js before it reaches
+        // AnnotationNormalizer -> AnnotationModel -> ChartRenderer.
+        // The risk engine has veto authority: if it rejects the
+        // proposal, structured.tradeLevels becomes null HERE, so
+        // geometrically invalid levels (a long whose stop sits above
+        // entry, a target on the wrong side, a sub-1.5 R:R) never
+        // reach the renderer at all. annotation-model.js and
+        // chart-renderer.js are deliberately untouched — the rejection
+        // is upstream by design, not by weakening their validation.
+        //
+        // It runs even when the AI call fails or was never made: a
+        // decision-only or empty response still gets a deterministic
+        // NO_TRADE/WAIT with reasons, and the deterministic overlays
+        // above are unaffected either way.
+        // =============================================================
         var status = { status: 'unknown', message: '', at: Date.now() };
         try{
           // `deterministic` is the Structured Analysis the local engines
@@ -289,7 +357,7 @@
             }
             hideAnalysisBanner();
             window.DannyChart.lastAnalysisStatus = status;
-            return structured;
+            return applyRiskValidation(structured, ctx, candles, timeframe, symbol);
           }
           if(resp && resp.status === 'not_connected'){
             status.status = 'not_connected';
@@ -318,7 +386,10 @@
         } else {
           showAnalysisBanner('Live analysis unavailable (' + status.message + ') — and the local Analysis Engine found no structures in this window either, so there is nothing to draw.');
         }
-        return structured;
+        // The risk engine runs on the failure path as well, so a failed
+        // AI call still yields an explained deterministic NO_TRADE
+        // rather than an empty decision object.
+        return applyRiskValidation(structured, ctx, candles, timeframe, symbol);
       }
     });
 

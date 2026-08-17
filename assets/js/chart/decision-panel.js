@@ -164,6 +164,20 @@
       <div class="ai-decision-field"><span class="k">Invalidation</span><span class="v" data-field="invalidationLevel">${NOT_AVAILABLE}</span></div>
     `);
 
+    /* Phase 6 — two ADDITIVE sections. No existing section, field, or
+       data-field key above is altered. Both are populated from
+       decision.risk (see assets/js/risk/risk-decision-engine.js) and
+       show the same "Not available" default as every other field when
+       the risk engine did not run. */
+    section('Confluence', `
+      <div class="ai-decision-field"><span class="k">Supporting</span><span class="v" data-field="confluenceSummary">${NOT_AVAILABLE}</span></div>
+      <ul class="ai-decision-notes" data-field="confluence"><li class="notes-empty">${NOT_AVAILABLE}</li></ul>
+    `);
+    section('Risk Vetoes', `
+      <div class="ai-decision-field"><span class="k">Tradeability</span><span class="v" data-field="tradeability">${NOT_AVAILABLE}</span></div>
+      <ul class="ai-decision-notes" data-field="riskVetoes"><li class="notes-empty">${NOT_AVAILABLE}</li></ul>
+    `);
+
     const notesWrap = document.createElement('div');
     const notesHeading = document.createElement('span');
     notesHeading.className = 'ai-decision-section-title';
@@ -241,6 +255,29 @@
         case 'trapRisk': setText('trapRisk', formatPlain(value)); break;
         case 'liquidityTarget': setText('liquidityTarget', formatPlain(value)); break;
         case 'invalidationLevel': setText('invalidationLevel', formatPlain(value)); break;
+        case 'tradeability': setText('tradeability', formatPlain(value)); break;
+        case 'confluenceSummary': setText('confluenceSummary', formatPlain(value)); break;
+        case 'confluence': {
+          const listEl = fieldEls.get('confluence');
+          if(!listEl) break;
+          const items = Array.isArray(value) ? value : [];
+          listEl.innerHTML = items.length
+            ? items.map(c => `<li><strong>${escapeHtml(c.source)}</strong> — ${escapeHtml(c.stance)}: ${escapeHtml(c.detail || '')}</li>`).join('')
+            : `<li class="notes-empty">${NOT_AVAILABLE}</li>`;
+          break;
+        }
+        case 'riskVetoes': {
+          const listEl = fieldEls.get('riskVetoes');
+          if(!listEl) break;
+          const items = Array.isArray(value) ? value : [];
+          // No vetoes is a real, meaningful state — say so explicitly
+          // rather than reusing the "Not available" default, which
+          // would read as "the check did not run".
+          listEl.innerHTML = items.length
+            ? items.map(v => `<li><strong>${escapeHtml(v.severity || 'HARD')}</strong> ${escapeHtml(v.code)}: ${escapeHtml(v.message || '')}</li>`).join('')
+            : (value === null ? `<li class="notes-empty">${NOT_AVAILABLE}</li>` : `<li class="notes-empty">No risk vetoes — deterministic gates cleared.</li>`);
+          break;
+        }
         case 'educationalNotes': {
           const listEl = fieldEls.get('educationalNotes');
           if(!listEl) break;
@@ -324,6 +361,12 @@
      */
     function update(analysis, context = {}){
       const decision = (analysis && analysis.decision) || {};
+      // Phase 6 — decision.risk, when the deterministic Risk Engine ran.
+      // Absent for any analysis produced before Phase 6 or by a caller
+      // that does not use the risk layer; every new field below then
+      // renders its normal "Not available" default, so older Structured
+      // Analysis objects stay fully backward-compatible.
+      const risk = (decision.risk && typeof decision.risk === 'object') ? decision.risk : null;
       lastAnalysis = analysis || null;
 
       // CAS Phase 1 — additive only. context.symbol is optional and,
@@ -353,7 +396,16 @@
         trapRisk: decision.trapRisk,
         liquidityTarget: decision.liquidityTarget,
         invalidationLevel: decision.invalidationLevel,
-        educationalNotes: decision.educationalNotes
+        educationalNotes: decision.educationalNotes,
+        // Phase 6 — from the deterministic risk engine, if it ran.
+        tradeability: risk ? risk.tradeability : null,
+        confluenceSummary: risk
+          ? `${risk.confluence.filter(c => c.stance === 'SUPPORTING').length} supporting, ` +
+            `${risk.confluence.filter(c => c.stance === 'CONFLICTING').length} conflicting, ` +
+            `${risk.confluence.filter(c => c.stance === 'MISSING').length} missing`
+          : null,
+        confluence: risk ? risk.confluence : null,
+        riskVetoes: risk ? risk.vetoes : null
       };
 
       const changedFields = [];
@@ -393,7 +445,8 @@
         marketPhase: null, trend: null,
         structureSummary: null, lastStructureEvent: null,
         trapRisk: null, liquidityTarget: null, invalidationLevel: null,
-        educationalNotes: null
+        educationalNotes: null,
+        tradeability: null, confluenceSummary: null, confluence: null, riskVetoes: null
       };
       if(renderer && typeof renderer.emit === 'function') renderer.emit('decisionPanelReset', {});
     }
@@ -413,6 +466,10 @@
       applyField('trapRisk', null);
       applyField('liquidityTarget', null);
       applyField('invalidationLevel', null);
+      applyField('tradeability', null);
+      applyField('confluenceSummary', null);
+      applyField('confluence', null);
+      applyField('riskVetoes', null);
       applyField('educationalNotes', null);
     }
 
