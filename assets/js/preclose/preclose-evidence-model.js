@@ -64,10 +64,39 @@
   }
 
   function safeData(engineResult){
-    // Every engine either returns {data,...} or is null (a hard
-    // failure the orchestrator already isolated) — never assume a
-    // shape beyond that.
-    return (engineResult && engineResult.data) ? engineResult.data : null;
+    /* Reads one engine's slot out of an Analysis Context.
+
+       PRODUCTION SHAPE IS UNWRAPPED. analysis-engine.js's analyze()
+       already strips the wrapper before storing each engine's result:
+
+         context.marketStructure   = r.data;   // line 312-358
+         context.liquidity         = r.data;
+         context.orderBlocks       = r.data;
+         context.fairValueGaps     = r.data;
+         ...
+
+       and then returns those slots directly, so ctx.orderBlocks IS the
+       data object ({orderBlocks, meta}), not {data:{...}}. This function
+       previously required the wrapper and so returned null for ALL EIGHT
+       engines on every real run — which is why the Pre-Close panel
+       reported "0 sweep(s)", "0 fair value gap(s)", "0 order block(s)",
+       "no clear trend", "unresolved" and "0 level(s)" regardless of
+       actual market conditions, while diagnostics.valid was true and the
+       engines had in fact succeeded. The engines were never broken; their
+       output was never read.
+
+       Both shapes are accepted rather than only the current one:
+       analysis-context-adapter.js and risk-evidence-model.js consume the
+       unwrapped form, but a raw engine result (which genuinely is
+       {data, meta}) can still reach here from a direct caller or an
+       older fixture, and silently nulling that would recreate exactly
+       this class of bug in reverse.
+
+       A hard engine failure is still null — see the isolation in
+       analysis-engine.js — and every builder below already renders that
+       as DATA UNAVAILABLE rather than as a zero count. */
+    if(!engineResult || typeof engineResult !== 'object') return null;
+    return engineResult.data ? engineResult.data : engineResult;
   }
 
   function buildMarketStructureEvidence(msData, bullish, bearish, marketAnalysis){
