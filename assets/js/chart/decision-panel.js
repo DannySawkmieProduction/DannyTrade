@@ -133,6 +133,10 @@
        - skips anything immediately followed by '%'
        - skips values preceded by index/candle/bar wording
        - skips bare 4-digit integers in 1900-2100 (year-like)
+       - skips integers >= 1e9 (Unix/epoch timestamps — no instrument
+         trades at a billion, and a raw epoch is a 10-digit integer that
+         necessarily falls outside every real price range, so it would
+         otherwise always be flagged)
      A 4-digit-priced instrument may therefore be under-flagged. That
      is the safe direction to fail.
   --------------------------------------------------------------- */
@@ -154,6 +158,10 @@
       const n = Number(raw);
       if(!Number.isFinite(n)) continue;
       if(raw.indexOf('.') === -1 && n >= 1900 && n <= 2100) continue; // year-like
+      // Epoch timestamp. Restricted to INTEGERS: a genuine price either
+      // carries a decimal or sits far below 1e9, so this can never
+      // suppress a legitimate market level.
+      if(raw.indexOf('.') === -1 && n >= 1e9) continue;
       if(n < lo || n > hi){ if(out.indexOf(raw) === -1) out.push(raw); }
     }
     return out;
