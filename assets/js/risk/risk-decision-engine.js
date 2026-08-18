@@ -105,6 +105,21 @@
   const FINAL_DECISION = Object.freeze({ BUY: 'BUY', SELL: 'SELL', WAIT: 'WAIT', NO_TRADE: 'NO_TRADE' });
 
   function isNum(v){ return typeof v === 'number' && Number.isFinite(v); }
+
+  /** Lowest low / highest high across the analysed candles. Returns null
+   *  rather than a partial range, so a caller can never ground a price
+   *  against half-known extremes. */
+  function candleRange(candles){
+    if(!Array.isArray(candles) || !candles.length) return null;
+    let lo = Infinity, hi = -Infinity;
+    for(const c of candles){
+      if(!c) continue;
+      if(isNum(c.low) && c.low < lo) lo = c.low;
+      if(isNum(c.high) && c.high > hi) hi = c.high;
+    }
+    return (Number.isFinite(lo) && Number.isFinite(hi) && lo <= hi)
+      ? { lowestLow: lo, highestHigh: hi } : null;
+  }
   function hard(code, message){ return { code, severity: 'HARD', message }; }
   function warn(code, message){ return { code, message }; }
 
@@ -262,6 +277,14 @@
         aiProposal,
         evaluatedAt: isNum(opts.now) ? opts.now : Date.now(),
         candleCount: candles.length,
+        /* The analysed window's actual price extremes. Additive, and
+           computed from the `candles` array this function was ALREADY
+           given — no new data path, no second candle analysis, no Fyers
+           call. Consumed only by decision-panel.js to check whether a
+           price the AI mentioned in prose falls inside the data the
+           engines actually saw. Never feeds a veto, threshold or
+           tradeability decision. */
+        candleRange: candleRange(candles),
         // Stale-decision identity (rule 15). Two decisions describe the
         // same market state only if all three agree.
         contextGeneratedAt: (analysisContext && analysisContext.metadata && analysisContext.metadata.generatedAt) || null,
