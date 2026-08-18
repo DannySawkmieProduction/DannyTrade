@@ -256,8 +256,11 @@ section('[A] Genuine AI NO_TRADE — displays NO_TRADE, not AI UNAVAILABLE');
   assert(fd.classList.contains('no-trade'), 'badge carries the normal no-trade class');
   assert(!fd.classList.contains('ai-unavailable'), 'badge does NOT carry ai-unavailable');
   const rs = field(container, 'reasoningSummary');
-  assert(rs.textContent === ANALYSIS_AI_NO_TRADE.decision.reasoningSummary,
+  // textContent now also carries the AI-GENERATED INTERPRETATION label,
+  // so the AI prose is asserted by containment rather than equality.
+  assert(rs.textContent.indexOf(ANALYSIS_AI_NO_TRADE.decision.reasoningSummary) !== -1,
     'reasoningSummary shows the AI\'s real text, not the AI-unavailable message');
+  assert(/AI-GENERATED INTERPRETATION/i.test(rs.textContent), 'and it is labelled as AI output');
   assert(ANALYSIS_AI_NO_TRADE.decision.finalDecision === 'NO_TRADE', 'underlying finalDecision is NO_TRADE (fixture, unchanged by panel)');
 }
 
@@ -282,8 +285,10 @@ section('[B] AI proposed BUY, Risk Engine rejected — displays the Risk Engine\
   assert(/the AI proposed BUY/i.test(rs.textContent), 'and names what the AI had proposed');
   assert(rs.textContent.indexOf(ANALYSIS_AI_REJECTED.decision.reasoningSummary) !== -1,
     'the original AI text is still present for reference, not deleted');
-  assert(/not source-grounded/i.test(rs.textContent),
-    'and is flagged as possibly containing figures the engines never produced');
+  assert(/AI-GENERATED INTERPRETATION/i.test(rs.textContent),
+    'and is explicitly labelled AI-generated rather than deterministic');
+  assert(/explanatory only/i.test(rs.textContent),
+    'the label states the prose is explanatory only');
 }
 
 section('[C] AI rate-limited — displays AI UNAVAILABLE');
@@ -424,7 +429,11 @@ section('[K-B] Valid WAIT renders consistently as a valid decision');
   assert(!fd.classList.contains('ai-unavailable'), 'badge is NOT AI UNAVAILABLE — aiProposal is non-null');
   assert(field(container, 'tradeability').textContent === 'WAIT', 'tradeability reads WAIT');
   const rs = field(container, 'reasoningSummary').textContent;
-  assert(rs === ANALYSIS_VALID_WAIT.decision.reasoningSummary, 'the AI\'s real reasoning is shown verbatim');
+  // Containment, not equality: textContent now also carries the
+  // AI-GENERATED INTERPRETATION label. The prose itself is unchanged.
+  assert(rs.indexOf(ANALYSIS_VALID_WAIT.decision.reasoningSummary) !== -1,
+    'the AI\'s real reasoning is shown verbatim');
+  assert(/AI-GENERATED INTERPRETATION/i.test(rs), 'and is labelled as AI output');
   assert(!/AI analysis unavailable/i.test(rs), 'the AI-unavailable message is NOT shown');
   const rv = field(container, 'riskVetoes').textContent;
   assert(rv.indexOf(NO_USABLE) === -1, 'riskVetoes does not claim the AI returned no usable decision');
@@ -445,6 +454,8 @@ section('[K-C] AI UNAVAILABLE -> valid WAIT completely replaces the unavailable 
   assert(fd.classList.contains('wait'), 'wait class applied');
   assert(!/AI analysis unavailable/i.test(field(container, 'reasoningSummary').textContent),
     'the AI-unavailable reasoning message is replaced by real AI text');
+  assert(field(container, 'reasoningSummary').textContent.indexOf(ANALYSIS_VALID_WAIT.decision.reasoningSummary) !== -1,
+    'the AI\'s real reasoning is shown verbatim');
   assert(field(container, 'riskVetoes').textContent.indexOf(NO_USABLE) === -1, 'no stale failure text remains anywhere');
 }
 
@@ -596,8 +607,10 @@ section('[L5] Directional mode rendering is unchanged (MODE A)');
   assert(field(container, 'underlyingBias').textContent === 'Not available',
     'no underlying bias is claimed for a directional decision');
   assert(field(container, 'finalDecision').textContent === 'BUY', 'BUY still renders normally');
-  assert(field(container, 'reasoningSummary').textContent === 'Swept lows then BOS.',
+  assert(field(container, 'reasoningSummary').textContent.indexOf('Swept lows then BOS.') !== -1,
     'an ACTIONABLE decision keeps its AI reasoning verbatim — not superseded');
+  assert(!/Superseded/i.test(field(container, 'reasoningSummary').textContent),
+    'and carries no superseded warning');
 }
 
 section('[L6] TEST 12/13 — a genuine AI NO_TRADE agrees and is NOT marked superseded');
@@ -607,7 +620,201 @@ section('[L6] TEST 12/13 — a genuine AI NO_TRADE agrees and is NOT marked supe
   const rs = field(container, 'reasoningSummary').textContent;
   assert(!/Superseded/i.test(rs),
     'the AI itself said NO_TRADE — it agrees with the engine, so nothing is superseded');
-  assert(rs === ANALYSIS_AI_NO_TRADE.decision.reasoningSummary, 'its real reasoning shows verbatim');
+  assert(rs.indexOf(ANALYSIS_AI_NO_TRADE.decision.reasoningSummary) !== -1, 'its real reasoning shows verbatim');
+}
+
+
+/* =================================================================
+   AI/DETERMINISTIC CONTRADICTION + PRICE GROUNDING
+
+   Live browser case that motivated this: the deterministic engines
+   reported Underlying Bias BEARISH (2 bullish, 4 bearish, 2 neutral),
+   tradeability WAIT — while the LLM's own structured trend said
+   "Bullish" and its prose said "the bias is bullish", citing prices
+   (24530.9, 24774.3, 23900) none of which appear in the deterministic
+   components. The educational note advised waiting for a "discount
+   area" while the deterministic premiumDiscount component said price
+   was in the PREMIUM half.
+
+   The prior aiSuperseded rule only fired when the AI proposed BUY/SELL
+   and the engine refused — an AI WAIT with a contradictory narrative
+   slipped through entirely and rendered as unlabelled prose.
+
+   Detection uses STRUCTURED FIELDS ONLY (risk.underlyingBias vs
+   decision.trend). The prose is never parsed for sentiment.
+   ================================================================= */
+
+/** The exact live browser case. */
+function browserCase(over){
+  const d = Object.assign({
+    finalDecision: 'WAIT',
+    trend: 'Bullish',                       // AI's structured claim
+    confidence: 0.85,
+    reasoningSummary: 'Price has recently shifted to a bullish character by breaking the swing high at 24530.9. It is currently retracing from the 24774.3 peak. While the bias is bullish, price has not yet reached the high-confidence demand zone near 23900.',
+    educationalNotes: [
+      'The current move lower is a corrective retracement seeking discount liquidity before a potential continuation.',
+      'Professionals wait for price to reach the discount area (below 24190.3) and look for lower timeframe confirmation.'
+    ],
+    risk: {
+      tradeability: 'WAIT', direction: 'NONE', proposedDirection: 'NONE',
+      vetoes: [], warnings: [],
+      aiProposal: { finalDecision: 'WAIT', direction: null, confidence: 0.85, riskReward: null },
+      calculatedRiskReward: null, aiStatedRiskReward: null,
+      confluenceMode: 'BIAS', underlyingBias: 'BEARISH',
+      // Analysed window: 24190.3 .. 24774.3. 23900 sits BELOW it.
+      candleRange: { lowestLow: 24190.3, highestHigh: 24774.3 },
+      confluence: [
+        { source: 'trend', stance: 'BULLISH', detail: 'Primary trend is bullish.' },
+        { source: 'marketStructure', stance: 'BULLISH', detail: 'Most recent structure event is a bullish CHoCH at 24367.3.' },
+        { source: 'liquidity', stance: 'BEARISH', detail: 'Most recent stop hunt took buy-side liquidity at 24482.1.' },
+        { source: 'orderBlocks', stance: 'BEARISH', detail: '3 bullish and 4 bearish unmitigated order blocks.' },
+        { source: 'fairValueGaps', stance: 'BEARISH', detail: '20 bullish and 21 bearish unfilled fair value gaps.' },
+        { source: 'premiumDiscount', stance: 'BEARISH', detail: 'Price is in the premium half of the dealing range.' },
+        { source: 'supportResistance', stance: 'NEUTRAL', detail: 'Nearest level ahead is resistance at 24482.1.' },
+        { source: 'volume', stance: 'NEUTRAL', detail: 'Volume data available; not treated as directional evidence.' }
+      ]
+    }
+  }, over || {});
+  if(over && over.risk) d.risk = Object.assign({}, browserCase().decision.risk, over.risk);
+  return { decision: d };
+}
+
+function renderCase(over){
+  const { panel, container } = mountPanel();
+  panel.update(browserCase(over));
+  return container;
+}
+
+section('[M1] TEST 1/7 — BEARISH bias + AI Bullish trend + WAIT: contradiction flagged');
+{
+  const c = renderCase();
+  const rs = field(c, 'reasoningSummary').textContent;
+  assert(/AI interpretation differs from deterministic confluence/i.test(rs),
+    'the contradiction warning is shown');
+  assert(/Deterministic analysis is authoritative/i.test(rs), 'and states which source wins');
+  assert(field(c, 'finalDecision').textContent === 'WAIT', 'WAIT is UNCHANGED');
+  assert(field(c, 'tradeability').textContent === 'WAIT', 'tradeability is UNCHANGED');
+}
+
+section('[M2] TEST 2 — BULLISH bias + AI Bearish trend: contradiction flagged');
+{
+  const c = renderCase({ trend: 'Bearish', risk: { underlyingBias: 'BULLISH' } });
+  assert(/AI interpretation differs/i.test(field(c, 'reasoningSummary').textContent),
+    'the inverse contradiction is also detected');
+}
+
+section('[M3] TEST 3/4/20 — agreement produces NO contradiction warning');
+{
+  const bear = renderCase({ trend: 'Bearish' });
+  assert(!/AI interpretation differs/i.test(field(bear, 'reasoningSummary').textContent),
+    'BEARISH bias + AI Bearish trend -> no warning');
+  const bull = renderCase({ trend: 'Bullish', risk: { underlyingBias: 'BULLISH' } });
+  assert(!/AI interpretation differs/i.test(field(bull, 'reasoningSummary').textContent),
+    'BULLISH bias + AI Bullish trend -> no warning');
+}
+
+section('[M4] TEST 5/6 — missing values are never treated as contradictions');
+{
+  const noBias = renderCase({ risk: { underlyingBias: null } });
+  assert(!/AI interpretation differs/i.test(field(noBias, 'reasoningSummary').textContent),
+    'a missing deterministic bias is not a contradiction');
+  const noTrend = renderCase({ trend: null });
+  assert(!/AI interpretation differs/i.test(field(noTrend, 'reasoningSummary').textContent),
+    'a missing AI trend is not a contradiction');
+  const sideways = renderCase({ trend: 'Sideways' });
+  assert(!/AI interpretation differs/i.test(field(sideways, 'reasoningSummary').textContent),
+    'Sideways is not a contradiction against either bias');
+  const conflicted = renderCase({ risk: { underlyingBias: 'CONFLICTED' } });
+  assert(!/AI interpretation differs/i.test(field(conflicted, 'reasoningSummary').textContent),
+    'a CONFLICTED deterministic bias is not a contradiction');
+}
+
+section('[M5] TEST 8/9/10 — the existing BUY/SELL superseded rule still works, independently');
+{
+  const buy = renderCase({ finalDecision: 'NO_TRADE', trend: 'Bearish',
+    risk: { tradeability: 'REJECTED', aiProposal: { finalDecision: 'BUY', direction: 'bullish', confidence: 0.9, riskReward: 4 } } });
+  assert(/Superseded by deterministic risk controls/i.test(field(buy, 'reasoningSummary').textContent),
+    'AI BUY + REJECTED still shows the superseded warning');
+  const sell = renderCase({ finalDecision: 'NO_TRADE', trend: 'Bullish',
+    risk: { tradeability: 'REJECTED', aiProposal: { finalDecision: 'SELL', direction: 'bearish', confidence: 0.9, riskReward: 4 } } });
+  assert(/Superseded by deterministic risk controls/i.test(field(sell, 'reasoningSummary').textContent),
+    'AI SELL + REJECTED still shows the superseded warning');
+  const agree = renderCase({ finalDecision: 'NO_TRADE', trend: 'Bearish',
+    risk: { tradeability: 'REJECTED', aiProposal: { finalDecision: 'NO_TRADE', direction: null, confidence: 0.3, riskReward: null } } });
+  assert(!/Superseded by deterministic risk controls/i.test(field(agree, 'reasoningSummary').textContent),
+    'AI NO_TRADE + deterministic NO_TRADE + matching trend -> NOT superseded');
+}
+
+section('[M6] TEST 11/12 — price grounding against the analysed candle range');
+{
+  const c = renderCase();
+  const rs = field(c, 'reasoningSummary').textContent;
+  // Window is 24190.3 .. 24774.3; 23900 is below it.
+  assert(/outside the analysed candle range/i.test(rs), 'an out-of-range AI price is flagged');
+  assert(/23900/.test(rs), 'the specific unverifiable figure is named');
+  assert(!/24530\.9 .{0,40}outside/i.test(rs), '24530.9 is inside the range and is not flagged');
+  assert(!/hallucinat|false|fabricat/i.test(rs),
+    'the wording never claims the figure is false — only that it could not be verified');
+}
+{
+  // All figures inside the window -> no price flag at all.
+  const c = renderCase({ reasoningSummary: 'Price broke the swing high at 24530.9 and is retracing from 24774.3.' });
+  assert(!/outside the analysed candle range/i.test(field(c, 'reasoningSummary').textContent),
+    'in-range prices produce no flag');
+}
+{
+  // No candle range available -> grounding is skipped entirely.
+  const c = renderCase({ risk: { candleRange: null } });
+  assert(!/outside the analysed candle range/i.test(field(c, 'reasoningSummary').textContent),
+    'without a candle range nothing is flagged — no guessing');
+}
+
+section('[M7] TEST 13/14 — educational notes: labelled, contradiction-warned, price-flagged');
+{
+  const c = renderCase();
+  const notes = field(c, 'educationalNotes').textContent;
+  assert(/AI-GENERATED/i.test(notes), 'the notes are explicitly labelled AI-generated');
+  assert(/may conflict with deterministic analysis/i.test(notes),
+    'a contradiction warning is shown against the deterministic premium/discount finding');
+  assert(/Verify against the deterministic evidence/i.test(notes), 'and tells the user to verify');
+  assert(/outside the analysed candle range/i.test(notes) || /24190\.3/.test(notes),
+    'note prices are grounded too');
+  // The original text must survive verbatim.
+  assert(notes.indexOf('Professionals wait for price to reach the discount area') !== -1,
+    'the original AI note text is NOT deleted');
+  assert(notes.indexOf('corrective retracement seeking discount liquidity') !== -1,
+    'and neither is the first note');
+}
+
+section('[M8] TEST 15 — AI reasoning is always visible and always identified as AI');
+{
+  const c = renderCase();
+  const rs = field(c, 'reasoningSummary').textContent;
+  assert(rs.indexOf('the bias is bullish') !== -1, 'the original AI prose is still visible');
+  assert(/AI INTERPRETATION|AI-GENERATED INTERPRETATION/i.test(rs),
+    'and is explicitly labelled as AI interpretation');
+}
+{
+  // Even when it agrees, it must still be labelled as AI.
+  const c = renderCase({ trend: 'Bearish' });
+  assert(/AI INTERPRETATION|AI-GENERATED INTERPRETATION/i.test(field(c, 'reasoningSummary').textContent),
+    'the AI label appears even with no contradiction');
+}
+
+section('[M9] TEST 16/17/18/19 — deterministic output is untouched by any of this');
+{
+  const c = renderCase();
+  assert(field(c, 'underlyingBias').textContent === 'BEARISH', 'underlyingBias unchanged');
+  const summary = field(c, 'confluenceSummary').textContent;
+  assert(summary === '2 bullish, 4 bearish, 2 neutral, 0 missing',
+    `Confluence counts are byte-identical to the browser-verified output (got "${summary}")`);
+  const conf = field(c, 'confluence').textContent;
+  assert(/trend — BULLISH/.test(conf) && /premiumDiscount — BEARISH/.test(conf),
+    'every Confluence component keeps its own stance');
+  assert(conf.indexOf('Price is in the premium half of the dealing range.') !== -1,
+    'component wording is unchanged');
+  assert(field(c, 'tradeability').textContent === 'WAIT', 'tradeability stays WAIT');
+  assert(field(c, 'finalDecision').textContent === 'WAIT', 'final decision stays WAIT');
 }
 
 
