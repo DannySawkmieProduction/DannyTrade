@@ -86,6 +86,89 @@
   }
 
   const DECISION_TAG_CLASSES = ['buy','sell','wait','no-trade','ai-unavailable'];
+  /* =====================================================================
+     AI / DETERMINISTIC HIERARCHY
+
+     The deterministic pipeline is authoritative. Everything below only
+     LABELS the AI's own output so it can never be mistaken for
+     DannyTrade's deterministic analysis. Nothing here changes a
+     decision, a bias, a confluence stance, a veto, or tradeability.
+
+     Two INDEPENDENT contradiction signals — either may fire alone:
+       A. The AI proposed BUY/SELL and the Risk Engine refused.
+       B. The AI's own structured `trend` opposes the deterministic
+          `underlyingBias`.
+
+     (B) exists because (A) alone missed the live case: an AI returning
+     WAIT — agreeing there is no trade — while its narrative argued the
+     opposite market direction. Detected on STRUCTURED ENUMS ONLY
+     (risk.underlyingBias vs decision.trend). The prose is never parsed
+     for sentiment: that would be a fragile second bias algorithm.
+  ===================================================================== */
+  const AI_TREND_TO_BIAS = { Bullish: 'BULLISH', Bearish: 'BEARISH', Sideways: 'SIDEWAYS' };
+
+  /** True only for a genuine, unambiguous opposition. Missing or
+   *  non-directional values on EITHER side are never a contradiction. */
+  function aiTrendContradictsBias(aiTrend, underlyingBias){
+    const ai = AI_TREND_TO_BIAS[aiTrend];
+    if(!ai || (ai !== 'BULLISH' && ai !== 'BEARISH')) return false;
+    if(underlyingBias !== 'BULLISH' && underlyingBias !== 'BEARISH') return false;
+    return ai !== underlyingBias;
+  }
+
+  /* ---------------------------------------------------------------
+     PRICE GROUNDING — deliberately narrow.
+
+     Answers ONE question: does a price-looking number in AI prose fall
+     outside the candle window the engines actually analysed? It never
+     claims a figure is wrong, hallucinated or false — only that it
+     could not be verified against the analysed data. A number inside
+     the range is simply not flagged; that is not an endorsement.
+
+     Heuristic is intentionally conservative — FALSE NEGATIVES ARE
+     PREFERRED to false positives:
+       - requires 4+ integer digits, so percentages (85), confidence
+         (0.85), risk/reward (2.5), candle indexes (163) and small
+         counts can never match
+       - skips anything immediately followed by '%'
+       - skips values preceded by index/candle/bar wording
+       - skips bare 4-digit integers in 1900-2100 (year-like)
+     A 4-digit-priced instrument may therefore be under-flagged. That
+     is the safe direction to fail.
+  --------------------------------------------------------------- */
+  const PRICE_LIKE = /(\d{4,}(?:\.\d+)?)/g;
+
+  function unverifiedPrices(text, range){
+    if(!text || !range || typeof text !== 'string') return [];
+    const lo = range.lowestLow, hi = range.highestHigh;
+    if(typeof lo !== 'number' || typeof hi !== 'number') return [];
+    const out = [];
+    let m;
+    PRICE_LIKE.lastIndex = 0;
+    while((m = PRICE_LIKE.exec(text)) !== null){
+      const raw = m[1];
+      const after = text.slice(m.index + raw.length, m.index + raw.length + 1);
+      if(after === '%') continue;
+      const before = text.slice(Math.max(0, m.index - 14), m.index).toLowerCase();
+      if(/index\s*$|candle\s*$|bar\s*$|#\s*$/.test(before)) continue;
+      const n = Number(raw);
+      if(!Number.isFinite(n)) continue;
+      if(raw.indexOf('.') === -1 && n >= 1900 && n <= 2100) continue; // year-like
+      if(n < lo || n > hi){ if(out.indexOf(raw) === -1) out.push(raw); }
+    }
+    return out;
+  }
+
+  /** `esc` is passed in because escapeHtml() lives inside mount()'s
+   *  closure; keeping this helper at module scope (with the detector it
+   *  belongs beside) is cleaner than hoisting the escaper out. */
+  function priceWarning(prices, range, esc){
+    if(!prices.length || !range) return '';
+    return `<div style="margin-top:6px;font-size:11px;line-height:1.4;color:#FFA53C">` +
+      `UNVERIFIED AI PRICE: ${esc(prices.join(', '))} — outside the analysed candle range ` +
+      `(${esc(String(range.lowestLow))}–${esc(String(range.highestHigh))}) and could not be verified.</div>`;
+  }
+
   function decisionTagClass(finalDecision){
     const map = { BUY:'buy', SELL:'sell', WAIT:'wait', NO_TRADE:'no-trade' };
     return map[finalDecision] || null;
@@ -294,18 +377,43 @@
           const rsSuperseded = !!(value && typeof value === 'object' && value.aiSuperseded);
           const proposed = (value && typeof value === 'object') ? value.proposed : null;
           const el = fieldEls.get('reasoningSummary');
+          const rsConflict = !!(value && typeof value === 'object' && value.aiTrendConflict);
+          const rsRange = (value && typeof value === 'object') ? value.candleRange : null;
+          const rsBias = (value && typeof value === 'object') ? value.bias : null;
+          const rsTrend = (value && typeof value === 'object') ? value.aiTrend : null;
+          const rsPrices = unverifiedPrices(typeof rs === 'string' ? rs : '', rsRange);
+
+          // Every non-empty AI narrative carries an AI label, whether or
+          // not it contradicts anything — the reader must never have to
+          // infer that prose is model output.
+          const AI_LABEL = '<div style="font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.05em;color:var(--text-faint,#565C70)">AI-GENERATED INTERPRETATION — explanatory only, not deterministic DannyTrade analysis</div>';
+          const conflictWarning = rsConflict
+            ? `<div style="margin-top:6px;font-size:11.5px;line-height:1.45;color:#FFA53C">` +
+              `AI interpretation differs from deterministic confluence` +
+              (rsTrend && rsBias ? ` (AI trend: ${escapeHtml(rsTrend)} · deterministic bias: ${escapeHtml(rsBias)})` : '') +
+              `. Deterministic analysis is authoritative.</div>`
+            : '';
+
           if(rsAiUnavailable){
             setText('reasoningSummary', 'AI analysis unavailable for this request. The result below reflects deterministic Risk Engine evaluation only, not AI reasoning.');
+          } else if(!rs){
+            setText('reasoningSummary', NOT_AVAILABLE);
           } else if(rsSuperseded && el){
             // Superseded: prefix a clear notice, keep the original prose
             // visibly demoted beneath it.
-            el.innerHTML =
-              `<span style="color:#FFA53C">Superseded by deterministic risk controls${proposed ? ` — the AI proposed ${escapeHtml(proposed)}` : ''}. ` +
-              `The decision above is the deterministic result; the AI text below was not used and is shown only for reference. ` +
-              `It is not source-grounded and may contain figures the engines never produced.</span>` +
-              (rs ? `<br><span style="opacity:.6;font-style:italic">${escapeHtml(String(rs))}</span>` : '');
-          } else {
-            setText('reasoningSummary', formatPlain(rs));
+            el.innerHTML = AI_LABEL +
+              `<div style="margin-top:6px;color:#FFA53C">Superseded by deterministic risk controls${proposed ? ` — the AI proposed ${escapeHtml(proposed)}` : ''}. ` +
+              `The decision above is the deterministic result; the AI text below was not used and is shown only for reference.</div>` +
+              conflictWarning +
+              `<div style="margin-top:6px;opacity:.6;font-style:italic">${escapeHtml(String(rs))}</div>` +
+              priceWarning(rsPrices, rsRange, escapeHtml);
+          } else if(el){
+            // Not superseded — the AI text stands, but it is still AI
+            // output and is labelled, warned and grounded accordingly.
+            el.innerHTML = AI_LABEL +
+              conflictWarning +
+              `<div style="margin-top:6px">${escapeHtml(String(rs))}</div>` +
+              priceWarning(rsPrices, rsRange, escapeHtml);
           }
           break;
         }
@@ -385,10 +493,33 @@
         case 'educationalNotes': {
           const listEl = fieldEls.get('educationalNotes');
           if(!listEl) break;
-          const notes = Array.isArray(value) ? value.filter(Boolean) : [];
-          listEl.innerHTML = notes.length
-            ? notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')
-            : `<li class="notes-empty">${NOT_AVAILABLE}</li>`;
+          /* Pure LLM output, and the highest-risk field in this panel:
+             it is phrased as trading instruction ("Professionals wait
+             for price to reach the discount area...") and can directly
+             contradict a deterministic component — in the live case the
+             engines reported price in the PREMIUM half. Labelled,
+             warned and grounded; never rewritten, never deleted. */
+          const raw = (value && typeof value === 'object' && !Array.isArray(value)) ? value.value : value;
+          const notes = Array.isArray(raw) ? raw.filter(Boolean) : [];
+          const conflict = !!(value && typeof value === 'object' && value.aiTrendConflict);
+          const range = (value && typeof value === 'object') ? value.candleRange : null;
+          if(!notes.length){
+            listEl.innerHTML = `<li class="notes-empty">${NOT_AVAILABLE}</li>`;
+            break;
+          }
+          const allPrices = [];
+          notes.forEach(n => unverifiedPrices(String(n), range).forEach(p => {
+            if(allPrices.indexOf(p) === -1) allPrices.push(p);
+          }));
+          listEl.innerHTML =
+            `<li class="notes-empty" style="font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.05em;color:var(--text-faint,#565C70)">AI-GENERATED EDUCATIONAL NOTES — not verified DannyTrade guidance</li>` +
+            (conflict
+              ? `<li class="notes-empty" style="color:#FFA53C;font-size:11.5px;line-height:1.45">AI educational content may conflict with deterministic analysis. Verify against the deterministic evidence above.</li>`
+              : '') +
+            notes.map(n => `<li>${escapeHtml(n)}</li>`).join('') +
+            (allPrices.length
+              ? `<li class="notes-empty" style="color:#FFA53C;font-size:11px;line-height:1.4">UNVERIFIED AI PRICE: ${escapeHtml(allPrices.join(', '))} — outside the analysed candle range (${escapeHtml(String(range.lowestLow))}–${escapeHtml(String(range.highestHigh))}) and could not be verified.</li>`
+              : '');
           break;
         }
         case 'badge': setText('badge', value || 'Loading'); break;
@@ -508,6 +639,9 @@
       const aiProposedDirectional = !!(risk && risk.aiProposal &&
         (risk.aiProposal.finalDecision === 'BUY' || risk.aiProposal.finalDecision === 'SELL'));
       const aiSuperseded = !!(aiProposedDirectional && risk.tradeability !== 'ACTIONABLE');
+      // Signal B — independent of A. See AI_TREND_TO_BIAS above.
+      const aiTrendConflict = !!(risk && aiTrendContradictsBias(decision.trend, risk.underlyingBias));
+      const candleRange = (risk && risk.candleRange) || null;
       lastAnalysis = analysis || null;
 
       // CAS Phase 1 — additive only. context.symbol is optional and,
@@ -539,7 +673,9 @@
         // applyField at all, leaving the build-time "Not available"
         // placeholder on screen instead of the AI-unavailable message.
         reasoningSummary: { value: decision.reasoningSummary, aiUnavailable, aiSuperseded,
-          proposed: (risk && risk.aiProposal) ? risk.aiProposal.finalDecision : null },
+          proposed: (risk && risk.aiProposal) ? risk.aiProposal.finalDecision : null,
+          aiTrendConflict, aiTrend: decision.trend || null,
+          bias: risk ? (risk.underlyingBias || null) : null, candleRange },
         tradeGrade: decision.tradeGrade,
         tradeQuality: decision.tradeQuality,
         riskReward: decision.riskReward,
@@ -550,7 +686,9 @@
         trapRisk: decision.trapRisk,
         liquidityTarget: decision.liquidityTarget,
         invalidationLevel: decision.invalidationLevel,
-        educationalNotes: decision.educationalNotes,
+        // Bundled so the notes re-render when the deterministic verdict
+        // changes even though the note text itself did not.
+        educationalNotes: { value: decision.educationalNotes, aiTrendConflict, candleRange },
         // Phase 6 — from the deterministic risk engine, if it ran.
         tradeability: risk ? risk.tradeability : null,
         // The Confluence summary must use whichever vocabulary the risk
