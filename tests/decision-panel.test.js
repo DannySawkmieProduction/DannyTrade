@@ -818,5 +818,68 @@ section('[M9] TEST 16/17/18/19 — deterministic output is untouched by any of t
 }
 
 
+section('[N1] Epoch timestamps are not treated as AI prices');
+{
+  /* Confirmed defect from the verification audit: a raw Unix epoch such
+     as 1755500000 is a 10-digit integer that necessarily falls outside
+     any real price range, so the extraction heuristic flagged it as an
+     UNVERIFIED AI PRICE. Timestamps were an explicitly excluded
+     category. No instrument trades at a billion, so integers at or
+     above 1e9 are never prices.
+
+     Decimals are deliberately NOT excluded by the same rule — a price
+     always carries a decimal point or sits far below 1e9, so this
+     cannot suppress a legitimate level. */
+  const range = { lowestLow: 24190.3, highestHigh: 24774.3 };
+  const c = renderCase({
+    reasoningSummary: 'Session began at 1755500000 epoch and ended at 1755661100.',
+    risk: { candleRange: range }
+  });
+  const rs = field(c, 'reasoningSummary').textContent;
+  assert(!/UNVERIFIED AI PRICE/.test(rs), 'an epoch timestamp produces NO price flag');
+  assert(rs.indexOf('1755500000') !== -1, 'the text itself is still shown unaltered');
+}
+{
+  // Same via educational notes, which run the identical extractor.
+  const c = renderCase({
+    educationalNotes: ['Captured at 1755500000 during the London session.'],
+    risk: { candleRange: { lowestLow: 24190.3, highestHigh: 24774.3 } }
+  });
+  assert(!/UNVERIFIED AI PRICE/.test(field(c, 'educationalNotes').textContent),
+    'an epoch timestamp in an educational note produces no price flag either');
+}
+
+section('[N2] Legitimate market prices are still classified exactly as before');
+{
+  const range = { lowestLow: 24190.3, highestHigh: 24774.3 };
+  const expectations = [
+    ['23900',   true,  'below the range -> flagged'],
+    ['24530.9', false, 'inside the range -> not flagged'],
+    ['24774.3', false, 'equals the high -> not flagged'],
+    ['24190.3', false, 'equals the low -> not flagged'],
+    ['25100.5', true,  'above the range -> flagged']
+  ];
+  expectations.forEach(([price, shouldFlag, why]) => {
+    const c = renderCase({
+      reasoningSummary: `Key level at ${price} on this leg.`,
+      risk: { candleRange: range }
+    });
+    const flagged = /UNVERIFIED AI PRICE/.test(field(c, 'reasoningSummary').textContent);
+    assert(flagged === shouldFlag, `${price}: ${why}`);
+  });
+}
+{
+  // A price and an epoch together: the price is flagged, the epoch is not.
+  const c = renderCase({
+    reasoningSummary: 'Demand zone near 23900, captured at 1755500000.',
+    risk: { candleRange: { lowestLow: 24190.3, highestHigh: 24774.3 } }
+  });
+  const rs = field(c, 'reasoningSummary').textContent;
+  assert(/UNVERIFIED AI PRICE: 23900/.test(rs), 'the real out-of-range price is still flagged');
+  assert(!/1755500000/.test(rs.split('UNVERIFIED AI PRICE')[1] || ''),
+    'and the epoch is NOT listed among the flagged prices');
+}
+
+
 console.log(`\n==== RESULT: ${passed} passed, ${failed} failed ====`);
 if(failed > 0) process.exitCode = 1;
