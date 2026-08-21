@@ -390,6 +390,63 @@
         ' &nbsp;|&nbsp; Symbol: ' + escapeHtml(state.symbol || '—') +
         ' &nbsp;|&nbsp; Timeframe: ' + (state.timeframe ? escapeHtml(state.timeframe) : '— (not exposed by the chart\'s own state object)') + '</div>' +
       '<div style="margin-top:2px;color:' + (stratLabError === 'NONE' ? '#8D93A6' : '#FF5C6C') + '">Error: ' + escapeHtml(stratLabError) + '</div>' +
+      // ---- initialize() completion signal ----
+      // studio-bootstrap.js mounts Strategy Lab inside
+      // orchestrator.initialize().then(...). That .then() callback is
+      // NOT directly observable from here, and studio-bootstrap.js must
+      // not be modified just to make it observable. `state.initialized`
+      // is the safest real proxy: studio-chart-init.js sets it true on
+      // the second-to-last line of initialize(), immediately before the
+      // final return, and it is ALREADY exposed through the same
+      // getState() this panel already reads — so reading it adds no new
+      // dependency and changes no production file.
+      //   YES -> initialize() ran to completion, so it resolved, so the
+      //          .then() callback DID run and create() WAS called.
+      //   NO  -> initialize() rejected or is still pending, so the
+      //          .then() never ran and create() was never called.
+      // (studio-chart-init.js's only unguarded statements are
+      // registerEventListeners() and renderer.emit('studioReady') —
+      // and emit() swallows listener errors internally, so
+      // registerEventListeners() is the sole realistic rejection source.)
+      '<div style="margin-top:4px;color:' + (state.initialized ? '#8D93A6' : '#FF5C6C') + '">initialize() completed: ' + (state.initialized ? 'YES' : 'NO') +
+        (state.initialized
+          ? ' &nbsp;(so .then() ran and StrategyLab.create() was called)'
+          : ' &nbsp;— initialize() rejected or is still pending, so the .then() callback never ran and StrategyLab.create() was never called') + '</div>' +
+      // ---- Live probe of the REAL controller ----
+      // Runs the actual loaded StrategyLab.create() against a DETACHED
+      // container that is never inserted into the page, using the real
+      // loaded card modules and the real live candles/symbol. Reports
+      // the ACTUAL caught exception — never an inferred message.
+      (function(){
+        if(!stratLabGlobalPresent || typeof Lab.StrategyLab.create !== 'function'){
+          return '<div style="margin-top:4px;color:#FFA53C">StrategyLab probe: SKIPPED (no StrategyLab.create to probe)</div>';
+        }
+        var probe = document.createElement('div');
+        var handle = null;
+        try{
+          handle = Lab.StrategyLab.create({
+            container: probe,
+            getCandles: function(){ return state.lastCandles || []; },
+            getSymbol: function(){ return state.symbol || null; }
+          });
+          var childCount = probe.children ? probe.children.length : 0;
+          // Clean up immediately — the probe must leave nothing behind.
+          if(handle && typeof handle.destroy === 'function'){
+            try{ handle.destroy(); } catch(_e){ /* cleanup failure must not mask the probe result */ }
+          }
+          return '<div style="margin-top:4px;color:#35D399">StrategyLab probe: SUCCESS</div>' +
+                 '<div style="margin-top:2px;color:#8D93A6">Probe children: ' + childCount + '</div>' +
+                 '<div style="margin-top:2px;color:#8D93A6">(the real controller + real cards mount fine here, so if Strategy Lab is still missing on the page, studio-bootstrap.js never called create())</div>';
+        } catch(probeErr){
+          if(handle && typeof handle.destroy === 'function'){
+            try{ handle.destroy(); } catch(_e){}
+          }
+          return '<div style="margin-top:4px;color:#FF5C6C">StrategyLab probe: FAILED</div>' +
+                 '<div style="margin-top:2px;color:#FF5C6C">Error name: ' + escapeHtml((probeErr && probeErr.name) || 'Error') + '</div>' +
+                 '<div style="margin-top:2px;color:#FF5C6C">Error message: ' + escapeHtml((probeErr && probeErr.message) || String(probeErr)) + '</div>' +
+                 '<div style="margin-top:2px;color:#FF5C6C;word-break:break-word">Stack: ' + escapeHtml((probeErr && probeErr.stack) || '(no stack available)') + '</div>';
+        }
+      })() +
       '<div style="margin-top:6px;color:#565C70">Script order (as found in the DOM, first to last):<br>' +
         (function(){
           if(typeof document.querySelectorAll !== 'function') return '(not available in this environment)';
