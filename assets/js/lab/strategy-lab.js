@@ -76,7 +76,8 @@
     { key: 'volatility', label: 'VOLATILITY', module: () => window.DannyChart.Lab.VolatilityCard },
     { key: 'range', label: 'RANGE', module: () => window.DannyChart.Lab.RangeCompressionCard },
     { key: 'outcome', label: 'OUTCOME', module: () => window.DannyChart.Lab.OutcomeTrackerCard },
-    { key: 'research', label: 'RESEARCH', module: () => window.DannyChart.Lab.ResearchDataCard }
+    { key: 'research', label: 'RESEARCH', module: () => window.DannyChart.Lab.ResearchDataCard },
+    { key: 'valuearea', label: 'VALUE AREA', module: () => window.DannyChart.Lab.ValueAreaCard }
   ];
   const DEFAULT_TAB = 'volatility';
 
