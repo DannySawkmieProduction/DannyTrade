@@ -142,6 +142,16 @@
 
       <aside class="ai-decision-panel" id="aiDecisionPanel"></aside>
     </div>
+
+    <!-- Strategy / Indicator Lab. Deliberately OUTSIDE .chart-studio-body,
+         and therefore outside #aiDecisionPanel: an indicator reading and a
+         trade decision must never share a frame. Empty until
+         assets/js/lab/volatility-card.js mounts into it; if that script
+         fails to load the section simply stays empty rather than showing a
+         half-rendered readout. Today it holds exactly one indicator. -->
+    <section id="indicatorLab" class="indicator-lab" aria-label="Indicator Lab">
+      <div id="indicatorLabPanel"></div>
+    </section>
   </div>
 </section>
 
@@ -315,6 +325,15 @@
 <script defer src="assets/js/risk/trade-level-validator.js"></script>
 <script defer src="assets/js/risk/risk-evidence-model.js"></script>
 <script defer src="assets/js/risk/risk-decision-engine.js"></script>
+<!-- Strategy / Indicator Lab. Loads AFTER candle-utils.js (the only
+     dependency the indicator has) and before studio-bootstrap.js, which
+     mounts the card. It deliberately does NOT depend on, and is not
+     loaded alongside, analysis-engine.js or the risk modules: nothing in
+     assets/js/lab/ reads either of them, and nothing in either of them
+     reads assets/js/lab/. If both files below were deleted, every
+     existing behaviour on this page would be unchanged. -->
+<script defer src="assets/js/lab/volatility-sizing-unit.js"></script>
+<script defer src="assets/js/lab/volatility-card.js"></script>
 <script defer src="assets/js/preclose/option-chain-provider.js"></script>
 <script defer src="assets/js/preclose/preclose-evidence-model.js"></script>
 <script defer src="assets/js/preclose/preclose-decision-engine.js"></script>
