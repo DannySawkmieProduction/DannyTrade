@@ -262,10 +262,14 @@ section('10. Script order is reported from the actual DOM, first to last');
   const { doc, mobileDiagBtn } = loadModule({ studioInstance: { getState: () => makeFakeState() }, labModules: allModules(), scriptOrder: order });
   mobileDiagBtn.click();
   const html = panelHtml(doc);
-  const volIdx = html.indexOf('volatility-sizing-unit.js');
-  const cardIdx = html.indexOf('volatility-card.js');
-  const stratIdx = html.indexOf('strategy-lab.js');
-  const bootIdx = html.indexOf('studio-bootstrap.js');
+  // Scope the search to the script-order line itself — other sections of
+  // the panel legitimately mention these filenames in prose, and an
+  // unscoped indexOf() would match the wrong occurrence.
+  const orderRegion = html.slice(html.indexOf('Script order'));
+  const volIdx = orderRegion.indexOf('volatility-sizing-unit.js');
+  const cardIdx = orderRegion.indexOf('volatility-card.js');
+  const stratIdx = orderRegion.indexOf('strategy-lab.js');
+  const bootIdx = orderRegion.indexOf('studio-bootstrap.js');
   assert(volIdx !== -1 && cardIdx !== -1 && stratIdx !== -1 && bootIdx !== -1, 'every relevant script appears in the reported order');
   assert(volIdx < cardIdx && cardIdx < stratIdx && stratIdx < bootIdx, 'the reported order matches the actual DOM order exactly (dependency-correct)');
 }
