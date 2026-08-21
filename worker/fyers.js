@@ -459,6 +459,353 @@ export async function handleFyersCandles(request, env) {
 }
 
 /* =====================================================================
+   POST /api/fyers/research-candles — Phase D, Strategy/Indicator Lab
+   research data path.
+
+   COMPLETELY SEPARATE from handleFyersCandles() above (the live route,
+   unmodified — see the byte-exact span comparison in
+   tests/worker-research-candles.test.js). Nothing here is called by,
+   or calls into, handleFyersCandles(). The only things shared are
+   read-only, stable primitives that already existed before this phase:
+   getStoredAccessToken(), jsonEnvelope(), RESOLUTION_MAP,
+   INTRADAY_MINUTES — none of which this phase modifies.
+
+   =====================================================================
+   WHY A SEPARATE ROUTE (not an extra parameter on /api/fyers/candles)
+   =====================================================================
+   FYERS's /data/history endpoint doesn't accept a candle count at all —
+   it accepts a DATE RANGE. handleFyersCandles() already turns a `limit`
+   into a single date range and makes ONE call. To reach 2,000+ 15m
+   candles reliably requires MULTIPLE date-range calls (chunking) — see
+   "FYERS'S VERIFIED LIMITS" below. Adding that capability as an option
+   on the existing route would mean touching the one handler the live
+   180-candle pipeline depends on today. A new, additive route keeps
+   that handler's source (and therefore its behavior) providably
+   untouched, which is the explicit requirement for this phase.
+
+   =====================================================================
+   FYERS'S VERIFIED LIMITS (re-confirmed this phase, same result as
+   the Phase C trace)
+   =====================================================================
+   Web search against FYERS's own community forum surfaced a direct
+   quote of the API's own error message:
+     {'code': -353, 'message': 'The range cannot be more than 100 days
+      for 60 min resolution', 's': 'error'}
+   Corroborated across multiple independent threads (2021–2024): up to
+   100 days per request for every intraday resolution (1/2/3/5/10/15/
+   20/30/45/60/120/180/240 min), up to 366 days per request for daily.
+   FYERS's own official reference page
+   (myapi.fyers.in/docsv3#tag/Data-Api/paths/~1DataApi/post) returned
+   an HTTP 404 to this environment's fetch tool both in the Phase C
+   trace and again when re-attempted this phase — this remains
+   community-sourced, not confirmed verbatim against FYERS's primary
+   documentation. Stated plainly, not overclaimed.
+
+   At this verified limit, a single request for 15-minute candles tops
+   out around ~1,750 candles (100 calendar days × ~21/30 trading-day
+   ratio × 25 fifteen-minute candles/trading day) — short of the
+   2,000-candle minimum this phase requires, hence chunking.
+
+   =====================================================================
+   CHUNKING ALGORITHM
+   =====================================================================
+   Walks backward from "now" in non-overlapping windows (100 days for
+   any intraday resolution, 366 for daily — computeResearchChunkWindow()
+   below), issuing one FYERS call per window, until whichever comes
+   first:
+     - the merged, deduped candle count reaches the requested count
+       (satisfied)
+     - FYERS returns zero candles for a window (no more history exists
+       further back — NOT an error, just the true edge of available
+       data; satisfied may still be false, honestly)
+     - a chunk fails after at least one earlier chunk succeeded
+       (partial:true, whatever was collected is still returned)
+     - RESEARCH_MAX_CHUNKS_PER_REQUEST is reached (maxChunksReached:true
+       — the hard amplification guard; see below)
+   A chunk failing on the very FIRST attempt (nothing collected yet)
+   returns a normal error envelope, exactly like handleFyersCandles()
+   does today — there is no data to call "partial" yet.
+
+   =====================================================================
+   MERGE / DEDUP / ORDER
+   =====================================================================
+   mergeAndDedupeCandles() collects every chunk's raw rows into a Map
+   keyed by candle time (first-seen chunk wins on any boundary overlap,
+   since chunks are fetched most-recent-first), then returns the values
+   sorted strictly ascending by time — regardless of what order the
+   chunks themselves were supplied in. See its own tests for the exact
+   overlap and out-of-order-input proofs.
+
+   =====================================================================
+   HONESTY GUARANTEES
+   =====================================================================
+   - `returned` is always the TRUE count of real candles in the
+     response — never padded, interpolated, or invented to match
+     `requested`.
+   - `satisfied` is `returned >= requested` — never assumed.
+   - `gaps` (detectResearchGaps()) is purely diagnostic, mirroring the
+     Range Compression Detector's own median-spacing approach for
+     consistency — it never blocks or alters the returned candles.
+
+   =====================================================================
+   HARD AMPLIFICATION GUARD
+   =====================================================================
+   RESEARCH_MAX_REQUESTED_COUNT clamps an absurd requestedCount before
+   any chunking is attempted (disclosed via requestedCountClamped).
+   RESEARCH_MAX_CHUNKS_PER_REQUEST caps the number of outbound FYERS
+   calls ONE incoming request can trigger, regardless of requestedCount
+   — protecting the worker's own shared FYERS rate budget from a single
+   caller (or a bug) turning into an unbounded burst of upstream calls.
+===================================================================== */
+
+export const RESEARCH_MAX_REQUESTED_COUNT = 5000;
+export const RESEARCH_MAX_CHUNKS_PER_REQUEST = 15;
+const RESEARCH_GAP_MULTIPLE = 4; // mirrors the Range Compression Detector's own default, for consistency
+
+/**
+ * The maximum FYERS date-range span for one request, verified against
+ * FYERS's own reported limits (see file header). 366 days for daily,
+ * 100 days for every intraday resolution.
+ */
+function maxResearchWindowDays(timeframe) {
+  return timeframe === 'D' ? 366 : 100;
+}
+
+/**
+ * Computes one non-overlapping [rangeFrom, rangeTo] chunk window ending
+ * exactly at `rangeToAnchor`, sized to the verified per-request maximum
+ * for `timeframe`. Pure — exported for direct testing of the day-count
+ * boundary independent of any network mocking.
+ *
+ * @param {string} timeframe - a RESOLUTION_MAP key
+ * @param {Date} rangeToAnchor
+ * @returns {{rangeFrom: Date, rangeTo: Date, maxDays: number}}
+ */
+export function computeResearchChunkWindow(timeframe, rangeToAnchor) {
+  const maxDays = maxResearchWindowDays(timeframe);
+  const rangeTo = new Date(rangeToAnchor.getTime());
+  const rangeFrom = new Date(rangeTo.getTime() - maxDays * 24 * 60 * 60 * 1000);
+  return { rangeFrom, rangeTo, maxDays };
+}
+
+/**
+ * Merges multiple chunks of FYERS's raw [time,open,high,low,close,volume]
+ * row arrays into ONE DannyTrade-shaped candle array: deduped by time
+ * (first-seen chunk wins on a collision), sorted strictly ascending.
+ * Pure — no network, no state. The chunk ARRAY's own order does not
+ * matter to the output (see tests/worker-research-candles.test.js
+ * section 4 for the out-of-order-input proof).
+ *
+ * @param {Array<Array<Array<number>>>} chunks - one raw-rows array per chunk
+ * @returns {Array<{time,open,high,low,close,volume}>}
+ */
+export function mergeAndDedupeCandles(chunks) {
+  const byTime = new Map();
+  for (const chunkRows of chunks) {
+    if (!Array.isArray(chunkRows)) continue;
+    for (const row of chunkRows) {
+      const time = row[0];
+      if (!byTime.has(time)) {
+        byTime.set(time, {
+          time,
+          open: row[1], high: row[2], low: row[3], close: row[4],
+          volume: row.length > 5 ? row[5] : null
+        });
+      }
+    }
+  }
+  return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+}
+
+/**
+ * Diagnostic-only gap detection over an already-merged, ascending
+ * candle array — mirrors assets/js/lab/range-compression-detector.js's
+ * own median-inter-candle-delta approach (reimplemented here, not
+ * shared, since this runs in the Worker runtime, not the browser) for
+ * consistency across the Lab. NEVER blocks or alters the candle set —
+ * see file header "HONESTY GUARANTEES".
+ *
+ * @param {Array<{time:number}>} candles - ascending, already deduped
+ * @param {number} gapMultiple
+ * @returns {{detected:boolean, count:number, largestGapSeconds:number|null, typicalStepSeconds:number|null}}
+ */
+export function detectResearchGaps(candles, gapMultiple) {
+  if (!Array.isArray(candles) || candles.length < 3) {
+    return { detected: false, count: 0, largestGapSeconds: null, typicalStepSeconds: null };
+  }
+  const deltas = [];
+  for (let i = 1; i < candles.length; i++) deltas.push(candles[i].time - candles[i - 1].time);
+  const sorted = deltas.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  if (!(median > 0)) return { detected: false, count: 0, largestGapSeconds: null, typicalStepSeconds: median };
+  const flagged = deltas.filter(d => d > median * gapMultiple);
+  const largest = deltas.reduce((m, d) => Math.max(m, d), 0);
+  return {
+    detected: flagged.length > 0,
+    count: flagged.length,
+    largestGapSeconds: flagged.length > 0 ? largest : null,
+    typicalStepSeconds: median
+  };
+}
+
+/**
+ * Fetches ONE chunk from FYERS. Returns a uniform, discriminable
+ * result shape so the caller never has to inspect HTTP status codes
+ * itself: { ok:true, rows:[...] } | { ok:false, status, error }.
+ * Not exported — an internal detail of the chunking loop, unlike the
+ * pure helpers above which are independently useful/testable.
+ */
+async function fetchOneResearchChunk(symbol, resolution, rangeFrom, rangeTo, accessToken, env) {
+  const historyUrl = new URL(FYERS_HISTORY_URL);
+  historyUrl.searchParams.set('symbol', symbol);
+  historyUrl.searchParams.set('resolution', resolution);
+  historyUrl.searchParams.set('date_format', '1');
+  historyUrl.searchParams.set('range_from', ymd(rangeFrom));
+  historyUrl.searchParams.set('range_to', ymd(rangeTo));
+  historyUrl.searchParams.set('cont_flag', '1');
+
+  let fyersRes;
+  try {
+    fyersRes = await fetch(historyUrl.toString(), {
+      headers: { Authorization: `${env.FYERS_APP_ID}:${accessToken}` }
+    });
+  } catch {
+    return { ok: false, status: 502, error: 'Could not reach FYERS to fetch historical data. Please try again shortly.' };
+  }
+
+  if (fyersRes.status === 401 || fyersRes.status === 403) {
+    return { ok: false, status: fyersRes.status, error: 'FYERS rejected the stored access token (expired or invalid). Visit /api/fyers/login to reconnect — this project does not auto-refresh tokens (Decision B).' };
+  }
+  if (fyersRes.status === 429) {
+    return { ok: false, status: 429, error: 'FYERS rate limit reached. Please try again shortly.' };
+  }
+
+  let fyersJson = null;
+  try { fyersJson = await fyersRes.json(); } catch { fyersJson = null; }
+
+  if (!fyersRes.ok || !fyersJson || fyersJson.s !== 'ok' || !Array.isArray(fyersJson.candles)) {
+    const detail = (fyersJson && fyersJson.message) ? fyersJson.message : `HTTP ${fyersRes.status}`;
+    return { ok: false, status: 502, error: `FYERS historical data request failed: ${detail}` };
+  }
+
+  return { ok: true, rows: fyersJson.candles };
+}
+
+/* ---------------------------------------------------------------
+   POST /api/fyers/research-candles
+   Body: { symbol: '<already FYERS-formatted symbol>',
+           timeframe: one of '1m'|'3m'|'5m'|'15m'|'30m'|'1H'|'4H'|'D',
+           requestedCount: number }
+
+   Same symbol/timeframe contract as handleFyersCandles() (Decision C:
+   mapping is the caller's job) — requestedCount replaces `limit` to
+   make this route's distinct purpose explicit at the call site.
+
+   Returns { ok:true, candles:[...], requested, returned, satisfied,
+             partial, partialReason?, chunksFetched, maxChunksReached,
+             requestedCountClamped, gaps:{...} } or { ok:false, error }.
+--------------------------------------------------------------- */
+export async function handleFyersResearchCandles(request, env) {
+  if (request.method !== 'POST') {
+    return jsonEnvelope({ ok: false, error: 'Method not allowed.' }, 405);
+  }
+  if (!env.FYERS_TOKENS) {
+    return jsonEnvelope({ ok: false, error: 'FYERS_TOKENS KV namespace is not bound on this Worker — check wrangler.toml.' }, 500);
+  }
+  if (!env.FYERS_APP_ID) {
+    return jsonEnvelope({ ok: false, error: 'FYERS is not configured on this Worker (missing FYERS_APP_ID).' }, 500);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonEnvelope({ ok: false, error: 'Request body must be valid JSON.' }, 400);
+  }
+
+  const symbol = body && body.symbol;
+  const timeframe = body && body.timeframe;
+  const rawRequestedCount = body && body.requestedCount;
+
+  if (!symbol || typeof symbol !== 'string') {
+    return jsonEnvelope({ ok: false, error: 'Missing or invalid "symbol".' }, 400);
+  }
+  const resolution = RESOLUTION_MAP[timeframe];
+  if (!resolution) {
+    return jsonEnvelope({
+      ok: false,
+      error: `Timeframe "${timeframe}" is not supported by FYERS historical data yet (only 1m/3m/5m/15m/30m/1H/4H/D).`
+    }, 400);
+  }
+  if (!Number.isFinite(rawRequestedCount) || rawRequestedCount <= 0) {
+    return jsonEnvelope({ ok: false, error: 'Missing or invalid "requestedCount" — must be a positive number.' }, 400);
+  }
+
+  const requestedCountClamped = rawRequestedCount > RESEARCH_MAX_REQUESTED_COUNT;
+  const requested = Math.min(Math.floor(rawRequestedCount), RESEARCH_MAX_REQUESTED_COUNT);
+
+  const accessToken = await getStoredAccessToken(env);
+  if (!accessToken) {
+    return jsonEnvelope({ ok: false, error: 'Not authenticated with FYERS. Visit /api/fyers/login to connect your account.' }, 401);
+  }
+
+  const chunksRaw = [];
+  let chunksFetched = 0;
+  let maxChunksReached = false;
+  let partial = false;
+  let partialReason = null;
+  let rangeToAnchor = new Date();
+
+  for (let i = 0; i < RESEARCH_MAX_CHUNKS_PER_REQUEST; i++) {
+    const { rangeFrom, rangeTo } = computeResearchChunkWindow(timeframe, rangeToAnchor);
+    const chunkResult = await fetchOneResearchChunk(symbol, resolution, rangeFrom, rangeTo, accessToken, env);
+
+    if (!chunkResult.ok) {
+      if (chunksFetched === 0) {
+        // Nothing collected yet — this IS a real failure, not a
+        // partial. Mirrors handleFyersCandles()'s own error envelopes.
+        return jsonEnvelope({ ok: false, error: chunkResult.error }, chunkResult.status);
+      }
+      partial = true;
+      partialReason = chunkResult.error;
+      break;
+    }
+
+    chunksFetched++;
+    if (chunkResult.rows.length === 0) {
+      // FYERS has no more history further back for this symbol — the
+      // true edge of available data, not an error.
+      break;
+    }
+    chunksRaw.push(chunkResult.rows);
+
+    if (mergeAndDedupeCandles(chunksRaw).length >= requested) break; // satisfied
+
+    rangeToAnchor = new Date(rangeFrom.getTime() - 24 * 60 * 60 * 1000); // step further back, non-overlapping
+    if (i === RESEARCH_MAX_CHUNKS_PER_REQUEST - 1) maxChunksReached = true;
+  }
+
+  const merged = mergeAndDedupeCandles(chunksRaw);
+  const trimmed = merged.length > requested ? merged.slice(merged.length - requested) : merged;
+  const gaps = detectResearchGaps(trimmed, RESEARCH_GAP_MULTIPLE);
+
+  return jsonEnvelope({
+    ok: true,
+    candles: trimmed,
+    requested,
+    returned: trimmed.length,
+    satisfied: trimmed.length >= requested,
+    partial,
+    partialReason: partial ? partialReason : undefined,
+    chunksFetched,
+    maxChunksReached,
+    requestedCountClamped,
+    gaps
+  }, 200);
+}
+
+/* =====================================================================
    Option Chain — Pre-Close Options Intelligence, live FYERS integration.
 
    ⚠ ENDPOINT NOT CONFIRMED — TWO CONFLICTING SOURCES FOUND DURING AUDIT.

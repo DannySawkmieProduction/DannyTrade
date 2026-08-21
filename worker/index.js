@@ -35,7 +35,7 @@
    Nothing here touches the UI, studio.js, studio.html or style.css.
 ===================================================================== */
 
-import { handleFyersLogin, handleFyersCallback, handleFyersCandles, handleFyersOptionChain, handleFyersContracts } from './fyers.js';
+import { handleFyersLogin, handleFyersCallback, handleFyersCandles, handleFyersResearchCandles, handleFyersOptionChain, handleFyersContracts } from './fyers.js';
 import { handleOpenRouterAnalyze } from './openrouter.js';
 import { fetchWithRetry } from './http-utils.js';
 
@@ -178,6 +178,19 @@ export default {
           return new Response(null, { status: 204, headers: CORS_HEADERS });
         }
         return await handleFyersCandles(request, env);
+      }
+      // Phase D — Strategy/Indicator Lab research data path. A
+      // deliberately SEPARATE route from /api/fyers/candles above
+      // (never called by it, never calls into it) so the live
+      // 180-candle pipeline's route is provably untouched — see
+      // worker/fyers.js's own header on handleFyersResearchCandles for
+      // the full rationale. Never invoked automatically; only ever
+      // called explicitly by assets/js/lab/research-data-service.js.
+      if (url.pathname === '/api/fyers/research-candles') {
+        if (request.method === 'OPTIONS') {
+          return new Response(null, { status: 204, headers: CORS_HEADERS });
+        }
+        return await handleFyersResearchCandles(request, env);
       }
       if (url.pathname === '/api/fyers/optionchain') {
         if (request.method === 'OPTIONS') {
