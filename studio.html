@@ -146,9 +146,12 @@
     <!-- Strategy / Indicator Lab. Deliberately OUTSIDE .chart-studio-body,
          and therefore outside #aiDecisionPanel: an indicator reading and a
          trade decision must never share a frame. Empty until
-         assets/js/lab/volatility-card.js mounts into it; if that script
+         assets/js/lab/strategy-lab.js mounts into it; if that script
          fails to load the section simply stays empty rather than showing a
-         half-rendered readout. Today it holds exactly one indicator. -->
+         half-rendered readout. Strategy Lab is the single owner of this
+         container — it renders a tab bar and, below it, exactly one of
+         four module cards (Volatility Sizing, Range Compression, Outcome
+         Tracker, Research Data) at a time. -->
     <section id="indicatorLab" class="indicator-lab" aria-label="Indicator Lab">
       <div id="indicatorLabPanel"></div>
     </section>
@@ -332,8 +335,25 @@
      assets/js/lab/ reads either of them, and nothing in either of them
      reads assets/js/lab/. If both files below were deleted, every
      existing behaviour on this page would be unchanged. -->
+<!-- Strategy / Indicator Lab. Loads AFTER candle-utils.js (the only
+     dependency the pure data modules have) and before studio-bootstrap.js,
+     which mounts strategy-lab.js (never any single card directly — see
+     studio-bootstrap.js's own header). Order below: every pure data
+     module first, then its own UI card, then the controller last (it
+     needs all four cards already registered). None of this is wired
+     into the live 180-candle pipeline, the Risk Engine, AI, or the
+     Decision Panel — deleting every file below would leave the rest of
+     this page's behavior completely unchanged. -->
 <script defer src="assets/js/lab/volatility-sizing-unit.js"></script>
 <script defer src="assets/js/lab/volatility-card.js"></script>
+<script defer src="assets/js/lab/range-compression-detector.js"></script>
+<script defer src="assets/js/lab/range-compression-card.js"></script>
+<script defer src="assets/js/lab/outcome-store.js"></script>
+<script defer src="assets/js/lab/outcome-resolver.js"></script>
+<script defer src="assets/js/lab/outcome-tracker-card.js"></script>
+<script defer src="assets/js/lab/research-data-service.js"></script>
+<script defer src="assets/js/lab/research-data-card.js"></script>
+<script defer src="assets/js/lab/strategy-lab.js"></script>
 <script defer src="assets/js/preclose/option-chain-provider.js"></script>
 <script defer src="assets/js/preclose/preclose-evidence-model.js"></script>
 <script defer src="assets/js/preclose/preclose-decision-engine.js"></script>
