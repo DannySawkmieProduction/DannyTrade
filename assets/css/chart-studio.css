@@ -443,3 +443,74 @@
   .research-field{flex:1 1 45%;}
   .research-fetch-btn{flex:1 1 100%;}
 }
+
+/* ---------- Market Navigator ----------
+   A deliberately DIFFERENT visual language from both the AI Decision
+   Panel (verdict/confidence grammar) and the Strategy Lab cards
+   (instrument-readout grammar). This one reads like a short written
+   briefing: a headline verdict, prose, then collapsed detail. Neutral
+   verdict colours only — the Navigator interprets, it never instructs,
+   so it must not borrow the decision panel's mint/red action palette. */
+.market-navigator{margin-top:20px;}
+.nav-card{
+  background:var(--bg-elev);border:1px solid var(--border);border-radius:14px;
+  padding:18px;position:relative;overflow:hidden;
+}
+.nav-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+.nav-eyebrow{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--gold);display:block;
+}
+.nav-badge{
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--text-faint);border:1px solid var(--border);border-radius:5px;
+  padding:2px 7px;margin-top:5px;display:inline-block;
+}
+.nav-context{
+  font-family:var(--font-mono);font-size:11px;color:var(--text-faint);
+  padding:10px 0;border-bottom:1px solid var(--border-soft);margin-bottom:4px;
+}
+.nav-block{padding:12px 0;border-bottom:1px solid var(--border-soft);}
+.nav-block-head{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--text-faint);margin-bottom:6px;
+}
+.nav-p{font-size:13.5px;line-height:1.65;color:var(--text);margin:0 0 6px;}
+.nav-p:last-child{margin-bottom:0;}
+.nav-verdict{
+  display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  padding:12px 14px;margin:12px 0 8px;border-radius:10px;
+  border:1px solid var(--border);background:var(--bg-elev-2);
+}
+.nav-verdict-label{
+  font-family:var(--font-mono);font-size:19px;font-weight:700;letter-spacing:.04em;color:var(--text);
+}
+.nav-verdict.is-unclear .nav-verdict-label{color:var(--text-dim);font-size:16px;}
+.nav-verdict-evidence{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);}
+.nav-path{margin:4px 0 0 18px;padding:0;}
+.nav-path li{font-size:13px;line-height:1.7;color:var(--text);}
+.nav-list{list-style:none;margin:0;padding:0;}
+.nav-list li{
+  font-size:12.5px;line-height:1.6;color:var(--text-dim);
+  padding:5px 0 5px 10px;border-left:2px solid var(--border);margin-bottom:4px;
+}
+.nav-why{list-style:none;margin:0;padding:0;}
+.nav-why li{font-size:12.5px;line-height:1.6;color:var(--text-dim);padding:4px 0;display:flex;gap:8px;}
+.nav-mark{font-family:var(--font-mono);color:var(--text-faint);flex-shrink:0;width:12px;}
+.nav-q{font-family:var(--font-mono);font-size:10px;color:var(--text-faint);}
+.nav-section{border-bottom:1px solid var(--border-soft);}
+.nav-section summary{
+  font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--text-dim);cursor:pointer;padding:11px 0;list-style:none;
+}
+.nav-section summary::-webkit-details-marker{display:none;}
+.nav-section summary::before{content:"▸ ";color:var(--text-faint);}
+.nav-section[open] summary::before{content:"▾ ";}
+.nav-section summary:hover{color:var(--text);}
+.nav-section-body{padding:0 0 12px;}
+.nav-footnote{font-size:11px;color:var(--text-faint);line-height:1.6;margin-top:14px;}
+@media(max-width:560px){
+  .nav-card{padding:15px;}
+  .nav-p{font-size:13px;}
+  .nav-verdict-label{font-size:17px;}
+}
