@@ -456,6 +456,95 @@
       stratLabError = '#indicatorLabPanel does not exist in this page at all — the deployed studio.html may be an older version (see Container: MISSING below).';
     }
 
+    // ---- MARKET NAVIGATOR diagnostics (spec K) ----
+    // Deep inspection deliberately kept OUT of the Navigator's own UI.
+    // Read-only: re-runs the real Navigator stack against the same
+    // candles the chart already holds, so what is shown here is what
+    // the Navigator actually computed — not a second implementation.
+    var navBlock = (function(){
+      var NV = window.DannyChart.Navigator;
+      if(!NV || !NV.EvidenceRegistry || !NV.NavigatorEngine){
+        return '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Market Navigator</b></div>' +
+               '<div style="margin-top:2px;color:#FF5C6C">Navigator modules: MISSING</div>';
+      }
+      var head = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Market Navigator</b></div>';
+      var candles = state.lastCandles || [];
+      if(!candles.length){
+        return head + '<div style="margin-top:2px;color:#8D93A6">No candles loaded — nothing to interpret yet.</div>';
+      }
+      try{
+        var Analysis = window.DannyChart.Analysis || {};
+        var ac = (Analysis.AnalysisEngine && Analysis.AnalysisEngine.analyze) ? Analysis.AnalysisEngine.analyze(candles, { symbol: state.symbol || 'UNKNOWN' }) : null;
+        if(ac && ac.data && ac.data.marketStructure) ac = ac.data;
+        var L = window.DannyChart.Lab || {};
+        var lab = {};
+        try{ if(L.VolatilitySizingUnit) lab.volatility = L.VolatilitySizingUnit.analyze(candles, {}); } catch(_e){}
+        try{ if(L.RangeCompressionDetector) lab.rangeCompression = L.RangeCompressionDetector.detect(candles, {}); } catch(_e){}
+        try{ if(L.ValueAreaDetector) lab.valueArea = L.ValueAreaDetector.detect(candles, {}); } catch(_e){}
+
+        var deltas = [];
+        for(var di = 1; di < candles.length; di++) deltas.push(candles[di].time - candles[di - 1].time);
+        var ds = deltas.slice().sort(function(a, b){ return a - b; });
+        var dur = ds.length ? ds[Math.floor(ds.length / 2)] : null;
+        var atrV = (lab.volatility && lab.volatility.data && lab.volatility.data.current && lab.volatility.data.current.atr) || null;
+        var price = candles[candles.length - 1].close;
+
+        var reg = NV.EvidenceRegistry.create();
+        var collected = reg.collect({ candles: candles, currentPrice: price, analysisContext: ac, lab: lab, candleDuration: dur, atr: atrV });
+        var res = NV.NavigatorEngine.analyze({ evidence: collected.evidence, currentPrice: price, atr: atrV, candleDuration: dur, candleCount: candles.length, symbol: state.symbol });
+
+        var rows = '';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Contributors: ' + collected.contributorCount +
+                ' &nbsp;|&nbsp; evidence: ' + collected.evidence.length +
+                ' &nbsp;|&nbsp; rejected: ' + collected.rejected.length +
+                ' &nbsp;|&nbsp; failed: ' + collected.failed.length + '</div>';
+        if(collected.rejected.length){
+          rows += '<div style="margin-top:2px;color:#FF5C6C">Rejected: ' + escapeHtml(collected.rejected.map(function(r){ return r.id + ' (' + r.reason + ')'; }).join('; ')) + '</div>';
+        }
+        if(collected.failed.length){
+          rows += '<div style="margin-top:2px;color:#FF5C6C">Failed: ' + escapeHtml(collected.failed.map(function(f){ return f.contributor + ' (' + f.error + ')'; }).join('; ')) + '</div>';
+        }
+        rows += '<div style="margin-top:4px;color:#8D93A6">Scenario: <b>' + escapeHtml(res.scenario) + '</b>' +
+                ' &nbsp;|&nbsp; bias: ' + escapeHtml(String(res.bias.direction)) +
+                ' &nbsp;|&nbsp; conviction: ' + escapeHtml(String(res.bias.conviction)) + '</div>';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Weights — bullish ' + res.bias.bullishWeight.toFixed(2) +
+                ', bearish ' + res.bias.bearishWeight.toFixed(2) +
+                ', neutral ' + res.bias.neutralWeight.toFixed(2) +
+                ', margin ' + res.bias.margin.toFixed(2) + '</div>';
+        if(res.noClearPath.triggered){
+          rows += '<div style="margin-top:2px;color:#FFA53C">NO_CLEAR_PATH triggers: ' +
+                  escapeHtml(res.noClearPath.triggers.map(function(t){ return t.code; }).join(', ')) + '</div>';
+        }
+        if(res.conflicts.length){
+          rows += '<div style="margin-top:2px;color:#FFA53C">Conflicts: ' + escapeHtml(res.conflicts.map(function(c){ return c.code; }).join(', ')) + '</div>';
+        }
+        rows += '<div style="margin-top:2px;color:#8D93A6">Next event: ' + escapeHtml(String(res.nextEvent.type)) +
+                (res.nextEvent.level !== null ? ' @ ' + res.nextEvent.level : '') + '</div>';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Trap: ' + escapeHtml(res.trap.state) +
+                (res.trap.type ? ' (' + escapeHtml(res.trap.type) + ')' : '') +
+                (res.trap.level !== null ? ' @ ' + res.trap.level : '') + '</div>';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Timing: ' + escapeHtml(res.timing.bucket) +
+                (res.timing.candlesEstimate !== null ? ' (~' + res.timing.candlesEstimate.toFixed(1) + ' candles)' : '') + '</div>';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Targets: ' +
+                (res.targets.all.length ? escapeHtml(res.targets.all.map(function(t){ return t.classification + ' ' + t.price + ' [' + t.source + ']'; }).join(' · ')) : 'NO_CLEAR_OBJECTIVE') + '</div>';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Confirmation: ' + (res.confirmation ? res.confirmation.level + ' [' + escapeHtml(res.confirmation.source) + ']' : '—') +
+                ' &nbsp;|&nbsp; Invalidation: ' + (res.invalidation ? res.invalidation.level + ' [' + escapeHtml(res.invalidation.source) + ']' : '—') + '</div>';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Alternative: ' + (res.alternative ? escapeHtml(res.alternative.scenario) + ' (weight ' + res.alternative.weight.toFixed(2) + ')' : 'none') + '</div>';
+        rows += '<div style="margin-top:2px;color:#8D93A6">Data quality: ' + escapeHtml(res.dataQuality.overall) + '</div>';
+        res.dataQuality.limitations.forEach(function(l){
+          rows += '<div style="margin-top:1px;color:#565C70">· ' + escapeHtml(l) + '</div>';
+        });
+        rows += '<div style="margin-top:6px;color:#565C70">Evidence (id · tier · dir · strength · quality):</div>';
+        collected.evidence.forEach(function(e){
+          rows += '<div style="margin-top:1px;color:#565C70">' + escapeHtml(e.id) + ' · T' + e.tier + ' · ' +
+                  escapeHtml(String(e.direction)) + ' · ' + escapeHtml(e.strength) + ' · ' + escapeHtml(e.quality) + '</div>';
+        });
+        return head + rows;
+      } catch(navDiagErr){
+        return head + '<div style="margin-top:2px;color:#FF5C6C">Navigator diagnostics failed: ' + escapeHtml(navDiagErr && navDiagErr.message ? navDiagErr.message : String(navDiagErr)) + '</div>';
+      }
+    })();
+
     var stratLabBlock =
       '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Strategy Lab Runtime</b></div>' +
       LAB_MODULE_NAMES.reduce(function(acc, name){
@@ -924,6 +1013,7 @@
       '<div style="color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
       stratLabBlock +
       volumeBlock +
+      navBlock +
       // Phase 6 OpenRouter verification — placed FIRST (immediately under
       // the status line) so it is visible without scrolling on a phone.
       aiRiskBlock +

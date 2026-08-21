@@ -645,6 +645,46 @@
       } catch(labErr){
         console.warn('[StudioBootstrap] Strategy Lab mount failed (Indicator Lab will stay empty):', labErr && labErr.message);
       }
+
+      // Market Navigator — a SEPARATE, dedicated interpretation UI. Not
+      // a Strategy Lab tab, not part of the AI Decision Panel, and it
+      // never consumes AI output: the card computes its own
+      // deterministic Analysis Context from the candles rather than
+      // reading the chart's AI-derived structured analysis.
+      //
+      // Same read-only contract as Strategy Lab above — getCandles and
+      // getSymbol only, no chart-mutating method is ever handed over —
+      // and the same 'timeframeChanged' subscription on the renderer's
+      // own existing event bus.
+      //
+      // Its own try/catch, placed after the Strategy Lab block, so a
+      // Navigator failure can never prevent Strategy Lab, the
+      // timeframeError listener, or the rest of chart boot.
+      try{
+        var Navigator = DC.Navigator && DC.Navigator.MarketNavigatorCard;
+        var navigatorPanel = document.getElementById('marketNavigatorPanel');
+        if(Navigator && typeof Navigator.mount === 'function' && navigatorPanel){
+          var navigatorHandle = Navigator.mount({
+            container: navigatorPanel,
+            getCandles: function(){
+              var st = orchestrator.getState();
+              return st ? st.lastCandles : [];
+            },
+            getSymbol: function(){
+              var st = orchestrator.getState();
+              return st ? st.symbol : null;
+            }
+          });
+          if(s && s.renderer && typeof s.renderer.on === 'function'){
+            s.renderer.on('timeframeChanged', function(){
+              try{ navigatorHandle.refresh(); }
+              catch(navRefreshErr){ console.warn('[StudioBootstrap] Market Navigator refresh failed:', navRefreshErr && navRefreshErr.message); }
+            });
+          }
+        }
+      } catch(navErr){
+        console.warn('[StudioBootstrap] Market Navigator mount failed (the Navigator section will stay empty):', navErr && navErr.message);
+      }
     });
   }
 
