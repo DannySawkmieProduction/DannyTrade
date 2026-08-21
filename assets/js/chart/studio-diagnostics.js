@@ -304,6 +304,106 @@
     var providerName = (window.AIService && typeof window.AIService.getProviderName === 'function')
       ? window.AIService.getProviderName() : 'unknown';
 
+    // ---- Strategy Lab Runtime section ----
+    // Read-only, same discipline as every other section in this file:
+    // nothing here is estimated or assumed — every value comes directly
+    // from window.DannyChart.Lab.* (does the module exist at all?), the
+    // real DOM (#indicatorLab / #indicatorLabPanel — does the container
+    // exist, and what did whatever mounted into it actually render?),
+    // and the SAME state object every other section already reads
+    // (state.lastCandles / state.symbol — no new dependency).
+    //
+    // "Strategy Lab script" and "StrategyLab global" are deliberately
+    // the SAME underlying check, shown as two lines to match exactly
+    // what was asked for. They can't be meaningfully distinguished from
+    // inside the JS runtime: whether the <script> tag is missing from a
+    // stale deployment, 404s, or throws on execution, the observable
+    // result is identical from here — window.DannyChart.Lab.StrategyLab
+    // does not exist. Telling those apart requires View Source or the
+    // Network tab, which is why the report accompanying this feature
+    // says so explicitly rather than pretending Diag can see further
+    // than it actually can.
+    var Lab = (window.DannyChart && window.DannyChart.Lab) || {};
+    var LAB_MODULE_NAMES = [
+      'VolatilitySizingUnit', 'VolatilityCard', 'RangeCompressionDetector',
+      'OutcomeStore', 'OutcomeResolver', 'ResearchDataService',
+      'RangeCompressionCard', 'OutcomeTrackerCard', 'ResearchDataCard'
+    ];
+    var stratLabGlobalPresent = !!Lab.StrategyLab;
+
+    var indicatorLabEl = document.getElementById('indicatorLab');
+    var indicatorLabPanelEl = document.getElementById('indicatorLabPanel');
+
+    function elDiag(el){
+      if(!el) return { present: false, children: '—', display: '—', visibility: '—', height: '—' };
+      var cs = (typeof window.getComputedStyle === 'function') ? window.getComputedStyle(el) : null;
+      return {
+        present: true,
+        children: el.children ? el.children.length : 0,
+        display: cs ? cs.display : '(getComputedStyle unavailable)',
+        visibility: cs ? cs.visibility : '(getComputedStyle unavailable)',
+        height: cs ? cs.height : '(getComputedStyle unavailable)'
+      };
+    }
+    var labSectionDiag = elDiag(indicatorLabEl);
+    var labPanelDiag = elDiag(indicatorLabPanelEl);
+
+    // Mount state and active tab are read back from what actually
+    // rendered — the SAME markup the person on the phone is looking
+    // at, not a second, possibly-out-of-sync source of truth.
+    var labPanelHtml = indicatorLabPanelEl ? (indicatorLabPanelEl.innerHTML || '') : '';
+    var stratLabMounted = !!indicatorLabPanelEl && (labPanelHtml.indexOf('strategy-lab') !== -1 || labPanelHtml.indexOf('vol-title') !== -1);
+    var stratLabActiveModule = '—';
+    var titleMatch = labPanelHtml.match(/vol-title">([^<]*)</);
+    if(titleMatch) stratLabActiveModule = titleMatch[1];
+
+    var stratLabError = 'NONE';
+    if(!stratLabGlobalPresent){
+      stratLabError = 'strategy-lab.js did not register — see LOADED/MISSING above, then check View Source for the <script> tag and the browser console/Network tab for a 404 or syntax error.';
+    } else if(indicatorLabPanelEl && !stratLabMounted){
+      stratLabError = 'StrategyLab loaded but #indicatorLabPanel is empty — check the browser console for "[StudioBootstrap] Strategy Lab mount failed".';
+    } else if(!indicatorLabPanelEl){
+      stratLabError = '#indicatorLabPanel does not exist in this page at all — the deployed studio.html may be an older version (see Container: MISSING below).';
+    }
+
+    var stratLabBlock =
+      '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Strategy Lab Runtime</b></div>' +
+      LAB_MODULE_NAMES.reduce(function(acc, name){
+        var loaded = !!Lab[name];
+        return acc + '<div style="margin-top:2px;color:' + (loaded ? '#8D93A6' : '#FF5C6C') + '">' + name + ': ' + (loaded ? 'LOADED' : 'MISSING') + '</div>';
+      }, '<div style="margin-top:2px;color:' + (stratLabGlobalPresent ? '#8D93A6' : '#FF5C6C') + '">Strategy Lab script: ' + (stratLabGlobalPresent ? 'LOADED' : 'MISSING') + '</div>' +
+         '<div style="margin-top:2px;color:' + (stratLabGlobalPresent ? '#8D93A6' : '#FF5C6C') + '">StrategyLab global: ' + (stratLabGlobalPresent ? 'PRESENT' : 'MISSING') + '</div>') +
+      '<div style="margin-top:4px;color:#8D93A6">Container (#indicatorLabPanel): ' + (labPanelDiag.present ? 'PRESENT' : 'MISSING') +
+        ' &nbsp;|&nbsp; children: ' + labPanelDiag.children + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">#indicatorLab: ' + (labSectionDiag.present ? 'PRESENT' : 'MISSING') +
+        ' &nbsp;|&nbsp; children: ' + labSectionDiag.children +
+        ' &nbsp;|&nbsp; display: ' + escapeHtml(labSectionDiag.display) +
+        ' &nbsp;|&nbsp; visibility: ' + escapeHtml(labSectionDiag.visibility) +
+        ' &nbsp;|&nbsp; height: ' + escapeHtml(labSectionDiag.height) + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">#indicatorLabPanel: ' + (labPanelDiag.present ? 'PRESENT' : 'MISSING') +
+        ' &nbsp;|&nbsp; display: ' + escapeHtml(labPanelDiag.display) +
+        ' &nbsp;|&nbsp; visibility: ' + escapeHtml(labPanelDiag.visibility) +
+        ' &nbsp;|&nbsp; height: ' + escapeHtml(labPanelDiag.height) + '</div>' +
+      '<div style="margin-top:4px;color:' + (stratLabMounted ? '#35D399' : '#FFA53C') + '">Strategy Lab: ' + (stratLabMounted ? 'MOUNTED' : 'NOT MOUNTED') + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Active module: ' + escapeHtml(stratLabActiveModule) + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Candles: ' + (state.lastCandles ? state.lastCandles.length : 0) +
+        ' &nbsp;|&nbsp; Symbol: ' + escapeHtml(state.symbol || '—') +
+        ' &nbsp;|&nbsp; Timeframe: ' + (state.timeframe ? escapeHtml(state.timeframe) : '— (not exposed by the chart\'s own state object)') + '</div>' +
+      '<div style="margin-top:2px;color:' + (stratLabError === 'NONE' ? '#8D93A6' : '#FF5C6C') + '">Error: ' + escapeHtml(stratLabError) + '</div>' +
+      '<div style="margin-top:6px;color:#565C70">Script order (as found in the DOM, first to last):<br>' +
+        (function(){
+          if(typeof document.querySelectorAll !== 'function') return '(not available in this environment)';
+          var scripts = document.querySelectorAll('script[src*="assets/js/lab/"], script[src*="studio-bootstrap.js"]');
+          if(!scripts || scripts.length === 0) return '(no matching &lt;script&gt; tags found)';
+          var names = [];
+          for(var i = 0; i < scripts.length; i++){
+            var src = scripts[i].getAttribute ? scripts[i].getAttribute('src') : scripts[i].src;
+            names.push(escapeHtml(String(src || '').split('/').pop()));
+          }
+          return names.join(' &rarr; ');
+        })() +
+      '</div>';
+
     // Phase 6 — per-drawable geometry, read straight from chart-renderer.js's
     // getDrawableDiagnostics() (populated every paint by the SAME code that
     // draws the chart — see chart-renderer.js's recordDiag()). Every value
@@ -675,6 +775,7 @@
       '</div>' +
       '<div style="padding:10px 12px 16px">' +
       '<div style="color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
+      stratLabBlock +
       // Phase 6 OpenRouter verification — placed FIRST (immediately under
       // the status line) so it is visible without scrolling on a phone.
       aiRiskBlock +
