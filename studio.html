@@ -143,6 +143,17 @@
       <aside class="ai-decision-panel" id="aiDecisionPanel"></aside>
     </div>
 
+    <!-- Market Navigator — LOCKED mobile order: chart, then Navigator,
+         then Strategy Lab, then the AI Decision Panel. Deliberately
+         OUTSIDE .chart-studio-body (and therefore outside the AI
+         decision aside): the Navigator is a deterministic
+         interpretation layer and must never share a frame with, or be
+         mistaken for, the AI verdict. Empty until
+         assets/js/navigator/market-navigator-card.js mounts into it. -->
+    <section id="marketNavigator" class="market-navigator" aria-label="Market Navigator">
+      <div id="marketNavigatorPanel"></div>
+    </section>
+
     <!-- Strategy / Indicator Lab. Deliberately OUTSIDE .chart-studio-body,
          and therefore outside #aiDecisionPanel: an indicator reading and a
          trade decision must never share a frame. Empty until
@@ -356,6 +367,14 @@
 <script defer src="assets/js/lab/value-area-detector.js"></script>
 <script defer src="assets/js/lab/value-area-card.js"></script>
 <script defer src="assets/js/lab/strategy-lab.js"></script>
+<!-- Market Navigator. Loads AFTER the analysis engines and Lab detectors
+     (whose outputs its evidence contributors read) and before
+     studio-bootstrap.js, which mounts it. Order within the group:
+     registry -> engine -> narrative -> card. -->
+<script defer src="assets/js/navigator/evidence-registry.js"></script>
+<script defer src="assets/js/navigator/navigator-engine.js"></script>
+<script defer src="assets/js/navigator/navigator-narrative.js"></script>
+<script defer src="assets/js/navigator/market-navigator-card.js"></script>
 <script defer src="assets/js/preclose/option-chain-provider.js"></script>
 <script defer src="assets/js/preclose/preclose-evidence-model.js"></script>
 <script defer src="assets/js/preclose/preclose-decision-engine.js"></script>
