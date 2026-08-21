@@ -304,6 +304,96 @@
     var providerName = (window.AIService && typeof window.AIService.getProviderName === 'function')
       ? window.AIService.getProviderName() : 'unknown';
 
+    // ---- VOLUME DIAGNOSTIC ----
+    // Answers: can the candle volume already in memory be trusted for a
+    // session-anchored Value Area / POC / VAH / VAL calculation?
+    //
+    // PROVENANCE FIRST, VALUES SECOND — and that ordering is the whole
+    // point. assets/js/chart/data-adapter.js registers a mock provider
+    // that fabricates volume with Math.round(rand()*50000): five-figure,
+    // per-candle-varying, completely plausible-looking, completely fake.
+    // Judging usability by whether the numbers "look real" would fail
+    // exactly here. So the active provider is resolved FIRST, and any
+    // provider that is not the real FYERS one caps the verdict at
+    // AMBIGUOUS / SYNTHETIC no matter how healthy the numbers appear.
+    //
+    // Read-only: inspects state.lastCandles (already loaded by the
+    // chart, already read by this panel) and DataAdapters.getActive().
+    // Fetches nothing, and touches no Strategy Lab / Research Data code.
+    var volCandles = Array.isArray(state.lastCandles) ? state.lastCandles : [];
+    var activeProvider = null;
+    try{
+      var DA = window.DannyChart && window.DannyChart.DataAdapters;
+      activeProvider = (DA && typeof DA.getActive === 'function') ? DA.getActive() : null;
+    } catch(_e){ activeProvider = null; }
+
+    var providerId = (activeProvider && activeProvider.id) ? String(activeProvider.id) : null;
+    var providerLabel = providerId
+      ? (providerId + (activeProvider.name ? ' (' + activeProvider.name + ')' : ''))
+      : 'unknown / unavailable';
+    var providerIsFyers = providerId === 'fyers';
+
+    var volStats = { present: 0, zero: 0, missing: 0, nonFinite: 0, positive: 0, min: null, max: null, samples: [] };
+    for(var vi = 0; vi < volCandles.length; vi++){
+      var vc = volCandles[vi] || {};
+      var hasKey = Object.prototype.hasOwnProperty.call(vc, 'volume');
+      var v = vc.volume;
+      if(!hasKey || v === null || v === undefined){ volStats.missing++; }
+      else if(typeof v !== 'number' || !isFinite(v)){ volStats.nonFinite++; }
+      else {
+        volStats.present++;
+        if(v === 0) volStats.zero++;
+        if(v > 0) volStats.positive++;
+        if(volStats.min === null || v < volStats.min) volStats.min = v;
+        if(volStats.max === null || v > volStats.max) volStats.max = v;
+      }
+      if(volStats.samples.length < 5) volStats.samples.push(hasKey ? String(v) : '(field absent)');
+    }
+    var volumeFieldPresent = volStats.present > 0 || volStats.nonFinite > 0;
+
+    // Classification. Note the ordering of these branches — a
+    // non-FYERS provider is checked BEFORE any value-based verdict, so
+    // synthetic data can never be promoted to USABLE.
+    var volClass, volReason;
+    if(volCandles.length === 0){
+      volClass = 'AMBIGUOUS / SYNTHETIC';
+      volReason = 'No candles are loaded yet, so there is nothing to inspect. No verdict can be reached.';
+    } else if(!providerIsFyers){
+      volClass = 'AMBIGUOUS / SYNTHETIC';
+      volReason = providerId
+        ? ('The active provider is "' + providerId + '", not the real FYERS feed. data-adapter.js fabricates volume for its mock provider (random values up to 50,000), and the stub providers return no real market data at all — so these numbers cannot be treated as genuine traded volume regardless of how plausible they look. Switch to the FYERS provider and re-read this section.')
+        : ('The active provider could not be resolved, so the provenance of these volume values cannot be established. Because data-adapter.js can fabricate synthetic volume, an unresolvable provider must not be treated as real market data.');
+    } else if(!volumeFieldPresent){
+      volClass = 'UNUSABLE';
+      volReason = 'The FYERS candles carry no volume field at all. A volume profile, POC, VAH and VAL are all undefined without it — the Value Area module cannot be built on this data.';
+    } else if(volStats.positive === 0){
+      volClass = 'UNUSABLE';
+      volReason = 'Every FYERS candle reports zero (or non-finite) volume — the expected result for a computed index, which has no traded volume of its own. Every profile bin would be zero, so POC, VAH and VAL would be undefined. The Value Area module cannot be built on this instrument.';
+    } else if(volStats.positive < volCandles.length * 0.5){
+      volClass = 'AMBIGUOUS / SYNTHETIC';
+      volReason = 'The FYERS candles carry volume, but fewer than half have a positive finite value (' + volStats.positive + ' of ' + volCandles.length + '). A profile built on this would be dominated by the gaps rather than the data — worth investigating before relying on it.';
+    } else {
+      volClass = 'USABLE';
+      volReason = 'The active provider is the real FYERS feed and ' + volStats.positive + ' of ' + volCandles.length + ' candles carry positive finite volume, preserved intact through the worker mapping. This is sufficient for a session-anchored volume profile (POC / VAH / VAL).';
+    }
+
+    var volumeBlock =
+      '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>VOLUME DIAGNOSTIC</b></div>' +
+      '<div style="margin-top:2px;color:' + (providerIsFyers ? '#8D93A6' : '#FFA53C') + '">Active provider: ' + escapeHtml(providerLabel) + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Symbol: ' + escapeHtml(state.symbol || '—') +
+        ' &nbsp;|&nbsp; Timeframe: ' + (state.timeframe ? escapeHtml(state.timeframe) : '— (not exposed by the chart\'s own state object)') + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Candles inspected: ' + volCandles.length + '</div>' +
+      '<div style="margin-top:2px;color:' + (volumeFieldPresent ? '#8D93A6' : '#FF5C6C') + '">Volume field present: ' + (volumeFieldPresent ? 'YES' : 'NO') + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Minimum finite volume: ' + (volStats.min === null ? '—' : volStats.min) + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Maximum finite volume: ' + (volStats.max === null ? '—' : volStats.max) + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Exactly-zero volume: ' + volStats.zero + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Missing/null volume: ' + volStats.missing + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Non-finite volume: ' + volStats.nonFinite + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6">Positive finite volume: ' + volStats.positive + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6;word-break:break-word">First 5 values: ' + escapeHtml(volStats.samples.join(', ') || '(none)') + '</div>' +
+      '<div style="margin-top:4px;color:' + (volClass === 'USABLE' ? '#35D399' : (volClass === 'UNUSABLE' ? '#FF5C6C' : '#FFA53C')) + '">Classification: ' + volClass + '</div>' +
+      '<div style="margin-top:2px;color:#8D93A6;word-break:break-word">' + escapeHtml(volReason) + '</div>';
+
     // ---- Strategy Lab Runtime section ----
     // Read-only, same discipline as every other section in this file:
     // nothing here is estimated or assumed — every value comes directly
@@ -833,6 +923,7 @@
       '<div style="padding:10px 12px 16px">' +
       '<div style="color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
       stratLabBlock +
+      volumeBlock +
       // Phase 6 OpenRouter verification — placed FIRST (immediately under
       // the status line) so it is visible without scrolling on a phone.
       aiRiskBlock +
