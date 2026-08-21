@@ -298,3 +298,94 @@
   .ai-decision-session{padding:7px 10px;gap:6px;}
   .ai-decision-session .cas-label{font-size:11px;}
 }
+
+/* ---------- Strategy / Indicator Lab — Volatility Sizing Unit ----------
+   Deliberately NOT the decision panel's visual language. The AI Decision
+   Panel uses a verdict tag, mint/red semantics, and a confidence meter —
+   the grammar of "act on this". This card uses the grammar of an
+   instrument readout instead: monospace throughout, hairline rules
+   between rows, no mint and no red anywhere, and a ticked measurement
+   rule down the left edge (the one signature element). Nothing in here
+   may ever be given a mint/red state; a volatility regime is a
+   measurement band, not a verdict, and colouring it like one is exactly
+   the confusion this card exists to avoid.
+   Uses only the tokens already defined in style.css. */
+.vol-card{
+  background:var(--bg-elev);border:1px solid var(--border);border-radius:14px;
+  padding:18px 18px 14px 22px;position:relative;overflow:hidden;
+}
+.vol-card::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:
+    repeating-linear-gradient(to bottom,var(--border) 0 6px,transparent 6px 12px);
+  opacity:.85;
+}
+.vol-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;}
+.vol-eyebrow{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--gold);display:block;
+}
+.vol-title{font-family:var(--font-display);font-size:15.5px;font-weight:600;margin-top:4px;}
+.vol-badge{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--text-dim);border:1px solid var(--border);border-radius:5px;
+  padding:3px 8px;white-space:nowrap;flex-shrink:0;
+}
+.vol-sub{color:var(--text-dim);font-size:12.5px;line-height:1.6;margin:8px 0 4px;max-width:60ch;}
+.vol-context{
+  font-family:var(--font-mono);font-size:11px;color:var(--text-faint);
+  padding:8px 0 12px;border-bottom:1px solid var(--border-soft);
+}
+.vol-zone{padding:12px 0;border-bottom:1px solid var(--border-soft);}
+.vol-zone-head{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--text-faint);margin-bottom:8px;
+}
+.vol-row{
+  display:flex;align-items:baseline;justify-content:space-between;gap:14px;
+  font-family:var(--font-mono);font-size:12.5px;padding:4px 0;
+}
+.vol-row-label{color:var(--text-dim);}
+.vol-row-value{color:var(--text);text-align:right;word-break:break-word;}
+.vol-row.is-muted .vol-row-label,.vol-row.is-muted .vol-row-value{color:var(--text-faint);font-size:11.5px;}
+.vol-row.is-strong .vol-row-value{font-size:15px;font-weight:600;}
+.vol-regime{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px;}
+.vol-regime-name{
+  font-family:var(--font-mono);font-size:17px;font-weight:600;letter-spacing:.04em;color:var(--text);
+}
+.vol-regime.is-unavailable .vol-regime-name{color:var(--text-faint);}
+.vol-regime-note{font-size:12px;color:var(--text-dim);}
+.vol-history{
+  font-family:var(--font-mono);font-size:12px;letter-spacing:.08em;
+  display:inline-block;padding:3px 9px;border-radius:5px;margin-bottom:6px;
+  border:1px solid var(--border);color:var(--text-dim);
+}
+.vol-history.is-short{border-style:dashed;color:var(--gold);border-color:var(--gold);background:var(--gold-dim);}
+.vol-fallback{
+  margin:12px 0;padding:12px 14px;border:1px dashed var(--border);border-radius:9px;background:var(--bg-elev-2);
+}
+.vol-fallback-head{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--gold);margin-bottom:6px;
+}
+.vol-fallback-note{font-size:12px;color:var(--text-dim);line-height:1.6;margin-bottom:8px;}
+.vol-empty{font-family:var(--font-mono);font-size:12.5px;color:var(--text-faint);line-height:1.7;padding:6px 0;}
+.vol-diag{margin-top:12px;}
+.vol-diag summary{
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--text-faint);cursor:pointer;padding:6px 0;
+}
+.vol-diag summary:hover{color:var(--text-dim);}
+.vol-diag-body{padding:6px 0 2px;}
+.vol-diag-list{list-style:none;margin-top:10px;display:flex;flex-direction:column;gap:6px;}
+.vol-diag-list li{
+  font-size:11.5px;line-height:1.55;color:var(--text-dim);
+  padding-left:10px;border-left:2px solid var(--border);
+}
+.vol-diag-list li.is-error{border-left-color:var(--gold);color:var(--text);}
+.vol-diag-empty{font-size:11.5px;color:var(--text-faint);margin-top:10px;}
+.vol-footnote{font-size:11px;color:var(--text-faint);line-height:1.6;margin-top:12px;}
+@media(max-width:560px){
+  .vol-row{font-size:12px;}
+  .vol-regime-name{font-size:15.5px;}
+}
