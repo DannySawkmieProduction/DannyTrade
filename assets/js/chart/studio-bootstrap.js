@@ -595,6 +595,68 @@
           showAnalysisBanner(msg);
         });
       }
+
+      // Phase 0 (Volatility Sizing Unit) — mount the Indicator Lab card.
+      // Wired here, inside initialize().then(), rather than alongside
+      // CasPanel/InstrumentSelector above: by this point
+      // orchestrator.getState().lastCandles already holds the Studio's
+      // first REAL candle load, so the card's own first refresh() (run
+      // synchronously inside mount() itself) sees actual data instead
+      // of the initial empty array.
+      //
+      // getCandles below reads orchestrator.getState().lastCandles —
+      // the exact same state object every other panel in this file
+      // already reads (see wireCasPanel's getAnalysis above). No new
+      // fetch, no new data path: this can never create a second live
+      // candle pipeline because it never calls a provider, FyersService,
+      // or anything network-facing at all.
+      //
+      // Subscribes to the renderer's own 'timeframeChanged' event —
+      // already emitted by timeframe-manager.js on every symbol switch,
+      // timeframe switch, and auto-refresh cycle, and already a public,
+      // pre-existing API (renderer.on/.emit — see chart-renderer.js);
+      // this is the SAME event bus and the SAME .on() call the
+      // 'timeframeError' listener immediately above already uses, just
+      // a different event name. Nothing new is introduced; an existing,
+      // previously-unused hook is subscribed to.
+      //
+      // Deliberately placed AFTER the timeframeError wiring above, and
+      // wrapped in its own try/catch, so nothing here can ever prevent
+      // that listener — or the rest of chart boot — from completing.
+      // Touches no Risk, Analysis, AI, or Decision Panel state.
+      try{
+        var VolCard = DC.Lab && DC.Lab.VolatilityCard;
+        var indicatorLabPanel = document.getElementById('indicatorLabPanel');
+        if(VolCard && typeof VolCard.mount === 'function' && indicatorLabPanel){
+          var volatilityCardHandle = VolCard.mount({
+            container: indicatorLabPanel,
+            getCandles: function(){
+              var st = orchestrator.getState();
+              return st ? st.lastCandles : [];
+            },
+            getSymbol: function(){
+              var st = orchestrator.getState();
+              return st ? st.symbol : null;
+            }
+            // getTimeframe intentionally omitted: no live-updating public
+            // getter for the current timeframe exists on orchestrator
+            // (only the initial config value would be available, and it
+            // goes stale after a timeframe switch) without reaching into
+            // timeframe-manager.js, which this fix does not touch. The
+            // card already handles a missing getTimeframe gracefully
+            // (displays '—'), so this is an honest omission, not a
+            // silently wrong value.
+          });
+          if(s && s.renderer && typeof s.renderer.on === 'function'){
+            s.renderer.on('timeframeChanged', function(){
+              try{ volatilityCardHandle.refresh(); }
+              catch(refreshErr){ console.warn('[StudioBootstrap] VolatilityCard refresh failed:', refreshErr && refreshErr.message); }
+            });
+          }
+        }
+      } catch(volErr){
+        console.warn('[StudioBootstrap] VolatilityCard mount failed (Indicator Lab will stay empty):', volErr && volErr.message);
+      }
     });
   }
 
