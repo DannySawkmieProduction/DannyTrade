@@ -73,7 +73,10 @@ async function run(){
     'assets/js/lab/outcome-store.js', 'assets/js/lab/outcome-resolver.js', 'assets/js/lab/outcome-tracker-card.js',
     'assets/js/lab/research-data-service.js', 'assets/js/lab/research-data-card.js',
     'assets/js/lab/value-area-detector.js', 'assets/js/lab/value-area-card.js',
-    'assets/js/lab/strategy-lab.js'
+    'assets/js/lab/strategy-lab.js',
+    // Market Navigator — proven here to leave Analysis/Risk untouched too.
+    'assets/js/navigator/evidence-registry.js', 'assets/js/navigator/navigator-engine.js',
+    'assets/js/navigator/navigator-narrative.js', 'assets/js/navigator/market-navigator-card.js'
   ];
 
   function fixtureCandles(){
@@ -113,6 +116,13 @@ async function run(){
       instance.setActiveTab('valuearea'); instance.refresh();
       instance.setActiveTab('volatility');
       instance.destroy();
+
+      // Exercise the full Market Navigator stack too.
+      const NV = sb.window.DannyChart.Navigator;
+      const navReg = NV.EvidenceRegistry.create();
+      const navCollected = navReg.collect({ candles, currentPrice: last, analysisContext: ctx, lab: {}, atr: 25, candleDuration: 900 });
+      const navRes = NV.NavigatorEngine.analyze({ evidence: navCollected.evidence, currentPrice: last, atr: 25, candleDuration: 900 });
+      NV.NavigatorNarrative.describe(navRes);
     }
 
     const riskSnap = {};
@@ -143,7 +153,8 @@ async function run(){
     const sbLabOnly = loadFull(STRATEGY_LAB_FILES.concat(['assets/js/analysis/candle-utils.js']));
     assert(!sbLabOnly.window.DannyChart.Risk, 'loading only Strategy Lab creates no window.DannyChart.Risk namespace');
     const keys = Object.keys(sbLabOnly.window.DannyChart);
-    assert(keys.every(k => k === 'Lab' || k === 'Analysis'), 'and touches no other DannyChart namespace (present: ' + keys.join(', ') + ')');
+    assert(keys.every(k => k === 'Lab' || k === 'Analysis' || k === 'Navigator'),
+      'and touches no other DannyChart namespace — notably never Risk or any AI provider (present: ' + keys.join(', ') + ')');
   }
 
   section('4. No Strategy Lab file references the forbidden decision-layer vocabulary');
@@ -164,6 +175,7 @@ async function run(){
     PROTECTED.forEach(f => {
       const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
       assert(!/StrategyLab|strategy-lab|RangeCompressionCard|OutcomeTrackerCard|ResearchDataCard/.test(src), f + ' contains no reference to Strategy Lab');
+      assert(!/NavigatorEngine|MarketNavigatorCard|EvidenceRegistry|navigator-engine/.test(src), f + ' contains no reference to Market Navigator');
     });
   }
 
