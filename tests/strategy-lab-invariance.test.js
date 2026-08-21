@@ -72,6 +72,7 @@ async function run(){
     'assets/js/lab/range-compression-detector.js', 'assets/js/lab/range-compression-card.js',
     'assets/js/lab/outcome-store.js', 'assets/js/lab/outcome-resolver.js', 'assets/js/lab/outcome-tracker-card.js',
     'assets/js/lab/research-data-service.js', 'assets/js/lab/research-data-card.js',
+    'assets/js/lab/value-area-detector.js', 'assets/js/lab/value-area-card.js',
     'assets/js/lab/strategy-lab.js'
   ];
 
@@ -109,6 +110,7 @@ async function run(){
       instance.setActiveTab('range'); instance.refresh();
       instance.setActiveTab('outcome'); instance.refresh();
       instance.setActiveTab('research');
+      instance.setActiveTab('valuearea'); instance.refresh();
       instance.setActiveTab('volatility');
       instance.destroy();
     }
