@@ -92,7 +92,24 @@
       // is). ToggleController only mounts if overlayToggleContainer is
       // supplied — same opt-in pattern legendContainer already uses below.
       OverlayManager: window.DannyChart.OverlayManager,
-      ToggleController: window.DannyChart.ToggleController
+      ToggleController: window.DannyChart.ToggleController,
+
+      // Volatility Storm Engine — OPTIONAL by exactly the same DI rule
+      // as AnnotationNormalizer above: if any of these three scripts is
+      // not loaded, resolveAnnotations() produces byte-identical output
+      // to before and nothing else in this file changes behaviour. The
+      // engine is a pure function, the adapter is a pure translation,
+      // and the dashboard is a DOM panel — none of them touches the
+      // renderer, the analysis pipeline, or the Decision Panel.
+      VolatilityStormEngine: (window.DannyChart.Lab && window.DannyChart.Lab.VolatilityStormEngine) || null,
+      VolatilityStormAdapter: window.DannyChart.VolatilityStormAdapter || null,
+      VolatilityStormDashboard: window.DannyChart.VolatilityStormDashboard || null,
+      // Container the dashboard mounts into (expects position:relative,
+      // i.e. #lwChartWrap). Omit it and no dashboard is created; the
+      // chart drawings are unaffected either way.
+      volatilityDashboardContainer: null,
+      volatilityStormOptions: {},   // passed straight to the engine
+      volatilityStormVisuals: {}    // passed straight to the adapter
     }, userConfig);
 
     // Single shared application state: references to initialized
@@ -106,6 +123,11 @@
       timeframeManager: null, decisionPanel: null, autoRefreshManager: null,
       overlayManager: null, toggleControllerHandle: null,
       lastCandles: [], lastAnalysis: null,
+      // Volatility Storm: the mounted dashboard handle and the most
+      // recent engine result. `lastVolatilityStorm` is kept for the same
+      // reason `lastCandles` is — nothing else exposes it as a getter,
+      // and the Strategy Lab card reads it rather than recomputing.
+      volatilityDashboard: null, lastVolatilityStorm: null,
       initialized: false
     };
     const cleanups = []; // every DOM/event-bus unsubscribe, removed together in destroy()
@@ -242,8 +264,49 @@
       // actually valid. See annotation-normalizer.js.
       const normalizedAnalysis = config.AnnotationNormalizer ? config.AnnotationNormalizer.normalize(analysis) : analysis;
       const annotations = config.AnnotationModel ? config.AnnotationModel.buildAnnotations(candles, normalizedAnalysis) : [];
+      // Volatility Storm — a SEPARATE, additive producer feeding the
+      // SAME renderer through the SAME Annotation shape and the same
+      // setAnnotations() call the caller already makes. It is appended
+      // after the analysis annotations and never replaces, filters or
+      // reorders any of them; if it throws or is not loaded, the array
+      // above is returned exactly as it was.
+      const stormAnnotations = resolveVolatilityStorm(candles, timeframe);
       logDiagnostics(candles, analysis, annotations);
-      return annotations;
+      return annotations.concat(stormAnnotations);
+    }
+
+    /** Runs the Volatility Storm Engine over the same candle window and
+     *  returns its Annotation[]. Isolated in its own try/catch for the
+     *  same reason annotation-model.js isolates each section: a fault
+     *  here must cost the storm overlay only, never the chart. */
+    function resolveVolatilityStorm(candles, timeframe){
+      if(!config.VolatilityStormEngine || !config.VolatilityStormAdapter) return [];
+      try{
+        const result = config.VolatilityStormEngine.analyze(candles, config.volatilityStormOptions);
+        state.lastVolatilityStorm = result;
+        // Read-only handle for the Strategy Lab card and any future
+        // confluence consumer — published, not pushed. Nothing in the
+        // decision path reads it.
+        window.DannyChart.__lastVolatilityStorm = result;
+        const stormAnnotations = config.VolatilityStormAdapter.toAnnotations(result, candles, {
+          timeframe: timeframe,
+          visuals: config.volatilityStormVisuals
+        });
+        if(state.volatilityDashboard) state.volatilityDashboard.update(result);
+        if(state.renderer) state.renderer.emit('volatilityStormUpdated', {
+          result: result,
+          annotations: stormAnnotations.length,
+          // The engine's typed event list — this is the hook an alert
+          // layer would consume. DannyTrade has no alert delivery
+          // architecture today, so none is invented here.
+          events: result.events
+        });
+        console.log('[StudioChartInit] Volatility Storm:', config.VolatilityStormAdapter.describe(result, stormAnnotations));
+        return stormAnnotations;
+      } catch(err){
+        console.error('[StudioChartInit] Volatility Storm Engine failed — the storm overlay is skipped, every other overlay is unaffected:', err);
+        return [];
+      }
     }
 
     /* ---------------------------------------------------------------
@@ -308,6 +371,37 @@
             throw new Error('OverlayManager.create is not available');
           }
           return config.OverlayManager.create({ renderer: state.renderer });
+        });
+      }
+
+      // 5b. Volatility Storm dashboard — a DOM panel over the chart
+      //     wrap, mounted AFTER OverlayManager so it can bind to the
+      //     same visibility event stream every other overlay uses. The
+      //     canvas drawings (regime boxes, storm markers, expected-move
+      //     cone) are handled entirely by the 'volatility' renderer
+      //     layer and need nothing here; this step only adds the numeric
+      //     readout beside them. Failing this step costs the panel and
+      //     nothing else.
+      if(config.volatilityDashboardContainer && config.VolatilityStormDashboard){
+        state.volatilityDashboard = await safeStep('volatilityStormDashboard', async () => {
+          const handle = config.VolatilityStormDashboard.mount({
+            container: config.volatilityDashboardContainer,
+            position: config.volatilityStormVisuals && config.volatilityStormVisuals.dashboardPosition,
+            compact: !!(config.volatilityStormVisuals && config.volatilityStormVisuals.compact),
+            advanced: !!(config.volatilityStormVisuals && config.volatilityStormVisuals.advancedDashboard)
+          });
+          if(state.overlayManager){
+            // Same lockstep pattern trend-badge.js documented: one
+            // subscription to the manager's own event, no second
+            // visibility source of truth.
+            handle.setVisible(state.overlayManager.isVisible('volatilityStorm'));
+            const unsub = state.overlayManager.onVisibilityChange(payload => {
+              if(payload && payload.key === 'volatilityStorm') handle.setVisible(!!payload.visible);
+            });
+            if(typeof unsub === 'function') cleanups.push(unsub);
+          }
+          cleanups.push(() => handle.destroy());
+          return handle;
         });
       }
 

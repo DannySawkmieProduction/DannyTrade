@@ -214,6 +214,24 @@
       tfTabsContainer: document.getElementById('tfTabs'),
       decisionPanelContainer: document.getElementById('aiDecisionPanel'),
 
+      // Volatility Storm Engine. The chart DRAWINGS need nothing here —
+      // they travel through the same Annotation[] -> renderer path every
+      // other overlay uses, and are toggled by the 'volatilityStorm'
+      // overlay button. These three keys only configure the on-chart
+      // dashboard panel and the engine/visual defaults; omitting them
+      // leaves the drawings working and simply drops the panel.
+      volatilityDashboardContainer: document.getElementById('lwChartWrap'),
+      volatilityStormOptions: {
+        // Deliberately empty: every default in the engine's
+        // DEFAULT_OPTIONS is already the intended production value, and
+        // a second copy of them here would become a silent, competing
+        // source of truth the moment one of the two is edited.
+      },
+      volatilityStormVisuals: {
+        dashboardPosition: 'top-right',
+        advancedDashboard: false   // the four-estimator readout lives in the Strategy Lab STORM tab
+      },
+
       themeToggleBtn: document.getElementById('themeToggleBtn'),
       replayControls: {
         playBtn: document.getElementById('replayPlayBtn'),

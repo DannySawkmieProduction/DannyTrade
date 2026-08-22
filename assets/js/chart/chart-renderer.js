@@ -159,7 +159,27 @@
     VOLUME_EVENT: {
       shape: 'liquidity', legend: 'Volume Events',
       subtypeColor: { spike: '#FFA53C', climax: '#FF5C6C' }
-    }
+    },
+    // Volatility Storm Engine — the first two reuse EXISTING shapes
+    // verbatim ('rect' already drawn for ORDER_BLOCK/FVG, 'liquidity'
+    // already drawn for LIQUIDITY/VOLUME_EVENT), so they add zero new
+    // coordinate math and zero new paint() branches, exactly the path
+    // Phase 3 established for adding an overlay to this file.
+    VOLATILITY_REGIME: {
+      shape: 'rect', legend: 'Volatility Regime',
+      subtypeColor: { building: '#D4AF6A', storm: '#FF5C6C', aftermath: '#8D93A6' }
+    },
+    VOLATILITY_EVENT: {
+      shape: 'liquidity', legend: 'Storm Events',
+      subtypeColor: { watch: '#D4AF6A', delivered: '#35D399', fizzled: '#565C70', storm_confirmed: '#FF5C6C' }
+    },
+    // The ONE genuinely new shape in this file. A forward, widening
+    // statistical band cannot be expressed with any existing shape:
+    // every other shape is anchored to bar TIMES that exist in the
+    // series, and this projection extends past the last bar into
+    // logical (index) space where timeToCoordinate() has no answer.
+    // See the 'cone' branch in paint() and dc.logicalToX below.
+    VOLATILITY_CONE: { shape: 'cone', color: '#D4AF6A', legend: 'Expected Move Cone' }
   };
 
   /** type -> which layer it belongs to.
@@ -185,7 +205,13 @@
     // further changes to this file" beyond this mapping + the STYLES
     // entries above. No layer was renamed or repurposed.
     SUPPORT_RESISTANCE: 'supportResistance',
-    VOLUME_EVENT: 'volume'
+    VOLUME_EVENT: 'volume',
+    // Volatility Storm Engine — one new, independently-toggleable layer
+    // rather than reusing an existing one, so turning the storm overlay
+    // off can never hide an FVG, an order block or a liquidity level.
+    VOLATILITY_REGIME: 'volatility',
+    VOLATILITY_EVENT: 'volatility',
+    VOLATILITY_CONE: 'volatility'
   };
 
   // 'volume'/'trend'/'supportResistance' are intentionally empty today —
@@ -194,7 +220,13 @@
   // day one so Phase 5B's overlay buttons are fully functional as
   // toggles now, per the Chart -> Overlay Manager -> Layer Manager
   // architecture.
-  const LAYER_ORDER = ['marketStructure','premiumDiscount','orderBlocks','fvg','liquidity','volume','trend','supportResistance','tradeLevels','labels'];
+  // 'volatility' is deliberately FIRST: its regime boxes are wide,
+  // translucent background context, and painting them before every
+  // other layer keeps market structure, order blocks, FVGs, liquidity
+  // and trade levels on top of them rather than behind them. No
+  // existing layer was renamed, reordered relative to its neighbours,
+  // or repurposed — one entry was prepended.
+  const LAYER_ORDER = ['volatility','marketStructure','premiumDiscount','orderBlocks','fvg','liquidity','volume','trend','supportResistance','tradeLevels','labels'];
   // 'candlesticks' is a 7th, notional layer — it isn't drawn on the
   // canvas at all; showLayer/hideLayer('candlesticks') toggles the
   // TradingView series' own visibility instead.
@@ -367,6 +399,86 @@
         ctx.closePath(); ctx.fill();
         dc.registerHit(ann, x1-8, y-10, 16, 20);
         recordDiag({ x: x1, y: y, painted: true, insideViewport: isInsideViewport(x1, y, dc) });
+      }
+      else if(shape === 'cone'){
+        /* Forward statistical projection. Unlike every other shape, its
+         * right-hand extent lies BEYOND the last bar, where
+         * timeToCoordinate() has nothing to return — so the x positions
+         * come from dc.logicalToX (the library's own logical/index
+         * coordinate space, which extends past the data), falling back
+         * to bar-spacing arithmetic from the origin bar if the library
+         * declines a logical coordinate. Purely presentational: every
+         * price in metadata.points was computed by the engine. */
+        const m = ann.metadata || {};
+        const pts = Array.isArray(m.points) ? m.points : [];
+        const y0 = dc.priceToY(ann.price1);
+        if(!pts.length || y0 === null || !Number.isFinite(y0)){
+          recordDiag({ x: x1, y: y0, reason: !pts.length ? 'cone annotation carries no metadata.points' : 'priceToY(origin price) returned null/non-finite' });
+          return;
+        }
+        const originLogical = Number.isFinite(m.originIndex) ? m.originIndex : null;
+        function coneX(barsAhead){
+          if(originLogical !== null && typeof dc.logicalToX === 'function'){
+            const lx = dc.logicalToX(originLogical + barsAhead);
+            if(Number.isFinite(lx)) return lx;
+          }
+          return x1 + barsAhead * (Number.isFinite(dc.barSpacing) ? dc.barSpacing : 6);
+        }
+
+        // Build the polyline for each edge, starting at the origin price
+        // so the cone visibly emanates from the current bar.
+        const xs = [x1], u1 = [y0], l1 = [y0], u2 = [y0], l2 = [y0];
+        let anyFinite = false;
+        pts.forEach(p => {
+          const px = coneX(p.barsAhead);
+          const yU1 = dc.priceToY(p.upper1), yL1 = dc.priceToY(p.lower1);
+          const yU2 = dc.priceToY(p.upper2), yL2 = dc.priceToY(p.lower2);
+          xs.push(px);
+          u1.push(Number.isFinite(yU1) ? yU1 : null);
+          l1.push(Number.isFinite(yL1) ? yL1 : null);
+          u2.push(Number.isFinite(yU2) ? yU2 : null);
+          l2.push(Number.isFinite(yL2) ? yL2 : null);
+          if(Number.isFinite(px)) anyFinite = true;
+        });
+        if(!anyFinite){
+          recordDiag({ x: x1, y: y0, reason: 'no finite x coordinate could be resolved for the projection horizon' });
+          return;
+        }
+
+        function band(upper, lower, fillAlpha){
+          const n = Math.min(xs.length, upper.length, lower.length);
+          const top = [], bottom = [];
+          for(let i = 0; i < n; i++){
+            if(!Number.isFinite(xs[i]) || upper[i] === null || lower[i] === null) continue;
+            top.push([xs[i], upper[i]]); bottom.push([xs[i], lower[i]]);
+          }
+          if(top.length < 2) return;
+          ctx.globalAlpha = fillAlpha;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(top[0][0], top[0][1]);
+          for(let i = 1; i < top.length; i++) ctx.lineTo(top[i][0], top[i][1]);
+          for(let i = bottom.length - 1; i >= 0; i--) ctx.lineTo(bottom[i][0], bottom[i][1]);
+          ctx.closePath(); ctx.fill();
+          ctx.globalAlpha = Math.min(1, fillAlpha * 4);
+          ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+          [top, bottom].forEach(edge => {
+            ctx.beginPath(); ctx.moveTo(edge[0][0], edge[0][1]);
+            for(let i = 1; i < edge.length; i++) ctx.lineTo(edge[i][0], edge[i][1]);
+            ctx.stroke();
+          });
+        }
+
+        if(m.show2Sigma !== false) band(u2, l2, 0.05);
+        if(m.show1Sigma !== false) band(u1, l1, 0.12);
+
+        const lastX = xs[xs.length - 1], lastU = u1[u1.length - 1];
+        if(Number.isFinite(lastX) && lastU !== null){
+          dc.queueLabel(ann.label, Math.min(lastX + 6, dc.rightEdgeX), lastU, color, 'left', ann.strength);
+        }
+        dc.registerHit(ann, x1, Math.min(y0, Number.isFinite(lastU) ? lastU : y0) - 10,
+          Math.max(Number.isFinite(lastX) ? lastX - x1 : 40, 40), 20);
+        recordDiag({ x: x1, y: y0, painted: true, insideViewport: isInsideViewport(x1, y0, dc) });
       }
       else {
         recordDiag({ x: x1, reason: 'unrecognized shape "' + shape + '" for annotation type "' + ann.type + '"' });
@@ -582,6 +694,20 @@
         layerName: null,
         timeToX: t => timeScale.timeToCoordinate(t),
         priceToY: p => series.priceToCoordinate(p),
+        // Additive, read-only, used by the 'cone' shape ONLY. Logical
+        // coordinates are the library's own index space and, unlike
+        // timeToCoordinate(), they remain defined past the last bar —
+        // which is the only way to draw a FORWARD projection. Both are
+        // pure reads of the library's public API and are never used by
+        // any pre-existing shape branch, so no existing drawable's
+        // geometry can change because of them. Guarded so a library
+        // version without logicalToCoordinate() simply falls back to
+        // barSpacing arithmetic instead of throwing.
+        logicalToX: l => (typeof timeScale.logicalToCoordinate === 'function' ? timeScale.logicalToCoordinate(l) : null),
+        barSpacing: (function(){
+          try{ const o = timeScale.options ? timeScale.options() : null; return o && Number.isFinite(o.barSpacing) ? o.barSpacing : null; }
+          catch(_e){ return null; }
+        })(),
         // Phase 3 — `priority` is a new, optional 6th argument (existing
         // call sites without it default to 0, identical to before). It
         // is read from the annotation's own already-existing 0-1

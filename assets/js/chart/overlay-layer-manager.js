@@ -54,7 +54,16 @@
       // visibility event to trendBadgeInstance.setVisible().
       { key: 'volume',           label: 'Volume',               rendererLayer: 'volume',             color: STYLES.VOLUME_EVENT ? STYLES.VOLUME_EVENT.subtypeColor.spike : '#FFA53C', dataAvailable: true },
       { key: 'trend',            label: 'Trend',                rendererLayer: 'trend',              color: PENDING_COLOR, dataAvailable: true },
-      { key: 'supportResistance',label: 'Support & Resistance', rendererLayer: 'supportResistance',  color: STYLES.SUPPORT_RESISTANCE ? STYLES.SUPPORT_RESISTANCE.subtypeColor.support : '#4FD1E8', dataAvailable: true }
+      { key: 'supportResistance',label: 'Support & Resistance', rendererLayer: 'supportResistance',  color: STYLES.SUPPORT_RESISTANCE ? STYLES.SUPPORT_RESISTANCE.subtypeColor.support : '#4FD1E8', dataAvailable: true },
+      // Volatility Storm Engine — one button controlling the whole
+      // storm overlay (regime boxes, storm/watch/settlement markers and
+      // the expected-move cone all live in the single 'volatility'
+      // renderer layer). studio-chart-init.js additionally binds the
+      // on-chart dashboard panel to THIS key's visibility event, the
+      // same way trend-badge.js binds to 'trend' — so the button
+      // controls the drawings and the readout together, with one
+      // source of truth for visibility.
+      { key: 'volatilityStorm', label: 'Volatility Storm',    rendererLayer: 'volatility',          color: STYLES.VOLATILITY_REGIME ? STYLES.VOLATILITY_REGIME.subtypeColor.storm : '#FF5C6C', dataAvailable: true }
     ];
   }
 
