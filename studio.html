@@ -366,6 +366,15 @@
 <script defer src="assets/js/lab/research-data-card.js"></script>
 <script defer src="assets/js/lab/value-area-detector.js"></script>
 <script defer src="assets/js/lab/value-area-card.js"></script>
+<!-- Volatility Storm Engine. The engine reuses CandleUtils and the
+     Volatility Sizing Unit's Wilder ATR (rather than reimplementing
+     either), so it must load after both — it resolves them at
+     analyze() time, not at parse time, but keeping the tag order
+     honest keeps the dependency visible. The card is presentation
+     only and follows the same "detector, then its card" pairing every
+     other Lab module here already uses. -->
+<script defer src="assets/js/lab/volatility-storm-engine.js"></script>
+<script defer src="assets/js/lab/volatility-storm-card.js"></script>
 <script defer src="assets/js/lab/strategy-lab.js"></script>
 <!-- Market Navigator. Loads AFTER the analysis engines and Lab detectors
      (whose outputs its evidence contributors read) and before
@@ -388,6 +397,16 @@
 <script defer src="assets/js/chart/overlay-renderer.js"></script>
 <script defer src="assets/js/chart/overlay-manager.js"></script>
 <script defer src="assets/js/chart/toggle-controller.js"></script>
+<!-- Volatility Storm presentation layer. The adapter converts the
+     engine's result into the SAME Annotation shape every other overlay
+     uses (via AnnotationModel.createAnnotation, so annotation-model.js
+     itself needed no change), and the dashboard is a DOM panel over the
+     chart wrap. Both are OPTIONAL dependency-injected entries in
+     studio-chart-init.js: if either tag is removed, the chart behaves
+     exactly as it did before this feature existed. Must load before
+     studio-chart-init.js, which reads them when create() runs. -->
+<script defer src="assets/js/chart/volatility-storm-adapter.js"></script>
+<script defer src="assets/js/chart/volatility-storm-dashboard.js"></script>
 <script defer src="assets/js/chart/studio-chart-init.js"></script>
 <script defer src="assets/js/chart/http-utils.js"></script>
 <!-- ai-service.js MUST load before ai-connections.js / studio-bootstrap.js:
@@ -400,7 +419,6 @@
      regardless of the Worker's reported defaultProvider. -->
 <script defer src="assets/js/ai-service.js"></script>
 <script defer src="assets/js/chart/ai-connections.js"></script>
-<script defer src="assets/js/chart/ai-routing-policy.js"></script>
 <script defer src="assets/js/chart/studio-bootstrap.js"></script>
 <script defer src="assets/js/chart/studio-diagnostics.js"></script>
 <script defer src="assets/js/studio.js"></script>
