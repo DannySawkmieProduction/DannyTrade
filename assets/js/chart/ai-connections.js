@@ -16,7 +16,10 @@
   const PROVIDERS = [
     { id: 'gemini', label: 'Gemini' },
     { id: 'openrouter', label: 'OpenRouter' },
-    { id: 'ollama', label: 'Local Ollama (Qwen 2.5 1.5B)', local: true }
+    { id: 'ollama', label: 'Local Ollama (Qwen 2.5 1.5B)', local: true },
+    // Fourth provider. Worker-routed like Gemini/OpenRouter, so its
+    // status comes from /api/analyze/status with no extra probe.
+    { id: 'workersai', label: 'Cloudflare Workers AI' }
   ];
 
   function getStoredProviderId(){
@@ -132,12 +135,17 @@
             configured: !!(json.openrouter && json.openrouter.configured),
             model: (json.openrouter && json.openrouter.model) || null
           },
+          workersai: {
+            configured: !!(json.workersai && json.workersai.configured),
+            model: (json.workersai && json.workersai.model) || null
+          },
           defaultProvider: (json.defaultProvider === 'openrouter') ? 'openrouter' : 'gemini'
         };
       } catch(err){
         return {
           gemini: { configured: false },
           openrouter: { configured: false, model: null },
+          workersai: { configured: false, model: null },
           defaultProvider: 'gemini'
         };
       }
@@ -153,6 +161,7 @@
 
     // Local Ollama is opt-in unless the user explicitly selected it before.
     if(stored === 'ollama' && status.ollama && status.ollama.configured) return 'ollama';
+    if(stored === 'workersai' && status.workersai && status.workersai.configured) return 'workersai';
     if(stored === 'openrouter' && status.openrouter.configured) return 'openrouter';
     if(stored === 'gemini' && status.gemini.configured) return 'gemini';
 
@@ -208,7 +217,8 @@
         row.appendChild(dot);
 
         const name = document.createElement('span');
-        name.textContent = provider.label + (provider.id === 'openrouter' && providerStatus.model ? ` (${providerStatus.model})` : '');
+        name.textContent = provider.label +
+          (((provider.id === 'openrouter' || provider.id === 'workersai') && providerStatus.model) ? ` (${providerStatus.model})` : '');
         name.style.cssText = 'flex:1;font-size:0.85rem;';
         row.appendChild(name);
 
@@ -270,6 +280,7 @@
       render({
         gemini: { configured: true },
         openrouter: { configured: false, model: null },
+        workersai: { configured: false, model: null },
         ollama: { configured: false, model: OLLAMA_MODEL, local: true,
                   state: OLLAMA_STATE.CHECKING, message: 'Checking Ollama…' }
       });

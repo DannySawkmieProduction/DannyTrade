@@ -1003,7 +1003,59 @@
         escapeHtml(label) + ': <span style="color:#C8CDDA">' + escapeHtml(text) + '</span></div>';
     }
 
-    var aiRiskBlock = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>AI Provider &amp; Risk</b></div>';
+    /* ---- AI PROVIDER ROUTING (additive) ----
+       Extends the EXISTING diagnostics panel rather than creating a
+       second diagnostics system. Read-only: it reports what the
+       routing policy would decide and what the last worker call
+       actually did. It never changes provider selection, and it never
+       prints a secret — the Workers AI binding has no key, and only
+       the configured model NAME is shown. The purpose is to make it
+       obvious whether a request genuinely reached Workers AI. */
+    var routingBlock = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>AI Provider Routing</b></div>';
+    try{
+      var policy = DC.AIRoutingPolicy;
+      var selected = providerName;
+      routingBlock += kv('Selected provider', selected);
+      if(policy && typeof policy.describe === 'function'){
+        var pd2 = policy.describe();
+        var cls = (typeof policy.classify === 'function') ? policy.classify('chartStructure') : '—';
+        var resolved = (typeof policy.resolve === 'function')
+          ? policy.resolve({ taskClass: cls, explicitProvider: selected })
+          : null;
+        routingBlock += kv('Routing mode (chartStructure)', cls);
+        routingBlock += kv('Effective provider', resolved ? resolved.provider : '—');
+        routingBlock += kv('Resolution source', resolved ? resolved.source : '—',
+          (resolved && resolved.source === 'explicit') ? '#35D399' : '#8D93A6');
+        routingBlock += kv('ROUTINE lane', pd2.routineLane,
+          pd2.routineCallers.length ? '#35D399' : '#FFA53C');
+        routingBlock += kv('ROUTINE -> ', pd2.routineProvider);
+        routingBlock += kv('HIGH_QUALITY -> ', pd2.highQualityProvider);
+      } else {
+        routingBlock += '<div style="margin-top:2px;color:#FFA53C">Routing policy not loaded ' +
+          '(assets/js/chart/ai-routing-policy.js).</div>';
+      }
+      routingBlock += kv('Fallback', 'NONE — a failed provider is reported, never silently swapped');
+
+      // Workers AI reachability, straight from the last worker call.
+      if(aiDiag && aiDiag.provider === 'workersai'){
+        var wOk = aiDiag.workerOk && wd && wd.errorCategory === 'none';
+        routingBlock += kv('Workers AI status', wOk ? 'OK' : ('ERROR — ' + ((wd && wd.errorCategory) || 'unknown')),
+          wOk ? '#35D399' : '#FF5C6C');
+        routingBlock += kv('Workers AI model', (wd && wd.configuredModel) || '—');
+        if(wd && wd.digestChars != null){
+          routingBlock += kv('Digest sent (chars)', wd.digestChars);
+        }
+      } else {
+        routingBlock += kv('Workers AI status',
+          'NOT EXERCISED THIS SESSION — last worker call used ' + ((aiDiag && aiDiag.provider) || 'no provider'), '#FFA53C');
+      }
+    } catch(_routingErr){
+      routingBlock += '<div style="margin-top:2px;color:#FF5C6C">Routing diagnostics unavailable: ' +
+        escapeHtml(String((_routingErr && _routingErr.message) || _routingErr)) + '</div>';
+    }
+
+    var aiRiskBlock = routingBlock +
+      '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>AI Provider &amp; Risk</b></div>';
 
     if(!aiDiag){
       aiRiskBlock += '<div style="margin-top:2px;color:#FFA53C">No worker AI call recorded yet in this page session. ' +
