@@ -37,6 +37,9 @@
 
 import { handleFyersLogin, handleFyersCallback, handleFyersCandles, handleFyersResearchCandles, handleFyersOptionChain, handleFyersContracts } from './fyers.js';
 import { handleOpenRouterAnalyze } from './openrouter.js';
+// Fourth AI provider (additive). Self-contained, exactly like
+// ./openrouter.js — adding this import changes nothing above.
+import { handleWorkersAiAnalyze } from './workers-ai.js';
 import { fetchWithRetry } from './http-utils.js';
 
 /* ---------------------------------------------------------------
@@ -155,6 +158,14 @@ export default {
           ok: true,
           gemini: { configured: !!env.GEMINI_API_KEY },
           openrouter: { configured: !!(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL), model: env.OPENROUTER_MODEL || null },
+          // Workers AI needs no secret — it is reached through the
+          // Worker's own [ai] binding, so "configured" means the
+          // binding was deployed AND a model name is set. Reporting
+          // the model name is safe; a binding is not a credential.
+          workersai: {
+            configured: !!(env.AI && typeof env.AI.run === 'function' && env.WORKERS_AI_MODEL),
+            model: env.WORKERS_AI_MODEL || null
+          },
           // Reports the server's configured default (AI_PROVIDER in
           // wrangler.toml) — not a live decision, just surfacing the
           // same config value handleAnalyze() itself falls back to when
@@ -349,6 +360,14 @@ async function handleAnalyze(request, env) {
 
   if (selectedProvider === 'openrouter') {
     return handleOpenRouterAnalyze(type, payload || {}, env);
+  }
+
+  // Cloudflare Workers AI — fourth provider. Reached ONLY when the
+  // caller explicitly asked for it (or AI_PROVIDER is set to it).
+  // Purely additive: the Gemini branch below and the OpenRouter branch
+  // above are byte-for-byte unchanged.
+  if (selectedProvider === 'workersai') {
+    return handleWorkersAiAnalyze(type, payload || {}, env);
   }
 
   if (selectedProvider !== 'gemini') {
