@@ -89,8 +89,16 @@ console.log('\n[UI] Both rows mount, expose test IDs + ON/OFF labels, and stay i
   const legendHandle=DC.Legend.mount(legendContainer, renderer);
   const toggleHandle=DC.ToggleController.mount(toggleContainer, om);
 
-  // Overlay Toggle Bar renders all 10 overlay keys.
-  assert(toggleContainer.children.length===10, 'Toggle Bar rendered 10 overlay buttons');
+  // Overlay Toggle Bar renders every overlay key the registry defines.
+  // The count is READ from the registry rather than hardcoded, so an
+  // additive overlay (e.g. Volatility Storm) does not turn a genuine
+  // "the bar renders every button" assertion into a maintenance chore
+  // that gets edited every time the product grows. The point of the
+  // assertion is one button per registered key, and that is now what it
+  // actually checks.
+  const expectedButtons = DC.OverlayLayerManager.getLayerDefs().length;
+  assert(toggleContainer.children.length===expectedButtons, 'Toggle Bar rendered one button per registered overlay key ('+expectedButtons+')');
+  assert(!!findByTestId(toggleContainer,'overlay-toggle-volatilityStorm'), 'the Volatility Storm overlay has its own toggle button');
   assert(legendContainer.children.length===6, 'Legend rendered its 6 entries');
 
   const tbFvg=findByTestId(toggleContainer,'overlay-toggle-fvg');

@@ -160,7 +160,14 @@ section('8. REAL SEAM — real StrategyLab controller + real Value Area card + r
   const SL = sb.window.DannyChart.Lab.StrategyLab;
   assert(!!SL, 'the real StrategyLab controller loaded');
   assert(SL.TABS.some(t => t.key === 'valuearea'), 'a "valuearea" tab is registered in the real controller');
-  assert(SL.TABS.length === 5, 'exactly five tabs exist — the new one was added, none replaced');
+  // Tab count is asserted as "every previously-registered tab is still
+  // present", not as a fixed number: the original intent was "the new
+  // one was ADDED, none replaced", and that intent survives further
+  // additive tabs (Volatility Storm) while a hardcoded 5 would not.
+  ['volatility','range','outcome','research','valuearea'].forEach(k =>
+    assert(SL.TABS.some(t => t.key === k), 'tab "'+k+'" is still registered — nothing was replaced'));
+  assert(SL.TABS.length >= 5, 'the tab set only ever grew (' + SL.TABS.length + ' tabs)');
+  assert(new Set(SL.TABS.map(t => t.key)).size === SL.TABS.length, 'no duplicate tab keys');
 
   const container = makeEl('div');
   // The controller deliberately passes only container/getCandles/getSymbol
