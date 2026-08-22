@@ -61,6 +61,25 @@ binding = "ASSETS"
 GEMINI_MODEL = "gemini-3-flash-preview"
 OPENROUTER_MODEL = "openai/gpt-oss-20b:free"
 
+# Cloudflare Workers AI — the one place the Workers AI model is named.
+# worker/workers-ai.js reads env.WORKERS_AI_MODEL fresh on every
+# request and never hardcodes a model, so switching models is a
+# one-line change here plus a redeploy — no code edit.
+#
+# @cf/meta/llama-3.3-70b-instruct-fp8-fast was verified against
+# Cloudflare's live model catalogue before this change:
+#   - explicitly listed as REMAINING ACTIVE after the 30 May 2026
+#     Workers AI deprecation wave (the "-fast variants remain active"
+#     list), so this is not a model about to be retired
+#   - 24,000-token context window — smaller than OpenRouter's 131K,
+#     which is precisely why worker/workers-ai.js sends a bounded
+#     deterministic digest instead of the raw 180-candle array
+#   - function calling and batch inference supported
+#   - $0.29 per M input tokens / $2.25 per M output tokens
+# A cheaper routine alternative, also confirmed still active, is
+# @cf/meta/llama-3.1-8b-instruct-fast — change this line only.
+WORKERS_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
 # Server-side default provider when a request doesn't specify one
 # explicitly. An explicit client choice (from the AI Provider UI)
 # always overrides this — this is only the fallback when nothing was
@@ -79,3 +98,15 @@ AI_PROVIDER = "openrouter"
 [[kv_namespaces]]
 binding = "FYERS_TOKENS"
 id = "9bcd786979a94628826c9c35ff08fa01"
+
+# Cloudflare Workers AI binding — the ONLY structural addition this
+# phase makes to the Worker's configuration. Workers AI has no API
+# key: access is granted by this binding, which exists only inside the
+# Worker isolate and is never visible to the browser. Limited by
+# Cloudflare to one AI binding per Worker.
+#
+# IMPORTANT: a binding is deployment-time configuration. A git push
+# does NOT create it — the Worker must be redeployed with
+# `wrangler deploy` before provider "workersai" can work live.
+[ai]
+binding = "AI"
