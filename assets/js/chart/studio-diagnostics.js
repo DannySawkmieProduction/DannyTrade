@@ -545,6 +545,93 @@
       }
     })();
 
+    // ---- NAVIGATOR ASSET PROBE ----
+    // Reports each Navigator production file SEPARATELY across four
+    // distinct states, deliberately never collapsing them into
+    // "MISSING":
+    //   TAG_ABSENT        the <script> tag is not in the deployed HTML
+    //                     -> the deployed studio.html is stale
+    //   HTTP_<status>     tag present but the server will not serve it
+    //                     -> the file never reached the asset bundle
+    //   LOADED_NO_GLOBAL  fetched fine but registered no global
+    //                     -> the script threw while executing
+    //   GLOBAL_PRESENT    served and registered correctly
+    //
+    // The HTTP status is what separates a stale/incomplete deployment
+    // from a runtime exception, and it is NOT knowable from the JS
+    // runtime alone — so one real request per file is issued, only
+    // when this panel is opened. Diagnostic-only; nothing else in the
+    // app makes these calls.
+    var navAssetBlock = (function(){
+      var NAV_ASSETS = [
+        { file: 'assets/js/navigator/evidence-registry.js', global: 'EvidenceRegistry' },
+        { file: 'assets/js/navigator/navigator-engine.js', global: 'NavigatorEngine' },
+        { file: 'assets/js/navigator/navigator-narrative.js', global: 'NavigatorNarrative' },
+        { file: 'assets/js/navigator/market-navigator-card.js', global: 'MarketNavigatorCard' }
+      ];
+      var NavNs = (window.DannyChart && window.DannyChart.Navigator) || {};
+
+      // Which Navigator <script> tags are actually in this document?
+      var tagSrcs = [];
+      try{
+        if(typeof document.querySelectorAll === 'function'){
+          var tags = document.querySelectorAll('script[src*="assets/js/navigator/"]');
+          for(var ti = 0; ti < tags.length; ti++){
+            var s = tags[ti].getAttribute ? tags[ti].getAttribute('src') : tags[ti].src;
+            if(s) tagSrcs.push(String(s));
+          }
+        }
+      } catch(_e){ /* leave tagSrcs empty */ }
+
+      var rows = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Navigator asset probe</b></div>';
+
+      NAV_ASSETS.forEach(function(a, idx){
+        var tagPresent = tagSrcs.some(function(s){ return s.indexOf(a.file) !== -1; });
+        var globalPresent = !!NavNs[a.global];
+        var state, colour;
+        if(!tagPresent){ state = 'TAG_ABSENT'; colour = '#FF5C6C'; }
+        else if(globalPresent){ state = 'GLOBAL_PRESENT'; colour = '#35D399'; }
+        else { state = 'LOADED_NO_GLOBAL'; colour = '#FF5C6C'; }
+
+        rows += '<div id="dtNavAsset' + idx + '" style="margin-top:3px;color:' + colour + '">' +
+                escapeHtml(a.file.split('/').pop()) + ': ' + state +
+                ' &nbsp;|&nbsp; expects DannyChart.Navigator.' + escapeHtml(a.global) +
+                ' &nbsp;|&nbsp; tag ' + (tagPresent ? 'PRESENT' : 'ABSENT') +
+                ' &nbsp;|&nbsp; global ' + (globalPresent ? 'PRESENT' : 'ABSENT') +
+                ' &nbsp;|&nbsp; <span id="dtNavHttp' + idx + '">HTTP_UNKNOWN (probe not available)</span></div>';
+      });
+
+      // Async HTTP status, filled in when each probe resolves. The
+      // panel is already rendered by then, so each row is patched in
+      // place rather than blocking the whole panel on the network.
+      if(typeof window.fetch === 'function'){
+        NAV_ASSETS.forEach(function(a, idx){
+          try{
+            window.fetch(a.file, { method: 'GET', cache: 'no-store' })
+              .then(function(res){
+                var el = document.getElementById('dtNavHttp' + idx);
+                if(!el) return;
+                el.textContent = 'HTTP_' + res.status + (res.ok ? ' (served)' : ' (NOT SERVED — this file is not in the deployed bundle)');
+              })
+              .catch(function(err){
+                var el = document.getElementById('dtNavHttp' + idx);
+                if(el) el.textContent = 'HTTP_ERROR (' + ((err && err.message) ? err.message : 'request failed') + ')';
+              });
+          } catch(_e){ /* a throwing fetch leaves the HTTP_UNKNOWN default */ }
+        });
+      }
+
+      var anyProblem = NAV_ASSETS.some(function(a){
+        return !tagSrcs.some(function(s){ return s.indexOf(a.file) !== -1; }) || !NavNs[a.global];
+      });
+      if(anyProblem){
+        rows += '<div style="margin-top:5px;color:#FFA53C">TAG_ABSENT on every row means the deployed studio.html is stale. ' +
+                'Tags present with HTTP 404 means the four files never reached the deployed asset bundle — most likely the new ' +
+                'assets/js/navigator/ directory was not created. LOADED_NO_GLOBAL means the file was served but threw while running.</div>';
+      }
+      return rows;
+    })();
+
     var stratLabBlock =
       '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #232838"><b>Strategy Lab Runtime</b></div>' +
       LAB_MODULE_NAMES.reduce(function(acc, name){
@@ -1013,6 +1100,7 @@
       '<div style="color:' + statusColor + '">Worker/provider: ' + escapeHtml(providerName) + ' — last call: ' + status.status + (status.message ? ' — ' + escapeHtml(status.message) : '') + '</div>' +
       stratLabBlock +
       volumeBlock +
+      navAssetBlock +
       navBlock +
       // Phase 6 OpenRouter verification — placed FIRST (immediately under
       // the status line) so it is visible without scrolling on a phone.
